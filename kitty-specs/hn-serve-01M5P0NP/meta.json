@@ -11,6 +11,8 @@
   "purpose_context": "Hubnot checks policy and evidence only on the client today, so any credential with push access can move main directly, and multi-agent use needs manual per-actor and per-proposal selection. hn serve is an optional server that maps SSH keys to Hubnot actors, enforces governed protected-branch updates, advances main only to tested commits, fans out trusted facts to clients, and serves Git LFS objects, while every existing workflow over an ordinary Git remote keeps working.",
   "purpose_tldr": "Add an optional hn serve command that hosts repositories over SSH and refuses protected-branch updates that lack Hubnot governance evidence.",
   "slug": "hn-serve-01M5P0NP",
+  "source_description": "Mission brief ../notes/mission-1-hn-serve-brief.md ingested by spec-kitty intake (brief_hash 751c75f89dd92dcfd3e56dcfba6c5c42eafb17479cb5916c116304b10a01bada); specified non-interactively with brief design decisions as maintainer answers.",
   "target_branch": "mission/hn-serve",
-  "topology": "coord"
+  "topology": "coord",
+  "vcs": "git"
 }
