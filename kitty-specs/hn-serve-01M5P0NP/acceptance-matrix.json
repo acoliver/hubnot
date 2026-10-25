@@ -18,10 +18,10 @@
       "criterion_id": "FR-002",
       "description": "Verify FR-002 is satisfied",
       "proof_type": "automated_test",
-      "evidence": "TestServeAdminCreateImportsOnlyBranchesAndTags, TestServeAdminCreateRefusalsLeaveNothingBehind, TestServeAdminRepoListAndShow, TestServeAdminRepoSet; gate log /home/acoliver/projects/appaday/gitium/.scratch/accept/hn-serve-independent-61f7d39/race.log",
+      "evidence": "TestServeAdminCreateImportsOnlyBranchesAndTags; TestServeAdminCreateRefusalsLeaveNothingBehind; TestServeAdminRepoListAndShow; TestServeAdminRepoSet; gate log /home/acoliver/projects/appaday/gitium/.scratch/accept/race.log; candidate 151b7be421b507596728c507370adcb5b14ccfdf",
       "pass_fail": "pass",
       "verified_by": "llxprt-gpt-sol-high",
-      "verified_at": "2026-10-25T19:08:41.113519+00:00",
+      "verified_at": "2026-10-25T20:10:20.622753+00:00",
       "notes": "TODO: replace with a real acceptance criterion"
     },
     {
