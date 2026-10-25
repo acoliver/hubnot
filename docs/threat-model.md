@@ -101,3 +101,81 @@ Machine identity discovery reads and validates existing active or legacy identit
 state without writing private keyring files or Git refs. It never performs the
 legacy migration retained by default human identity commands. Invalid private
 state yields a typed public error without exposing private fields or paths.
+
+## hn serve trust boundary
+
+`hn serve` hosts repositories for a dedicated, unprivileged Unix account. This
+section describes what a connecting client can and cannot influence. The
+operator guide is [serve-v0.md](serve-v0.md).
+
+**Authentication and session restrictions.** OpenSSH authenticates every
+connection; `hn serve` implements no SSH protocol of its own. Each managed
+`authorized_keys` entry has the form
+`restrict,command="ABS_HN serve git --key FINGERPRINT" KEY`. The `restrict`
+option disables port, agent and X11 forwarding, terminal allocation and
+execution of `~/.ssh/rc`, and the forced command replaces whatever the client
+asked to run. The client's request reaches the forced command only as the
+`SSH_ORIGINAL_COMMAND` variable
+([sshd(8), AUTHORIZED_KEYS FILE FORMAT](https://man.openbsd.org/sshd.8#AUTHORIZED_KEYS_FILE_FORMAT)).
+The forced command names a fingerprint only. The actor is looked up in the key
+registry on every connection, so removing a binding takes effect at the next
+connection.
+
+**Closed command grammar.** `hn serve git` accepts `git-upload-pack`,
+`git-receive-pack` and `git-lfs-transfer` requests for one repository name, in
+a fixed grammar with single spaces as the only separators. It matches the
+request byte by byte and never hands it to a shell, so quoting, command
+substitution, separators and extra arguments cannot add a command. Requests
+with control bytes, non-ASCII bytes, double quotes, backslashes, `$`,
+backticks, `;`, `|`, `&`, `<`, `>`, more than one path segment or an unknown
+command are refused with `unsupported-command` before Git starts. A refusal
+writes only to stderr, so the Git protocol stream on stdout stays empty.
+
+**Environment built from scratch.** Git and the hooks receive only `PATH`,
+`HOME`, `LANG=C`, `GIT_CONFIG_NOSYSTEM=1`, a `TMPDIR` inside the server state,
+`GIT_PROTOCOL` in its exact `version=N` form, and `HN_SERVE_ACTOR`,
+`HN_SERVE_KEY` and `HN_SERVE_REPOSITORY` taken from the registry. Every other
+variable from the session is dropped, including any `GIT_DIR`, `GIT_CONFIG_*`
+or `LD_PRELOAD`. A client therefore cannot choose the actor that the hooks
+attribute a push to. OpenSSH adds a second barrier: under `restrict` and the
+default `PermitUserEnvironment no`, a client cannot set session variables
+apart from those the administrator allows with `AcceptEnv`. The test suite uses
+`HN_INTERNAL_TESTING=1` to pass `HN_TEST_SERVE_*` variables through; those
+variables only come from the server account's own session, and every reader of
+them also requires `HN_INTERNAL_TESTING=1`.
+
+**Server configuration wins over repository configuration.** A push runs
+`git receive-pack` with `core.hooksPath`, `receive.fsckObjects` and
+`receive.advertisePushOptions` given as `-c` options. Git gives command-line
+settings precedence over the hosted repository's `config`, and
+`GIT_CONFIG_NOSYSTEM=1` keeps the system file out, so a hosted repository
+cannot disable the push checks or object checking. Fetches run
+`git upload-pack --strict`. Administration commands never write hooks or
+`core.hooksPath` into a hosted repository.
+
+**Attribution without authority.** A key binding records which actor a
+connection speaks for and lets that key fetch and push. It grants no policy
+role. Maintainer, reviewer and runner roles come only from signed policy
+documents, the server signs no facts, and its verdicts are never evidence a
+client relies on.
+
+**Least privilege.** Every `hn serve` command refuses to run as uid 0 before it
+reads any state. The server writes only below `$HOME/.hn-serve/` and to the
+managed block of `$HOME/.ssh/authorized_keys`. Before each session it validates
+the whole layout without writing, and any defect, such as a hosted repository
+directory replaced by a symbolic link, refuses every session. The session wrapper itself writes only the repository
+lock file; during a push, Git and the hooks write to the hosted repository and
+its state directory.
+
+**Serialized pushes.** A push holds an exclusive lock on
+`state/repos/NAME/lock` from before `git receive-pack` starts until it exits,
+so the advertised tips, the hook's verdict and the ref update form one step per
+repository. A push that waits more than 120 seconds for the lock is refused
+with `repository-busy`, which bounds how long a slow upload can delay other
+pushes. Fetches never take the lock. The lock descriptor is not inherited by
+Git or the hooks, and the hooks never take the lock themselves because the
+session already holds it.
+
+The rules that decide which ref updates an accepted push may make are in the
+serve guide under
+[Push verdicts and ref classes](serve-v0.md#push-verdicts-and-ref-classes).

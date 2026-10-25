@@ -798,6 +798,22 @@ func loadServeRegistry(layout serveLayout) (serveRegistry, error) {
 	return registry, nil
 }
 
+// lookupServeKey returns the binding for fingerprint in a registry that
+// loadServeRegistry or decodeServeRegistry validated, which keeps the keys
+// sorted and unique. A malformed fingerprint is never bound.
+func lookupServeKey(registry serveRegistry, fingerprint string) (serveKeyBinding, bool) {
+	if !validServeFingerprint(fingerprint) {
+		return serveKeyBinding{}, false
+	}
+	index, found := slices.BinarySearchFunc(registry.Keys, fingerprint, func(binding serveKeyBinding, target string) int {
+		return strings.Compare(binding.Fingerprint, target)
+	})
+	if !found {
+		return serveKeyBinding{}, false
+	}
+	return registry.Keys[index], true
+}
+
 // encodeServeRegistry sorts the bindings by fingerprint, validates the
 // result and returns the bytes saveServeRegistry stores. Encoding the
 // decoded form of these bytes yields them again.

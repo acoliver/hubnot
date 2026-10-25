@@ -257,3 +257,219 @@ func serveHarnessEntries(t *testing.T, directory string) []string {
 	}
 	return names
 }
+
+// SSH command shim and client helpers (WP06). A client's git and hn reach
+// the server through GIT_SSH_COMMAND, which points at a POSIX sh script that
+// plays sshd: it finds the managed authorized_keys entry for its key and
+// runs that entry's exact command= value under env -i, the way sshd runs a
+// forced command.
+
+// serveHarnessShellQuote quotes value as one single-quoted sh word.
+func serveHarnessShellQuote(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", `'\''`) + "'"
+}
+
+// serveHarnessShim writes the SSH shim for key and returns its path.
+// extraEnv is added to the forced command's environment, after HOME, PATH,
+// SSH_ORIGINAL_COMMAND and, when the client sets it, GIT_PROTOCOL; it stands
+// in for variables the server account's sshd session would carry.
+//
+// The shim skips the ssh options Git may pass (-o VALUE, -p PORT, -l USER,
+// -i FILE, -F FILE, -4, -6, -T), takes the host and requires exactly one
+// more argument, the remote command. An unknown key exits 255 with
+// "Permission denied (publickey).", as sshd refuses one, and so does an
+// entry that does not start with restrict,command=.
+func serveHarnessShim(t *testing.T, h *serveHarness, key serveTestKey, extraEnv map[string]string) string {
+	t.Helper()
+	fields := strings.Fields(key.PublicLine)
+	if len(fields) < 2 {
+		t.Fatalf("malformed test key line %q", key.PublicLine)
+	}
+	canonical := fields[0] + " " + fields[1]
+	names := make([]string, 0, len(extraEnv))
+	for name := range extraEnv {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	var extra strings.Builder
+	for _, name := range names {
+		extra.WriteString(" " + serveHarnessShellQuote(name+"="+extraEnv[name]))
+	}
+	base := "env -i HOME=" + serveHarnessShellQuote(h.Home) +
+		" PATH=" + serveHarnessShellQuote(os.Getenv("PATH")) +
+		` SSH_ORIGINAL_COMMAND="$request"`
+	authorizedKeys := serveHarnessShellQuote(filepath.Join(h.Home, ".ssh", "authorized_keys"))
+	script := `#!/bin/sh
+# hn serve test SSH shim; see serveHarnessShim.
+while [ $# -gt 0 ]; do
+	case $1 in
+	-o|-p|-l|-i|-F)
+		if [ $# -lt 2 ]; then
+			echo "ssh shim: $1 needs a value" >&2
+			exit 255
+		fi
+		shift 2 ;;
+	-o?*|-p?*|-l?*|-i?*|-F?*|-4|-6|-T)
+		shift ;;
+	-*)
+		echo "ssh shim: unsupported option $1" >&2
+		exit 255 ;;
+	*)
+		break ;;
+	esac
+done
+if [ $# -ne 2 ]; then
+	echo "ssh shim: want HOST COMMAND, got $# arguments" >&2
+	exit 255
+fi
+request=$2
+found=
+if [ -f ` + authorizedKeys + ` ]; then
+	while IFS= read -r line || [ -n "$line" ]; do
+		case $line in
+		*` + serveHarnessShellQuote(" "+canonical+" ") + `*|*` + serveHarnessShellQuote(" "+canonical) + `)
+			found=$line
+			break ;;
+		esac
+	done < ` + authorizedKeys + `
+fi
+if [ -z "$found" ]; then
+	echo "Permission denied (publickey)." >&2
+	exit 255
+fi
+case $found in
+'restrict,command="'*) ;;
+*)
+	echo "ssh shim: authorized_keys entry does not start with restrict,command=" >&2
+	exit 255 ;;
+esac
+forced=${found#restrict,command=\"}
+forced=${forced%%\"*}
+if [ -n "${GIT_PROTOCOL+set}" ]; then
+	exec ` + base + ` GIT_PROTOCOL="$GIT_PROTOCOL"` + extra.String() + ` /bin/sh -c "$forced"
+fi
+exec ` + base + extra.String() + ` /bin/sh -c "$forced"
+`
+	path := filepath.Join(t.TempDir(), "ssh-shim")
+	if err := os.WriteFile(path, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// serveHarnessClientEnv is one participant's client environment: a fresh
+// HOME with a user name and email, and Git's SSH transport pointed at the
+// shim for one key.
+type serveHarnessClientEnv struct {
+	t      *testing.T
+	Home   string
+	Shim   string
+	Env    []string
+	Binary string
+}
+
+// serveHarnessClient builds the client environment for key. extraEnv goes
+// to the shim (see serveHarnessShim), not to the client.
+func serveHarnessClient(t *testing.T, h *serveHarness, key serveTestKey, extraEnv map[string]string) serveHarnessClientEnv {
+	t.Helper()
+	shim := serveHarnessShim(t, h, key, extraEnv)
+	home := filepath.Join(t.TempDir(), "client-home")
+	if err := os.Mkdir(home, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	config := "[user]\n\tname = Serve Client\n\temail = serve-client@hn.invalid\n[init]\n\tdefaultBranch = main\n"
+	if err := os.WriteFile(filepath.Join(home, ".gitconfig"), []byte(config), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return serveHarnessClientEnv{
+		t:    t,
+		Home: home,
+		Shim: shim,
+		Env: []string{
+			"HOME=" + home,
+			"PATH=" + os.Getenv("PATH"),
+			"GIT_SSH_COMMAND=" + serveHarnessShellQuote(shim),
+			"GIT_SSH_VARIANT=ssh",
+			"GIT_CONFIG_NOSYSTEM=1",
+			"GIT_TERMINAL_PROMPT=0",
+			"LANG=C",
+		},
+		Binary: h.Binary,
+	}
+}
+
+// serveHarnessCloneURL is the SSH URL of a hosted repository. The shim
+// ignores the host, so the user and host only have to look right.
+func serveHarnessCloneURL(name string) string {
+	return "ssh://hn-serve@localhost/" + name + ".git"
+}
+
+// exec runs program in dir with the client environment and returns its
+// combined output and exit status.
+func (c serveHarnessClientEnv) exec(dir, program string, args ...string) (string, int) {
+	c.t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	command := exec.CommandContext(ctx, program, args...)
+	command.Dir = dir
+	if command.Dir == "" {
+		command.Dir = c.Home
+	}
+	command.Env = c.Env
+	command.Stdin = strings.NewReader("")
+	output, err := command.CombinedOutput()
+	if ctx.Err() != nil {
+		c.t.Fatalf("%s %s timed out: %v\n%s", program, strings.Join(args, " "), ctx.Err(), output)
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		return string(output), exitErr.ExitCode()
+	}
+	if err != nil {
+		c.t.Fatalf("%s %s: %v\n%s", program, strings.Join(args, " "), err, output)
+	}
+	return string(output), 0
+}
+
+// Git runs client git in dir and fails the test unless it exits 0.
+func (c serveHarnessClientEnv) Git(dir string, args ...string) string {
+	c.t.Helper()
+	output, status := c.exec(dir, "git", args...)
+	if status != 0 {
+		c.t.Fatalf("git %s exited %d:\n%s", strings.Join(args, " "), status, output)
+	}
+	return output
+}
+
+// GitFailure runs client git in dir and fails the test if it exits 0.
+func (c serveHarnessClientEnv) GitFailure(dir string, args ...string) string {
+	c.t.Helper()
+	output, status := c.exec(dir, "git", args...)
+	if status == 0 {
+		c.t.Fatalf("git %s unexpectedly succeeded:\n%s", strings.Join(args, " "), output)
+	}
+	return output
+}
+
+// Hn runs the client's hn in dir and fails the test unless it exits 0.
+func (c serveHarnessClientEnv) Hn(dir string, args ...string) string {
+	c.t.Helper()
+	output, status := c.exec(dir, c.Binary, args...)
+	if status != 0 {
+		c.t.Fatalf("hn %s exited %d:\n%s", strings.Join(args, " "), status, output)
+	}
+	return output
+}
+
+// HnFailure runs the client's hn in dir and fails the test if it exits 0.
+func (c serveHarnessClientEnv) HnFailure(dir string, args ...string) string {
+	c.t.Helper()
+	output, status := c.exec(dir, c.Binary, args...)
+	if status == 0 {
+		c.t.Fatalf("hn %s unexpectedly succeeded:\n%s", strings.Join(args, " "), output)
+	}
+	return output
+}

@@ -25,9 +25,9 @@ type serveRoute struct {
 }
 
 // serveRouteFor maps a subcommand to its route. repo and key use
-// administration mode; git (WP06) and hook (WP07) add session-mode cases:
+// administration mode; git uses session mode, and hook (WP07) adds the
+// other session-mode case:
 //
-//	case "git":  return serveRoute{mode: serveSessionValidation, run: cmdServeGit}, true
 //	case "hook": return serveRoute{mode: serveSessionValidation, run: cmdServeHook}, true
 func serveRouteFor(subcommand string) (serveRoute, bool) {
 	switch subcommand {
@@ -35,6 +35,8 @@ func serveRouteFor(subcommand string) (serveRoute, bool) {
 		return serveRoute{mode: serveAdministrationValidation, administer: cmdServeRepo}, true
 	case "key":
 		return serveRoute{mode: serveAdministrationValidation, administer: cmdServeKey}, true
+	case "git":
+		return serveRoute{mode: serveSessionValidation, run: cmdServeGit}, true
 	}
 	return serveRoute{}, false
 }

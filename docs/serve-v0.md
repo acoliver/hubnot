@@ -557,7 +557,128 @@ valid policy is in
 [Recovering a protected branch](#recovering-a-protected-branch).
 
 ## Connecting over SSH
-<!-- section owned by WP06 -->
+
+Clients reach a hosted repository through the server account's OpenSSH
+login. Each key in the managed `authorized_keys` block runs
+`hn serve git --key FINGERPRINT` as a forced command, so a connection can only
+fetch from a hosted repository, push to it, or transfer its Git LFS objects
+once LFS transfer is enabled.
+
+### OpenSSH settings on the server
+
+The server needs an OpenSSH daemon that allows public-key login for the server
+account. Two daemon defaults matter:
+
+- `StrictModes yes` makes `sshd` ignore `authorized_keys` when the home
+  directory, `~/.ssh` or the file itself is writable by group or others. Keep
+  the home directory at mode 0755 or stricter. `hn serve` creates `~/.ssh` with
+  mode 0700 and `authorized_keys` with mode 0600, and refuses to write either
+  one when its mode is unsafe.
+- `PermitUserEnvironment no` stops a client from setting environment
+  variables through `~/.ssh/environment` or `environment=` options. Keep it.
+  `hn serve git` rebuilds Git's environment in any case, as described in
+  [How a session runs](#how-a-session-runs).
+
+Git protocol version 2 needs `AcceptEnv GIT_PROTOCOL` in `sshd_config`,
+because the client sends its protocol request in that variable. Without it,
+clients fall back to protocol version 0, which works the same way for every
+command on this server.
+
+The server account needs Git 2.11 or later on its `PATH`. Git 2.10 added push
+options and Git 2.11 added object quarantine for `pre-receive` hooks, and the
+push checks depend on both (see the
+[2.10.0](https://github.com/git/git/blob/master/Documentation/RelNotes/2.10.0.adoc)
+and
+[2.11.0](https://github.com/git/git/blob/master/Documentation/RelNotes/2.11.0.adoc)
+release notes).
+
+### Clone URLs
+
+`hn serve repo create` prints the clone URL of a new repository. Both URL forms
+Git supports for SSH work:
+
+```text
+git clone ssh://hn@server.example/demo.git
+git clone hn@server.example:demo.git
+```
+
+Here `hn` is the server account and `demo` the hosted repository name. The path
+is the repository name, with or without a leading `/` and with or without the
+`.git` suffix. It never has more than one segment, so `ssh://hn@server/demo`
+and `hn@server:/demo.git` name the same repository, while `hn@server:a/demo.git`
+and `ssh://hn@server/~/demo.git` are refused. A non-default port goes in the
+URL as usual, for example `ssh://hn@server.example:2222/demo.git`.
+
+### Requests the server accepts
+
+| Client command | SSH request | What the server does |
+|----|----|----|
+| `git clone`, `git fetch`, `git pull`, `git ls-remote` | `git-upload-pack 'demo.git'` | Runs `git upload-pack --strict` on the hosted repository |
+| `git push` | `git-receive-pack 'demo.git'` | Takes the repository lock and runs `git receive-pack` with the server's hooks |
+| `git lfs` transfers | `git-lfs-transfer 'demo.git' upload` or `download` | Described in [Large files with Git LFS](#large-files-with-git-lfs); refused while LFS transfer is not enabled |
+
+The server also accepts the older spellings `git upload-pack` and
+`git receive-pack`. It refuses every other request, including interactive
+shells, `scp`, `sftp`, `git archive --remote` (`git-upload-archive`) and
+`git-lfs-authenticate`. The `restrict` option on each managed entry also
+disables port, agent and X11 forwarding and terminal allocation.
+
+### How a session runs
+
+When a key connects, `hn serve git` checks the layout read-only, looks the
+fingerprint up in the registry and parses the request. It parses the request
+byte by byte against a fixed grammar and never passes it to a shell. It then
+starts Git directly with an environment built from scratch: `PATH`, `HOME`,
+`LANG=C`, `GIT_CONFIG_NOSYSTEM=1`, `TMPDIR=$HOME/.hn-serve/state/tmp`,
+`GIT_PROTOCOL` when the client sent exactly `version=N`, and the mapped actor,
+key and repository in `HN_SERVE_ACTOR`, `HN_SERVE_KEY` and
+`HN_SERVE_REPOSITORY`. A push runs with `core.hooksPath`,
+`receive.fsckObjects` and `receive.advertisePushOptions` given on Git's command
+line, which take precedence over anything in the hosted repository's `config`.
+The `pre-receive` hook then decides which ref updates to accept, as described
+in [Push verdicts and ref classes](#push-verdicts-and-ref-classes).
+
+Fetches never take the repository lock and never wait for a push. Pushes to one
+repository run one at a time: a push holds the repository lock from before Git
+starts until `receive-pack` exits. A push that cannot get the lock within 120
+seconds is refused with `repository-busy`. Pushes to different repositories do
+not wait for each other.
+
+### Refusals
+
+A refused session prints one `hn-serve/1` rejection line with `ref=-` and one
+sentence to stderr, then exits with status 1 before Git starts. Nothing in any
+hosted repository changes. Git shows the two lines and then its own error:
+
+```text
+hn-serve/1 reject ref=- actor=- code=unknown-key next="ask the administrator to run hn serve key add"
+hn-serve: this SSH key is not registered with the server.
+fatal: Could not read from remote repository.
+
+Please make sure you have the correct access rights
+and the repository exists.
+```
+
+The checks run in this order, and the first failure decides the code:
+
+| Code | Cause | What to do |
+|----|----|----|
+| `unknown-key` | The key's fingerprint is not in the registry, for example after `hn serve key remove` | Ask the administrator to bind the key with `hn serve key add` |
+| `unsupported-command` | The request is not one of the accepted requests, has extra arguments, quotes or shell characters, or names a path with more than one segment | Use `git fetch`, `git push` or `git lfs` with a clone URL of the form above |
+| `unhosted-repository` | No hosted repository has that name | Check the name with the administrator, who can run `hn serve repo list` |
+| `repository-busy` | Another push held the repository lock for more than 120 seconds | Retry the push |
+
+A key that is not in the managed block at all never reaches `hn serve`;
+`sshd` refuses it with `Permission denied (publickey).`. The `actor` field
+names the mapped actor for every code except `unknown-key`. The full line
+format and the table of every reason code are in
+[protocol-v0.md](protocol-v0.md#rejection-lines).
+
+When the server layout itself is unsafe, for example a hosted repository
+directory replaced by a symbolic link, every session stops before any key or
+request check with an `hn: hn serve state defect: PATH: REASON` line. The
+administrator fixes it as described in
+[What makes the server refuse to run](#what-makes-the-server-refuse-to-run).
 
 ## Push verdicts and ref classes
 <!-- section owned by WP07 -->
