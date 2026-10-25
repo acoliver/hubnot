@@ -22,6 +22,8 @@ const (
 
 var errShallowRecoverySelectionRequired = errors.New("selected shallow recovery requires an exact saved selection")
 
+var errAllTrustedWithAll = errors.New("--all-trusted is mutually exclusive with --all")
+
 type ReplicationBudgets struct {
 	MaxEvents          int64 `json:"maxEvents"`
 	MaxObjects         int64 `json:"maxObjects"`
@@ -59,14 +61,18 @@ func (budgets ReplicationBudgets) validate() error {
 	return nil
 }
 
+// ReplicationSelection is the saved per-remote selection. AllTrusted is
+// omitted when false so files written without --all-trusted stay
+// byte-identical to files from earlier versions.
 type ReplicationSelection struct {
-	Version   int                `json:"version"`
-	Remote    string             `json:"remote"`
-	Actors    []string           `json:"actors"`
-	Proposals []string           `json:"proposals"`
-	Memories  []string           `json:"memories,omitempty"`
-	All       bool               `json:"all"`
-	Budgets   ReplicationBudgets `json:"budgets"`
+	Version    int                `json:"version"`
+	Remote     string             `json:"remote"`
+	Actors     []string           `json:"actors"`
+	Proposals  []string           `json:"proposals"`
+	Memories   []string           `json:"memories,omitempty"`
+	All        bool               `json:"all"`
+	AllTrusted bool               `json:"allTrusted,omitempty"`
+	Budgets    ReplicationBudgets `json:"budgets"`
 }
 
 type repeatedStringFlag []string
@@ -118,10 +124,13 @@ func validateReplicationSelection(selection ReplicationSelection) error {
 	if err := selection.Budgets.validate(); err != nil {
 		return err
 	}
+	if selection.All && selection.AllTrusted {
+		return errAllTrustedWithAll
+	}
 	if selection.All && (len(selection.Actors) != 0 || len(selection.Proposals) != 0 || len(selection.Memories) != 0) {
 		return fmt.Errorf("--all is mutually exclusive with actor, proposal, and memory selectors")
 	}
-	if !selection.All && len(selection.Actors) == 0 && len(selection.Proposals) == 0 && len(selection.Memories) == 0 {
+	if !selection.All && !selection.AllTrusted && len(selection.Actors) == 0 && len(selection.Proposals) == 0 && len(selection.Memories) == 0 {
 		return fmt.Errorf("replication selection requires at least one actor, proposal, or memory, or explicit --all")
 	}
 	seen := make(map[string]string)
@@ -253,6 +262,7 @@ func cmdReplicationSelect(args []string) error {
 	flags.Var(&proposals, "proposal", "full candidate event ID")
 	flags.Var(&memories, "memory", "full memory stream ID")
 	all := flags.Bool("all", false, "select all advertised Hubnot refs")
+	allTrusted := flags.Bool("all-trusted", false, "import every actor chain and proposal advertised by an hn serve remote")
 	flags.Int64Var(&budgets.MaxEvents, "max-events", budgets.MaxEvents, "maximum actor events")
 	flags.Int64Var(&budgets.MaxObjects, "max-objects", budgets.MaxObjects, "maximum reachable objects")
 	flags.Int64Var(&budgets.MaxObjectBytes, "max-object-bytes", budgets.MaxObjectBytes, "maximum individual object bytes")
@@ -262,10 +272,21 @@ func cmdReplicationSelect(args []string) error {
 		return err
 	}
 	if flags.NArg() != 0 {
-		return usageError("usage: hn replication select [REMOTE] [--actor ACTOR]... [--proposal ID]... [--memory STREAM]... [--all] [budgets]")
+		return usageError("usage: hn replication select [REMOTE] [--actor ACTOR]... [--proposal ID]... [--memory STREAM]... [--all] [--all-trusted] [budgets]")
 	}
 	selection := ReplicationSelection{
-		Version: replicationSelectionVersion, Remote: remote, Actors: actors, Proposals: proposals, Memories: memories, All: *all, Budgets: budgets,
+		Version: replicationSelectionVersion, Remote: remote, Actors: actors, Proposals: proposals, Memories: memories, All: *all,
+		AllTrusted: *allTrusted, Budgets: budgets,
+	}
+	if selection.AllTrusted {
+		// Local validation runs before the network identification so the
+		// cheaper error wins and a refused selection never contacts the remote.
+		if err := validateReplicationSelection(selection); err != nil {
+			return err
+		}
+		if identified, _ := serveRemoteIdentifies(remote); !identified {
+			return fmt.Errorf("remote %s does not identify as hn serve; --all-trusted requires an hn serve remote", remote)
+		}
 	}
 	if err := saveReplicationSelection(selection); err != nil {
 		return err
@@ -293,6 +314,9 @@ func printReplicationSelection(selection ReplicationSelection, explicit bool) er
 	fmt.Printf("remote: %s\n", selection.Remote)
 	fmt.Printf("saved: %t\n", explicit)
 	fmt.Printf("compatibility-all: %t\n", selection.All)
+	if selection.AllTrusted {
+		fmt.Println("all-trusted: true")
+	}
 	for _, actor := range selection.Actors {
 		fmt.Printf("actor: %s\n", actor)
 	}

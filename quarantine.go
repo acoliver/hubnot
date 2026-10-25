@@ -21,6 +21,10 @@ const (
 	replicationRelationshipBad   = "relationship-invalid"
 	replicationPromotable        = "promotable"
 	replicationPromoted          = "promoted"
+	// replicationNotAdvertised marks an exact actor or proposal selector of an
+	// all-trusted selection that the remote does not advertise yet. It is not a
+	// failure: nothing is requested and nothing is promoted.
+	replicationNotAdvertised = "not-advertised"
 )
 
 type replicationRequest struct {
@@ -66,7 +70,7 @@ type replicationTransactionResult struct {
 
 func (result replicationTransactionResult) hasFailures() bool {
 	for _, outcome := range result.Outcomes {
-		if outcome.Status != replicationPromoted {
+		if outcome.Status != replicationPromoted && outcome.Status != replicationNotAdvertised {
 			return true
 		}
 	}
@@ -643,6 +647,58 @@ func resolveReplicationRequests(selection ReplicationSelection, remoteURL string
 				}
 			}
 		}
+	} else if selection.AllTrusted {
+		// Every advertised actor chain and proposal is requested, never memory.
+		// The requests then take the same quarantine, budget and validation
+		// path as every other mode.
+		refs := make([]string, 0, len(advertised))
+		for ref := range advertised {
+			refs = append(refs, ref)
+		}
+		sort.Strings(refs)
+		requested := make(map[string]bool)
+		for _, ref := range refs {
+			var request replicationRequest
+			switch {
+			case strings.HasPrefix(ref, "refs/hn/actors/"):
+				id := strings.TrimPrefix(ref, "refs/hn/actors/")
+				if !validActorFingerprint(id) {
+					continue
+				}
+				request = newReplicationRequest(replicationActor, id, ref, advertised[ref])
+			case strings.HasPrefix(ref, "refs/hn/proposals/"):
+				id := "sha256:" + strings.TrimPrefix(ref, "refs/hn/proposals/")
+				if !validEventID(id) {
+					continue
+				}
+				request = newReplicationRequest(replicationProposal, id, ref, advertised[ref])
+			default:
+				continue
+			}
+			wanted = append(wanted, request)
+			requested[request.key()] = true
+		}
+		exact := make([]replicationRequest, 0, len(selection.Actors)+len(selection.Proposals))
+		for _, actor := range selection.Actors {
+			ref := actorRef(actor)
+			exact = append(exact, newReplicationRequest(replicationActor, actor, ref, advertised[ref]))
+		}
+		for _, proposal := range selection.Proposals {
+			ref := proposalRef(proposal)
+			exact = append(exact, newReplicationRequest(replicationProposal, proposal, ref, advertised[ref]))
+		}
+		for _, request := range exact {
+			if requested[request.key()] {
+				continue
+			}
+			if request.OID == "" {
+				outcomes = append(outcomes, ReplicationOutcome{Kind: request.Kind, ID: request.ID, Status: replicationNotAdvertised, request: request})
+				continue
+			}
+			wanted = append(wanted, request)
+			requested[request.key()] = true
+		}
+		wanted, outcomes = appendExactMemoryRequests(selection, advertised, memoryRefs, wanted, outcomes)
 	} else {
 		for _, actor := range selection.Actors {
 			ref := actorRef(actor)
@@ -652,20 +708,7 @@ func resolveReplicationRequests(selection ReplicationSelection, remoteURL string
 			ref := proposalRef(proposal)
 			wanted = append(wanted, newReplicationRequest(replicationProposal, proposal, ref, advertised[ref]))
 		}
-		for _, stream := range selection.Memories {
-			refs := memoryRefs[stream]
-			if len(refs) == 1 {
-				wanted = append(wanted, newReplicationRequest(replicationMemory, stream, refs[0], advertised[refs[0]]))
-				continue
-			}
-			request := newReplicationRequest(replicationMemory, stream, "", "")
-			if len(refs) > 1 {
-				outcomes = append(outcomes, failedReplicationOutcome(request, replicationStructuralInvalid,
-					fmt.Sprintf("selected memory %s has ambiguous owners on remote %s", stream, selection.Remote)))
-				continue
-			}
-			wanted = append(wanted, request)
-		}
+		wanted, outcomes = appendExactMemoryRequests(selection, advertised, memoryRefs, wanted, outcomes)
 	}
 	requests := make([]replicationRequest, 0, len(wanted))
 	for _, request := range wanted {
@@ -680,6 +723,28 @@ func resolveReplicationRequests(selection ReplicationSelection, remoteURL string
 		requests = append(requests, request)
 	}
 	return requests, outcomes, nil
+}
+
+// appendExactMemoryRequests resolves exact --memory selectors to their one
+// advertised owner. An unadvertised stream is left without an object ID so it
+// reports dependency-missing; several owners report an ambiguity failure.
+func appendExactMemoryRequests(selection ReplicationSelection, advertised map[string]string, memoryRefs map[string][]string,
+	wanted []replicationRequest, outcomes []ReplicationOutcome) ([]replicationRequest, []ReplicationOutcome) {
+	for _, stream := range selection.Memories {
+		refs := memoryRefs[stream]
+		if len(refs) == 1 {
+			wanted = append(wanted, newReplicationRequest(replicationMemory, stream, refs[0], advertised[refs[0]]))
+			continue
+		}
+		request := newReplicationRequest(replicationMemory, stream, "", "")
+		if len(refs) > 1 {
+			outcomes = append(outcomes, failedReplicationOutcome(request, replicationStructuralInvalid,
+				fmt.Sprintf("selected memory %s has ambiguous owners on remote %s", stream, selection.Remote)))
+			continue
+		}
+		wanted = append(wanted, request)
+	}
+	return wanted, outcomes
 }
 
 func newReplicationRequest(kind, id, sourceRef, oid string) replicationRequest {
@@ -1692,9 +1757,11 @@ func memoryReplicationRecovery(selection ReplicationSelection, dependency Memory
 		selected := selection.All
 		switch kind {
 		case replicationActor:
-			selected = selected || stringInSlice(id, selection.Actors)
+			// All-trusted requests every advertised actor chain and proposal;
+			// memory streams still need exact selection.
+			selected = selected || selection.AllTrusted || stringInSlice(id, selection.Actors)
 		case replicationProposal:
-			selected = selected || stringInSlice(id, selection.Proposals)
+			selected = selected || selection.AllTrusted || stringInSlice(id, selection.Proposals)
 		case replicationMemory:
 			selected = selected || stringInSlice(id, selection.Memories)
 		}
