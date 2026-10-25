@@ -1,7 +1,7 @@
 {
-  "event_count": 114,
-  "last_event_id": "01M5SP2Z7MPQD8PP2DRVZTYVTX",
-  "materialized_at": "2026-10-25T14:05:31.252040+00:00",
+  "event_count": 116,
+  "last_event_id": "01M5SP3NGTV8BFAR1S1YA3A7GS",
+  "materialized_at": "2026-10-25T14:05:54.067480+00:00",
   "mission_number": "",
   "mission_slug": "hn-serve-01M5P0NP",
   "mission_type": "",
@@ -12,9 +12,9 @@
     "claimed": 0,
     "done": 0,
     "for_review": 0,
-    "in_progress": 0,
+    "in_progress": 1,
     "in_review": 0,
-    "planned": 3
+    "planned": 2
   },
   "work_packages": {
     "WP01": {
@@ -404,11 +404,19 @@
       }
     },
     "WP12": {
-      "actor": "finalize-tasks",
+      "actor": "llxprt",
+      "agent": "llxprt",
+      "agent_profile": "__resolved_profile_absent__",
+      "agent_profile_version": "__resolved_profile_version_absent__",
       "force_count": 0,
-      "lane": "planned",
-      "last_event_id": "01M5R806R0GG7CMHRCKN7Y7817",
-      "last_transition_at": "2026-10-25T00:40:06.144106+00:00"
+      "lane": "in_progress",
+      "last_event_id": "01M5SP3NGTV8BFAR1S1YA3A7GS",
+      "last_transition_at": "2026-10-25T14:05:54.067480+00:00",
+      "model": "__resolved_model_absent__",
+      "provider": "__resolved_provider_absent__",
+      "role": "implementer",
+      "shell_pid": 228126,
+      "shell_pid_created_at": "1792937151.84"
     },
     "WP13": {
       "actor": "finalize-tasks",
