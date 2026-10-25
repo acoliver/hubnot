@@ -89,10 +89,26 @@ func cmdSync(args []string) error {
 	if err != nil {
 		return err
 	}
-	result, importErr := runReplicationTransaction(selection)
+	// Only all-trusted selections depend on identification, and it is rechecked
+	// on every sync. Losing it skips the import, while publication still runs.
+	identificationLost := false
+	if selection.AllTrusted {
+		identified, _ := serveRemoteIdentifies(remote)
+		identificationLost = !identified
+	}
+	var result replicationTransactionResult
+	var importErr error
+	if identificationLost {
+		result = replicationTransactionResult{Remote: remote}
+		importErr = fmt.Errorf("remote %s no longer identifies as hn serve; reselect with hn replication select", remote)
+	} else {
+		result, importErr = runReplicationTransaction(selection)
+	}
 	for _, outcome := range result.Outcomes {
 		if outcome.Status == replicationPromoted {
 			fmt.Printf("Replication %s %s: promoted\n", outcome.Kind, outcome.ID)
+		} else if outcome.Status == replicationNotAdvertised {
+			fmt.Printf("Replication %s %s: not advertised yet\n", outcome.Kind, outcome.ID)
 		} else {
 			fmt.Printf("Replication %s %s: failed (%s): %s\n", outcome.Kind, outcome.ID, outcome.Status, oneLine(outcome.Diagnostic))
 		}
