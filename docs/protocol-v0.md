@@ -361,11 +361,13 @@ are omitted when they have no value.
 Every value is printable ASCII. Control bytes and non-ASCII bytes in any value
 are replaced with `?`, one `?` per byte. Space, `=` and `,` inside `ref`,
 `actor`, `code`, `ids`, `missing` and `budget` values are also replaced with
-`?`, and so are `"` and `` inside `next`. The sentence follows the same
-control and non-ASCII rule and stays on one line.
+`?`. Inside `next`, the double quote (byte `0x22`) and the backslash (byte
+`0x5c`) are also replaced with `?`, so the quoted value cannot end early or
+contain an escape. The sentence follows the same control and non-ASCII rule
+and stays on one line.
 
 When a push has several rejected ref updates, the line pairs appear in byte
-order of the ref. A session refusal uses `ref=-`.
+order of the ref name before replacement. A session refusal uses `ref=-`.
 
 A parser accepts a line only when it starts with `hn-serve/1 reject ` and every
 following field matches this grammar in this order. Unknown fields, fields out
@@ -386,6 +388,27 @@ For example, a push of `main` one commit ahead with no proposal produces:
 remote: hn-serve/1 reject ref=refs/heads/main actor=4f1c9a6d0d2b7e3a8c5f6e1b9d0a7c3e2f4b6d8a0c1e3f5a7b9d1c3e5f7a9b1c code=protected-no-proposal ids=9b2e4c6a8d0f1e3c5a7b9d1f3e5c7a9b2d4f6e8a missing=proposal,review,ci,acceptance next="open a proposal for 9b2e4c6a8d0f1e3c5a7b9d1f3e5c7a9b2d4f6e8a"
 remote: hn-serve: refs/heads/main is protected and 9b2e4c6a has no accepted, CI-tested proposal.
 ```
+
+### Rejections reported by hn sync
+
+`hn sync REMOTE` publishes local actor, proposal and memory refs with one
+`git push` per ref. When such a push fails, the error names the publication
+phase and the remote, as it does for any remote. If Git's stderr for that push
+carries `hn-serve/1` rejection lines and the remote identifies as `hn serve`,
+the error continues with those rejections, one line pair per rejected ref:
+
+```text
+hn: publication phase failed after replication: replication actor publication failed for remote origin
+hn-serve/1 reject ref=refs/hn/actors/ACTOR actor=ACTOR code=actor-chain-rewrite next="append new events instead"
+hn-serve: The push rewrites refs/hn/actors/ACTOR.
+```
+
+The client parses each rejection and renders it again with the rules above.
+It never echoes the server's bytes, so a hostile server cannot place terminal
+control sequences in the output. A rejection line that does not parse is
+dropped. A rejection without a sentence line gets the meaning from the
+reason-code table as its sentence. A remote that does not identify as
+`hn serve` gets the plain error even when its hooks print lines in this format.
 
 ### Budget fields
 

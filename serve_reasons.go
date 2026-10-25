@@ -271,13 +271,21 @@ func renderServeRejection(r serveRejection) string {
 	return line.String()
 }
 
-// renderServeRejections renders every rejection in byte order of the rendered
-// ref, keeping the input order for equal refs.
+// renderServeRejections renders every rejection in byte order of the ref name
+// as given, before sanitizing, keeping the input order for equal refs. Sanitizing
+// can change the order ('?' sorts after ',' and digits), and the contract
+// orders lines by ref name. An empty Ref sorts as "-", the value it renders as.
 func renderServeRejections(list []serveRejection) string {
 	ordered := make([]serveRejection, len(list))
 	copy(ordered, list)
+	sortKey := func(ref string) string {
+		if ref == "" {
+			return "-"
+		}
+		return ref
+	}
 	sort.SliceStable(ordered, func(i, j int) bool {
-		return serveRejectionField(ordered[i].Ref, "-") < serveRejectionField(ordered[j].Ref, "-")
+		return sortKey(ordered[i].Ref) < sortKey(ordered[j].Ref)
 	})
 	var output strings.Builder
 	for _, rejection := range ordered {

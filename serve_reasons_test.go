@@ -4,8 +4,10 @@ import (
 	"crypto/sha1"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -695,4 +697,256 @@ func mustGitTextAtDir(t *testing.T, gitDir string, args ...string) string {
 		t.Fatal(err)
 	}
 	return value
+}
+
+func TestServeReasonsRenderListSortsByOriginalRefBytes(t *testing.T) {
+	// Arrange: ',' (0x2c) sorts before '0' (0x30), but its replacement '?'
+	// (0x3f) sorts after it, so sorting rendered refs would invert the order.
+	list := []serveRejection{
+		{Ref: "refs/heads/a0", Code: serveReasonReservedRef, Next: "digit"},
+		{Ref: "refs/heads/a,b", Code: serveReasonReservedRef, Next: "comma"},
+		{Ref: "", Code: serveReasonRepositoryBusy, Next: "empty"},
+		{Ref: "refs/heads/a b", Code: serveReasonReservedRef, Next: "space"},
+	}
+
+	// Act
+	extracted, _ := extractServeRejections(renderServeRejections(list))
+
+	// Assert
+	gotNext := make([]string, 0, len(extracted))
+	for _, rejection := range extracted {
+		gotNext = append(gotNext, rejection.Next)
+	}
+	wantNext := []string{"empty", "space", "comma", "digit"}
+	if !reflect.DeepEqual(gotNext, wantNext) {
+		t.Fatalf("order = %v, want %v", gotNext, wantNext)
+	}
+}
+
+func TestServeReasonsDocsNameEveryNextReplacement(t *testing.T) {
+	// Arrange
+	markdown, err := os.ReadFile(filepath.Join("docs", "protocol-v0.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, section, found := strings.Cut(string(markdown), "\n## hn serve wire surface\n")
+	if !found {
+		t.Fatal("docs have no hn serve wire surface section")
+	}
+	section, _, _ = strings.Cut(section, "\n## ")
+	paragraph := strings.Join(strings.Fields(section), " ")
+
+	// Act and Assert: each byte serveSanitizeNext replaces beyond the common
+	// rule must be named, and an empty code span means a character was lost.
+	for _, character := range []byte{'"', '\\'} {
+		if serveSanitizeNext(string(character)) != "?" {
+			t.Fatalf("serveSanitizeNext keeps %q", character)
+		}
+		named := fmt.Sprintf("(byte `0x%02x`)", character)
+		if !strings.Contains(paragraph, named) {
+			t.Errorf("docs do not name the next replacement %q as %s", character, named)
+		}
+	}
+	for _, line := range strings.Split(section, "\n") {
+		if !strings.HasPrefix(line, "```") && strings.Contains(line, "``") {
+			t.Errorf("hn serve wire surface line has an empty code span: %q", line)
+		}
+	}
+}
+
+// FuzzServeReasonsParsedLineRendersIdentically checks the property hn sync
+// relies on when it re-renders rejections from a server: a line the parser
+// accepts renders back to the same line and never panics the renderer.
+func FuzzServeReasonsParsedLineRendersIdentically(f *testing.F) {
+	f.Add(strings.SplitN(serveGoldenRejectDirectMain, "\n", 2)[0])
+	f.Add(`hn-serve/1 reject ref=- actor=- code=lfs-quota budget=lfs-quota limit=0 measured=0 next=""`)
+	f.Add(`hn-serve/1 reject ref=a"b actor=? code=reserved-ref ids=? next="x"`)
+	f.Add(`hn-serve/1 reject ref=r actor=a code=over-budget missing=review,ci budget=b limit=1 measured=2 next="n"`)
+	for _, reason := range serveReasonCatalogue {
+		rendered := renderServeRejection(serveRejection{Ref: "refs/heads/main", Actor: serveTestActor, Code: reason.Code, Next: reason.Next})
+		f.Add(strings.SplitN(rendered, "\n", 2)[0])
+	}
+	f.Fuzz(func(t *testing.T, line string) {
+		parsed, err := parseServeRejectionLine(line)
+		if err != nil {
+			return
+		}
+		first, _, _ := strings.Cut(renderServeRejection(parsed), "\n")
+		if first != line {
+			t.Fatalf("parsed line %q renders as %q", line, first)
+		}
+	})
+}
+
+// serveWireRealGit returns the git executable before a test shadows it.
+func serveWireRealGit(t *testing.T) string {
+	t.Helper()
+	path, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func TestServeWireRemoteIdentificationRequiresExactAdvertisement(t *testing.T) {
+	// Arrange: a git shim answers ls-remote with fixed bytes and status, so
+	// each case controls the exact advertisement the client reads.
+	root := t.TempDir()
+	realGit := serveWireRealGit(t)
+	client := filepath.Join(root, "client")
+	mustGit(t, "init", "-q", client)
+	withTestDirectory(t, client)
+	oid, err := serveMarkerObjectID("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bin := filepath.Join(root, "bin")
+	if err := os.Mkdir(bin, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	shim := "#!/bin/sh\nif [ \"$1\" = ls-remote ]; then\n  printf '%s' \"$HN_TEST_ADVERTISEMENT\"\n  exit \"$HN_TEST_STATUS\"\nfi\nexec '" + realGit + "' \"$@\"\n"
+	if err := os.WriteFile(filepath.Join(bin, "git"), []byte(shim), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	exact := oid + "\t" + serveMarkerRef + "\n"
+	other := strings.Repeat("0", len(oid))
+	cases := []struct {
+		name, output, status string
+		want                 bool
+	}{
+		{"exact", exact, "0", true},
+		{"extra blank line", exact + "\n", "0", false},
+		{"leading blank line", "\n" + exact, "0", false},
+		{"leading space before oid", " " + exact, "0", false},
+		{"trailing space after ref", oid + "\t" + serveMarkerRef + " \n", "0", false},
+		{"crlf", oid + "\t" + serveMarkerRef + "\r\n", "0", false},
+		{"no final newline", oid + "\t" + serveMarkerRef, "0", false},
+		{"space instead of tab", oid + " " + serveMarkerRef + "\n", "0", false},
+		{"duplicate line", exact + exact, "0", false},
+		{"different oid", other + "\t" + serveMarkerRef + "\n", "0", false},
+		{"uppercase oid", strings.ToUpper(oid) + "\t" + serveMarkerRef + "\n", "0", false},
+		{"empty", "", "0", false},
+		{"valid stdout but transport error", exact, "1", false},
+		{"valid stdout but unreachable remote", exact, "128", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("HN_TEST_ADVERTISEMENT", tc.output)
+			t.Setenv("HN_TEST_STATUS", tc.status)
+
+			// Act
+			got, diagnostic := serveRemoteIdentifies("shimmed-remote")
+
+			// Assert
+			if got != tc.want {
+				t.Fatalf("identification = %v (%q), want %v for stdout %q", got, diagnostic, tc.want, tc.output)
+			}
+			if got == (diagnostic != "") {
+				t.Fatalf("identification %v has diagnostic %q", got, diagnostic)
+			}
+		})
+	}
+}
+
+// serveWireSyncFixture builds a client repository with one local actor
+// event and a bare origin whose pre-receive hook rejects every update with
+// the given script body. The marker is written only when marked is true.
+func serveWireSyncFixture(t *testing.T, hook string, marked bool) (string, *Identity) {
+	t.Helper()
+	root := inReplicationTestRepository(t)
+	remote := filepath.Join(root, "origin.git")
+	mustGit(t, "init", "-q", "--bare", remote)
+	mustGit(t, "remote", "add", "origin", remote)
+	if marked {
+		oid, err := gitInputAt(remote, []byte(serveMarkerContent), "hash-object", "-w", "--stdin")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := gitOutputAt(remote, "update-ref", serveMarkerRef, strings.TrimSpace(string(oid))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	script := "#!/bin/sh\n" + hook + "\nexit 1\n"
+	if err := os.WriteFile(filepath.Join(remote, "hooks", "pre-receive"), []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	actor := testIdentity(t, "Serve Publisher")
+	appendPublicationIssue(t, actor, "publication rejected by hn serve")
+	return remote, actor
+}
+
+// serveWireRejectingHook prints one hn-serve/1 line pair per pushed ref. The
+// sentence carries an ANSI color sequence, an OSC title sequence and UTF-8
+// that the client must not pass through.
+const serveWireRejectingHook = `while read old new ref; do
+  printf 'hn-serve/1 reject ref=%s actor=- code=actor-chain-rewrite ids=%s next="append new events instead"\n' "$ref" "$new" >&2
+  printf 'hn-serve: \033[31mrewrite\033[0m of %s \033]0;owned\007caf\303\251\n' "$ref" >&2
+done`
+
+func TestServeWireSyncReportsServeRejections(t *testing.T) {
+	// Arrange
+	remote, actor := serveWireSyncFixture(t, serveWireRejectingHook, true)
+	ref := actorRef(actor.Actor)
+	head := mustGitText(t, "rev-parse", ref)
+	plain := "publication phase failed after replication: replication actor publication failed for remote origin"
+
+	// Act: the public command dispatch, as main runs it.
+	err := run([]string{"sync", "origin"})
+
+	// Assert
+	if err == nil {
+		t.Fatal("sync succeeded against a rejecting hn serve remote")
+	}
+	want := plain + "\n" +
+		"hn-serve/1 reject ref=" + ref + " actor=- code=actor-chain-rewrite ids=" + head + ` next="append new events instead"` + "\n" +
+		"hn-serve: ?[31mrewrite?[0m of " + ref + " ?]0;owned?caf??"
+	if err.Error() != want {
+		t.Fatalf("sync error:\n%q\nwant:\n%q", err.Error(), want)
+	}
+	var rejected *serveRejectedPushError
+	if !errors.As(err, &rejected) || len(rejected.Rejections) != 1 || rejected.Rejections[0].Code != serveReasonActorChainRewrite {
+		t.Fatalf("sync error does not carry the parsed rejection: %#v", err)
+	}
+	if errors.Unwrap(rejected) == nil || errors.Unwrap(rejected).Error() != "replication actor publication failed for remote origin" {
+		t.Fatalf("rejection error lost the phase error: %v", errors.Unwrap(rejected))
+	}
+	if strings.ContainsAny(err.Error(), "\x1b\x07\r") {
+		t.Fatalf("sync error passed control bytes through: %q", err.Error())
+	}
+	if _, err := gitOutputAt(remote, "rev-parse", "--verify", "--quiet", ref); err == nil {
+		t.Fatal("rejected actor ref reached the remote")
+	}
+}
+
+func TestServeWireSyncKeepsPlainErrorWithoutServeRejections(t *testing.T) {
+	plain := "publication phase failed after replication: replication actor publication failed for remote origin"
+	cases := []struct {
+		name   string
+		hook   string
+		marked bool
+	}{
+		// An ordinary remote whose hook imitates hn serve is not identified.
+		{"unidentified remote printing rejection lines", serveWireRejectingHook, false},
+		{"identified remote without rejection lines", "cat >/dev/null\necho 'push refused by policy' >&2", true},
+		{"identified remote with an unparseable line", "cat >/dev/null\necho 'hn-serve/1 reject ref=x code=no-such-code next=\"n\"' >&2", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Arrange
+			serveWireSyncFixture(t, tc.hook, tc.marked)
+
+			// Act
+			err := run([]string{"sync", "origin"})
+
+			// Assert
+			if err == nil || err.Error() != plain {
+				t.Fatalf("sync error = %v, want %q", err, plain)
+			}
+			var rejected *serveRejectedPushError
+			if errors.As(err, &rejected) {
+				t.Fatal("sync attached rejections it should have ignored")
+			}
+		})
+	}
 }
