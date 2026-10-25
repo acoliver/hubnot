@@ -1,0 +1,195 @@
+{
+  "version": 1,
+  "mission_slug": "hn-serve-01M5P0NP",
+  "mission_id": "01M5P0NPCQXWXNN63MXCBQSRVP",
+  "mission_branch": "kitty/mission-hn-serve-01M5P0NP",
+  "target_branch": "mission/hn-serve",
+  "lanes": [
+    {
+      "lane_id": "lane-b",
+      "wp_ids": [
+        "WP03"
+      ],
+      "write_scope": [
+        "docs/protocol-v0.md",
+        "serve_reasons.go",
+        "serve_reasons_test.go",
+        "serve_wire.go"
+      ],
+      "predicted_surfaces": [
+        "api",
+        "artifact-rendering",
+        "tracker-integration",
+        "workspace"
+      ],
+      "depends_on_lanes": [],
+      "parallel_group": 0
+    },
+    {
+      "lane_id": "lane-c",
+      "wp_ids": [
+        "WP04",
+        "WP11"
+      ],
+      "write_scope": [
+        "commands.go",
+        "docs/governance-v0.md",
+        "docs/replication-v0.md",
+        "policy.go",
+        "quarantine.go",
+        "replication.go",
+        "replication_all_trusted_test.go",
+        "validation_seams_test.go"
+      ],
+      "predicted_surfaces": [
+        "api",
+        "legacy-cleanup",
+        "tracker-integration",
+        "workspace"
+      ],
+      "depends_on_lanes": [
+        "lane-b"
+      ],
+      "parallel_group": 1
+    },
+    {
+      "lane_id": "lane-a",
+      "wp_ids": [
+        "WP01",
+        "WP02",
+        "WP05",
+        "WP06",
+        "WP07",
+        "WP08",
+        "WP09",
+        "WP10",
+        "WP12",
+        "WP13",
+        "WP14"
+      ],
+      "write_scope": [
+        "README.md",
+        "docs/serve-v0.md",
+        "docs/threat-model.md",
+        "governance.go",
+        "main.go",
+        "serve_admin.go",
+        "serve_admin_test.go",
+        "serve_advance_test.go",
+        "serve_client.go",
+        "serve_commands.go",
+        "serve_facts_test.go",
+        "serve_harness_test.go",
+        "serve_hooks.go",
+        "serve_keys.go",
+        "serve_keys_test.go",
+        "serve_lfs.go",
+        "serve_lfs_test.go",
+        "serve_protected.go",
+        "serve_protected_test.go",
+        "serve_push_test.go",
+        "serve_quality_test.go",
+        "serve_replication_test.go",
+        "serve_session.go",
+        "serve_session_test.go",
+        "serve_sshd_test.go",
+        "serve_state.go",
+        "serve_state_test.go",
+        "serve_verdict.go",
+        "serve_verdict_facts.go"
+      ],
+      "predicted_surfaces": [
+        "api",
+        "app-shell",
+        "artifact-rendering",
+        "legacy-cleanup",
+        "tracker-integration",
+        "workspace"
+      ],
+      "depends_on_lanes": [
+        "lane-b",
+        "lane-c"
+      ],
+      "parallel_group": 2
+    }
+  ],
+  "computed_at": "2026-10-25T00:40:06.385157+00:00",
+  "computed_from": "dependency_graph+ownership",
+  "planning_artifact_wps": [],
+  "planning_commit_sha": "85deb28ad61b6faf0a236b7525165eace16fb007",
+  "collapse_report": {
+    "events": [
+      {
+        "wp_a": "WP01",
+        "wp_b": "WP02",
+        "rule": "write_scope_overlap",
+        "evidence": "overlapping globs: 'docs/serve-v0.md' vs 'docs/serve-v0.md'; WP02 depends on WP01"
+      },
+      {
+        "wp_a": "WP01",
+        "wp_b": "WP05",
+        "rule": "write_scope_overlap",
+        "evidence": "overlapping globs: 'serve_commands.go' vs 'serve_commands.go', 'docs/serve-v0.md' vs 'docs/serve-v0.md'; WP05 depends on WP01"
+      },
+      {
+        "wp_a": "WP01",
+        "wp_b": "WP06",
+        "rule": "write_scope_overlap",
+        "evidence": "overlapping globs: 'serve_commands.go' vs 'serve_commands.go', 'docs/serve-v0.md' vs 'docs/serve-v0.md'"
+      },
+      {
+        "wp_a": "WP01",
+        "wp_b": "WP07",
+        "rule": "write_scope_overlap",
+        "evidence": "overlapping globs: 'serve_commands.go' vs 'serve_commands.go', 'docs/serve-v0.md' vs 'docs/serve-v0.md'"
+      },
+      {
+        "wp_a": "WP01",
+        "wp_b": "WP08",
+        "rule": "write_scope_overlap",
+        "evidence": "overlapping globs: 'docs/serve-v0.md' vs 'docs/serve-v0.md'"
+      },
+      {
+        "wp_a": "WP01",
+        "wp_b": "WP09",
+        "rule": "write_scope_overlap",
+        "evidence": "overlapping globs: 'docs/serve-v0.md' vs 'docs/serve-v0.md'"
+      },
+      {
+        "wp_a": "WP01",
+        "wp_b": "WP10",
+        "rule": "write_scope_overlap",
+        "evidence": "overlapping globs: 'main.go' vs 'main.go', 'docs/serve-v0.md' vs 'docs/serve-v0.md'"
+      },
+      {
+        "wp_a": "WP01",
+        "wp_b": "WP12",
+        "rule": "write_scope_overlap",
+        "evidence": "overlapping globs: 'docs/serve-v0.md' vs 'docs/serve-v0.md'"
+      },
+      {
+        "wp_a": "WP01",
+        "wp_b": "WP13",
+        "rule": "write_scope_overlap",
+        "evidence": "overlapping globs: 'docs/serve-v0.md' vs 'docs/serve-v0.md'"
+      },
+      {
+        "wp_a": "WP01",
+        "wp_b": "WP14",
+        "rule": "write_scope_overlap",
+        "evidence": "overlapping globs: 'docs/serve-v0.md' vs 'docs/serve-v0.md'"
+      },
+      {
+        "wp_a": "WP04",
+        "wp_b": "WP11",
+        "rule": "write_scope_overlap",
+        "evidence": "overlapping globs: 'quarantine.go' vs 'quarantine.go'; WP11 depends on WP04"
+      }
+    ],
+    "total_merges": 11,
+    "independent_wps_collapsed": 0,
+    "by_rule": {
+      "write_scope_overlap": 11
+    }
+  }
+}

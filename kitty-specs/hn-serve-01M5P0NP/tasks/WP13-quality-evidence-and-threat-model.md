@@ -112,7 +112,7 @@ Produce the cross-cutting evidence that individual WPs cannot, on the integrated
 **Steps**:
 
 1. Fixture: a hosted repository holding 1,000 Hubnot events. Generate events quickly in-process inside a client clone (the test is in `package main`, so it can call `appendEvent` with a test identity as other tests do), across at least three actors, including one ready, accepted, CI-tested proposal whose head descends from `main`. Publish them with `hn sync` through the shim so the server validates them on arrival (raise budgets with `hn serve repo set` if the defaults are too low for setup pushes; they are not).
-2. Each of 20 runs: reset `main` to its original tip with `lock-exec` (administrator precondition), append 50 new events to one actor chain locally, then time one `git push --atomic origin refs/hn/actors/<A> +<head>:refs/heads/main` through the shim. The push must be accepted.
+2. Snapshot the fixture once: copy the hosted bare repository and the server state for it into a pristine template directory, and copy the client clone as well. Each of 20 runs: restore the hosted repository, its server state and the client clone from that template (so every sample starts from exactly the same 1,000-event repository and the same `main` tip), append 50 new events to one actor chain locally, then time one `git push --atomic origin refs/hn/actors/<A> +<head>:refs/heads/main` through the shim. The push must be accepted. Assert before each timed push that the hosted repository holds exactly 1,000 events, so the workload never grows between samples; restoration time is excluded from the measurement.
 3. Compute the 95th percentile of the 20 durations (sort and take the 19th value) and require it below 5 seconds. Log all durations with `t.Logf`.
 4. Skip under `testing.Short()` with a visible reason; the full gate runs without `-short`. The `hn` binary used here is built without `-race`, so the race detector does not distort the measurement; note this in a comment.
 
@@ -126,7 +126,8 @@ Produce the cross-cutting evidence that individual WPs cannot, on the integrated
 2. Before and after, walk the server `HOME` recursively and record path, type, size, mode and modification time. Run every server-side process with `TMPDIR` set to an extra sentinel directory outside `HOME` in the shim's environment, and record that directory too.
 3. Assert every created or changed path is below `$HOME/.hn-serve/`, or is `$HOME/.ssh` or `$HOME/.ssh/authorized_keys`. Assert the sentinel directory is unchanged (the wrapper points Git's `TMPDIR` at `state/tmp`).
 4. Mode audit: every directory under `.hn-serve/` outside `repositories/*.git/` is 0700; every file under `state/` is 0600; hook scripts are 0700; `authorized_keys` is 0600; `.ssh` is 0700.
-5. Note in a comment that WP14 extends this audit with LFS paths in its own test.
+5. Enforced write boundary: when `bwrap` (bubblewrap) is available, run the same acceptance run with the SSH shim launching every server-side process (`hn serve git`, the hooks and the Git programs they start) inside `bwrap --ro-bind / / --dev /dev --proc /proc --bind $HOME/.hn-serve $HOME/.hn-serve --bind $HOME/.ssh $HOME/.ssh` (no tmpfs and no other writable path: `/tmp`, the rest of `HOME` and every other absolute path stay read-only), and require the whole run to succeed. Every server-side `hn serve` invocation in the run goes through the same wrapper, including the administration commands (`repo create`, `key add`, `key remove`, `repo set`, `lock-exec`), so the boundary covers administration as well as every session, hook and Git descendant. Any write outside the allowed locations, including transient temporary files, then fails the run. Validate the boundary itself: under the same wrapper, an intentional write probe to `$HOME/outside`, to `/tmp` and to an absolute path outside `HOME` must each fail. Skip only this step with a visible reason when `bwrap` or unprivileged user namespaces are unavailable, and record the skip in the Activity Log as an evidence limitation for NFR-004; the snapshot audit in steps 2 and 3 remains as supplementary evidence. Put the wrapper in the shim helper so WP14 reuses it.
+6. Note in a comment that WP14 extends this audit with LFS paths in its own test.
 
 **Files**: `serve_quality_test.go`.
 
@@ -148,8 +149,8 @@ Produce the cross-cutting evidence that individual WPs cannot, on the integrated
 
 **Steps**:
 
-1. Write "Verification and traceability" in `docs/serve-v0.md`: a table with one row per FR, NFR and SC, and one row per user-story scenario (US1-1 to US5-4), naming the test function(s) that cover it. Add a second table mapping the brief's six acceptance examples to their tests. State that the real rust-pingpong project run is a manual dogfooding check and that `TestServeReplication...Phase0...` reproduces its command flow in the automated gate. For US5 rows, name the WP14 tests (WP14 will create them; if WP14 is moved to another mission, the rows say so).
-2. `TestServeQualityTraceabilityTestsExist`: parse the tables, extract every test name, and require a `func NAME(` declaration in some root `*_test.go` file, except US5 rows when no `serve_lfs_test.go` exists (then those rows must carry the text "moved to its own mission"). Fail with the missing names.
+1. Write "Verification and traceability" in `docs/serve-v0.md`: a table with one row per FR, NFR and SC, and one row per user-story scenario (US1-1 to US5-4), naming the test function(s) that cover it. Add a second table mapping the brief's six acceptance examples to their tests. State that the real rust-pingpong project run is a manual dogfooding check and that `TestServeReplication...Phase0...` reproduces its command flow in the automated gate. Rows for FR-020, FR-021 and US5-1 to US5-4 are LFS rows. While `serve_lfs_test.go` does not exist (WP14 has not landed yet), each LFS row names its planned test and carries the exact marker `pending WP14`. If WP14 is moved to another mission, LFS rows carry `moved to its own mission` instead.
+2. `TestServeQualityTraceabilityTestsExist`: parse the tables, extract every test name, and require a `func NAME(` declaration in some root `*_test.go` file. Exception for LFS rows only: when `serve_lfs_test.go` does not exist, an LFS row passes if it carries `pending WP14` or `moved to its own mission`. When `serve_lfs_test.go` exists, those markers are forbidden on every row and every LFS row's tests must be declared. Any non-LFS row with a marker fails. Fail with the missing names or misplaced markers. This keeps WP13's gate green and truthful before WP14 and makes it strict afterwards (C-010 separability is preserved).
 
 **Files**: `docs/serve-v0.md`, `serve_quality_test.go`.
 
@@ -190,10 +191,10 @@ Integration-level tests over the whole server plus documentation checks. Run `go
 - [ ] T079 to T085 complete; full gate passes.
 - [ ] **FR-023**: every documented example is executed (guard green); the guide has the traceability section; the threat model, replication guide, governance guide and protocol notes are updated (by WP03, WP04, WP06, WP11 and this WP).
 - [ ] **NFR-001**: p95 under 5 seconds over 20 runs, durations logged.
-- [ ] **NFR-004 / NFR-008**: no write outside the allowed locations; modes as specified.
+- [ ] **NFR-004 / NFR-008**: the acceptance run passes inside the enforced write boundary, the out-of-bounds probes fail, the snapshot audit shows no write outside the allowed locations, and modes are as specified.
 - [ ] **NFR-007**: gate green; no pre-existing test file modified.
 - [ ] **C-001 / C-009 / C-011**: checks recorded.
-- [ ] **SC-001 / SC-006**: the six brief examples map to passing tests; every requirement maps to tests.
+- [ ] **SC-001 / SC-006**: the six brief examples map to passing tests; every requirement maps to tests, with LFS rows marked `pending WP14` until WP14 lands.
 - [ ] The real-sshd test passes on hosts with OpenSSH and skips with a reason elsewhere.
 
 ## Risks
