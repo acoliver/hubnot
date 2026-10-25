@@ -104,6 +104,7 @@ Usage:
   hn runner once --accept-pipeline NAME --accept-actor ACTOR
   hn runner watch --accept-pipeline NAME --accept-actor ACTOR
   hn decide PROPOSAL <--accept|--reject> [--body TEXT]
+  hn merge PROPOSAL --remote REMOTE [--branch BRANCH]
   hn merge PROPOSAL
   hn serve repo create|list|show|set|lock-exec ...
   hn serve key add|remove|list ...

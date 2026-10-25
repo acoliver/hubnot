@@ -1246,7 +1246,179 @@ repair, the commit and the reason in the administrator's own records. After
 the repair, protected updates are checked against the restored policy again.
 
 ## Advancing a protected branch
-<!-- section owned by WP10 -->
+
+A maintainer moves a protected branch to the head of an accepted proposal
+with one command, run in any clone that has the maintainer's identity and the
+proposal's evidence:
+
+```text
+hn merge PROPOSAL --remote REMOTE [--branch BRANCH]
+```
+
+`PROPOSAL` is the full candidate event ID. `REMOTE` is the name of a Git
+remote that points at an `hn serve` repository. `BRANCH` defaults to `main`
+and may be a short name or a `refs/heads/` ref. The maintainer needs no push
+rights to the branch: the server moves it only when the signed facts allow
+it, and the maintainer's client signs the merge fact afterwards. The server
+signs nothing.
+
+### Who may advance a branch
+
+The identity in the clone must be a maintainer under the candidate's base
+policy, which the client checks before it contacts the server. The server
+also requires the pushing actor to be a maintainer under the destination
+policy, the `.hn/policy.json` at the branch tip, and refuses anyone else with
+`advance-not-maintainer`. A participant who is not a maintainer can still
+push a ready, accepted head to a protected branch with a plain `git push`, as
+[Who may push a protected branch](#who-may-push-a-protected-branch)
+describes.
+
+### What the command does
+
+The command runs nine steps in order. A failure stops it with exit status 1,
+and the message names the step that failed.
+
+1. **Validate locally.** The client runs the checks of `hn merge` that do not
+   need a checkout: the full ID, the shallow-clone guards, lineage
+   eligibility, no current rejection, enough acceptances, the proposal code
+   ref, the maintainer check and readiness under the base policy.
+2. **Identify the remote.** The remote must advertise the `refs/hn/serve/v1`
+   marker. An ordinary remote is refused with
+   `remote REMOTE is not an hn serve remote; use hn merge PROPOSAL in a checkout of the target branch`,
+   and nothing is written.
+3. **Publish facts.** The client publishes its actor chain, proposal code refs
+   and memory streams the way `hn sync` does. A refusal prints the server's
+   `hn-serve/1` lines and stops.
+4. **Read the tip.** The client reads the branch tip `T` with
+   `git ls-remote` and fetches it into `refs/remotes/REMOTE/BRANCH` when the
+   commit is not in the clone.
+5. **Repair if already advanced.** When the proposal head `H` equals `T` or
+   is an ancestor of `T`, the client skips to step 8 without pushing. When
+   the clone already holds a merge fact for the candidate, the command prints
+   `Proposal ID is already advanced on REMOTE BRANCH and recorded as merged`
+   and exits 0.
+6. **Request advancement.** The client pushes the head with two push options:
+
+   ```text
+   git push --porcelain --push-option=hn-advance=PROPOSAL --push-option=hn-expected-tip=T REMOTE +H:refs/heads/BRANCH
+   ```
+
+   On a refusal, the client prints each `hn-serve/1` line and its sentence
+   without Git's `remote: ` prefix and exits 1. The branch does not move.
+7. **Confirm.** The branch on the server must now be at `H`. Otherwise the
+   command exits 1 with
+   `server accepted the push but BRANCH is at X; rerun hn merge PROPOSAL --remote REMOTE`.
+8. **Record the merge fact.** The client reads its events again, checks that
+   the candidate is still accepted, ready, eligible and unmerged and that the
+   identity is still a maintainer, then signs `proposal.merged`.
+9. **Publish again.** The client publishes the merge fact. If this push
+   fails, the fact stays in the clone, and the command exits 1 with
+   `merge fact recorded locally; run hn sync REMOTE to publish it`.
+
+The command never creates a commit, never changes the checkout and never
+moves a local branch. On success it prints:
+
+<!-- example: advance -->
+```sh
+hn merge sha256:1c2d3e4f... --remote origin
+```
+
+```text
+Advanced origin refs/heads/main to 9b2e4c6a8d0f for proposal 1c2d3e4f5a6b
+Recorded merge event 7d8e9f0a1b2c with 1 acceptance decision(s)
+```
+
+### Why facts travel in their own push
+
+The server evaluates each push as a whole and refuses all of it when any ref
+update fails, as
+[One verdict for the whole push](#one-verdict-for-the-whole-push) explains.
+If the acceptance and the branch update shared one push, a refused
+advancement would discard the acceptance too. Step 3 publishes the facts
+first, so they stay on the server even when step 6 is refused, and other
+participants can see them with `hn sync`.
+
+### The forced refspec and the server's checks
+
+Git refuses a non-fast-forward push on the client unless the refspec starts
+with `+`. With that refusal, a maintainer whose proposal no longer descends
+from the tip would only see Git's own `non-fast-forward` message. The
+command therefore uses `+H:refs/heads/BRANCH`, so Git sends the update and the
+server answers with `protected-not-fast-forward`, naming the current tip and
+directing `hn proposal revise`. The `+` does not let the push rewrite the
+branch: the server's checks in
+[The checks for a protected update](#the-checks-for-a-protected-update)
+refuse every update that is not a fast-forward to an accepted, tested head.
+
+`hn-advance=PROPOSAL` limits the server to that one candidate.
+`hn-expected-tip=T` tells the server which tip the client read in step 4.
+
+### What the merge fact records
+
+The merge fact that step 8 signs has `commit` equal to `head`, because the
+branch was fast-forwarded to the exact commit that CI tested. Its `policy` is
+the base policy digest, and its `evidence` lists the accepting decisions in
+sorted order. Every client validates it like a `--no-ff` merge fact, as
+[Fast-forward merge facts](governance-v0.md#fast-forward-merge-facts)
+describes.
+
+### Interruptions and reruns
+
+Rerun the same command after any interruption. A rerun checks everything
+again and records a missing merge fact exactly once:
+
+| Interrupted after | Server branch | Merge fact in the clone | What a rerun does |
+|----|----|----|----|
+| Step 3 | unchanged | absent | runs every step |
+| Step 6, before the server applied the update | unchanged | absent | runs every step |
+| Step 6, after the server applied the update | `H` | absent | takes the step 5 repair path and records the fact once |
+| Step 8 | `H` | present, unpublished | publishes the fact in step 3, then reports the branch as already advanced and exits 0 |
+| Step 9 | `H` | present, published | reports the branch as already advanced and exits 0 |
+
+The repair path prints:
+
+```text
+origin refs/heads/main already contains 9b2e4c6a8d0f for proposal 1c2d3e4f5a6b
+Recorded missing merge event 7d8e9f0a1b2c with 1 acceptance decision(s)
+```
+
+### A second maintainer runs the command
+
+A second maintainer who runs the command after the first one finished also
+takes the step 5 path. If the first maintainer's merge fact has already
+reached the second clone, the command reports the branch as advanced and
+exits 0. Otherwise the second clone records its own merge fact. Two merge
+facts for one candidate from different maintainers are valid. A lineage has
+a merge conflict only when two different candidates in it are merged, so
+`hn proposal status` still reports the candidate as `merged`.
+
+### Two advancements at the same time
+
+When two maintainers advance different proposals of one branch at the same
+moment, the server applies one of them. The other read the same tip `T` in
+step 4, so step 3 of the server's checks refuses it with
+`protected-stale-tip` before it reads any policy:
+
+<!-- example: reject-stale-advance -->
+The second of two concurrent advancement requests (US3-6):
+
+```text
+remote: hn-serve/1 reject ref=refs/heads/main actor=4f1c9a6d0d2b7e3a8c5f6e1b9d0a7c3e2f4b6d8a0c1e3f5a7b9d1c3e5f7a9b1c code=protected-stale-tip ids=3c5e7a9b1d2f4e6a8c0b2d4f6e8a0c1e3f5a7b9d,9b2e4c6a8d0f1e3c5a7b9d1f3e5c7a9b2d4f6e8a next="fetch, then retry or revise"
+remote: hn-serve: refs/heads/main moved to 9b2e4c6a8d0f1e3c5a7b9d1f3e5c7a9b2d4f6e8a after this request read 3c5e7a9b1d2f4e6a8c0b2d4f6e8a0c1e3f5a7b9d.
+```
+
+`hn merge --remote` prints the same two lines without the `remote: ` prefix.
+If the losing command reads the tip after the winner moved it, the server
+refuses it with `protected-not-fast-forward` instead. Either way the branch
+stays at the winner's head, and the losing author revises the proposal onto
+the new tip.
+
+### Merging without a remote
+
+`hn merge PROPOSAL` without `--remote` keeps its existing behavior. It
+creates a `--no-ff` merge commit in the current checkout and records a merge
+fact for that commit, and it does not contact any remote, including an
+`hn serve` remote. `--branch` without `--remote` is a usage error.
 
 ## Runners and verifiers
 <!-- section owned by WP12 -->

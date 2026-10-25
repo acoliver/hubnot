@@ -114,6 +114,13 @@ func cmdDecide(args []string) error {
 }
 
 func cmdMerge(args []string) error {
+	if mergeRemoteRequested(args) {
+		proposalID, remote, branchRef, err := parseMergeRemoteArgs(args)
+		if err != nil {
+			return err
+		}
+		return cmdMergeRemote(proposalID, remote, branchRef)
+	}
 	if len(args) != 1 {
 		return usageError("usage: hn merge PROPOSAL")
 	}
