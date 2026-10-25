@@ -71,9 +71,11 @@ type servePushOptions struct {
 }
 
 // classifyServeRef returns the class of ref, checking the classes in the
-// contract's order. A refs/heads/ name outside validServeBranchRef is
-// reserved, so every branch the verdict accepts can also be recorded in
-// branches.json.
+// contract's order. Every refs/heads/ name that git check-ref-format
+// accepts is a branch, and validServeGitBranchRef is also what branches.json
+// requires, so every branch the verdict accepts gets an owner record. Git
+// never passes a ref name that fails check-ref-format to the hooks; such a
+// name would be reserved.
 func classifyServeRef(config serveRepoConfig, ref string) serveRefClass {
 	if slices.Contains(config.Protected, ref) {
 		return serveRefProtected
@@ -96,7 +98,7 @@ func classifyServeRef(config serveRepoConfig, ref string) serveRefClass {
 	if name, ok := strings.CutPrefix(ref, serveTagRefPrefix); ok && name != "" {
 		return serveRefTag
 	}
-	if validServeBranchRef(ref) {
+	if validServeGitBranchRef(ref) {
 		return serveRefBranch
 	}
 	return serveRefReserved

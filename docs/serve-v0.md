@@ -716,8 +716,13 @@ this order:
 | `proposal` | `refs/hn/proposals/` followed by 64 lowercase hex digits |
 | `memory` | `refs/hn/memory/ACTOR/STREAM`, each part 64 lowercase hex digits |
 | `tag` | `refs/tags/NAME` |
-| `branch` | any other `refs/heads/NAME` |
+| `branch` | any other `refs/heads/NAME` that `git check-ref-format` accepts |
 | `reserved` | everything else |
+
+Git itself refuses ref names that `git check-ref-format` rejects before the
+hook runs, so every `refs/heads/` name Git lets through is an ordinary branch.
+That includes names Git accepts in a full ref but not as a short branch name,
+such as `refs/heads/@`.
 
 The rules for the `actor`, `proposal` and `memory` classes are in
 [Hubnot fact refs and budgets](#hubnot-fact-refs-and-budgets). The rules for
@@ -760,10 +765,9 @@ tag is rejected with `tag-immutable`. Create a new tag instead.
 
 A ref outside every class above is rejected with `reserved-ref`. That includes
 the server marker `refs/hn/serve/v1`, every other `refs/hn/serve/` ref, notes
-in `refs/notes/`, remote-tracking refs, branch names the server does not
-accept, and `refs/hn/` names that do not match the patterns in the class
-table, such as `refs/hn/actors/` followed by anything other than a full actor
-fingerprint.
+in `refs/notes/`, remote-tracking refs, and `refs/hn/` names that do not match
+the patterns in the class table, such as `refs/hn/actors/` followed by
+anything other than a full actor fingerprint.
 
 ### Push options
 
@@ -782,10 +786,21 @@ branch; otherwise every ref update gets `unsupported-command` as well.
 [Advancing a protected branch](#advancing-a-protected-branch) describes what
 the two options do.
 
-The hook reads at most 10,000 ref updates and 4 MiB of ref update lines per
-push. A larger push is rejected with one `over-budget` line with `ref=-` and
-`budget=ref-updates` (counted in ref updates) or `budget=ref-update-bytes`
-(counted in bytes). Split it into several pushes.
+### Ref update limits
+
+The hook accepts at most 10,000 ref updates and 4 MiB of ref update lines in
+one push. A larger push is rejected as a whole, and every ref update in it
+gets its own `over-budget` line pair with `budget=ref-updates`, in ref order
+like any other rejection. When the push has more than 10,000 ref updates,
+`limit=10000` and `measured` is the number of ref updates. When the lines take
+more than 4 MiB, `limit=4194304` and `measured` is their size in bytes; the
+sentence says which limit applies. The push log entry lists every ref update
+with one `over-budget` code each. Split such a push into several smaller
+pushes.
+
+The hook keeps memory use bounded for any number of ref updates. Past either
+limit it writes the ref updates to a private scratch directory in
+`state/tmp/` to sort them, and removes the directory before it exits.
 
 ### Rejection lines
 

@@ -1,11 +1,13 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
@@ -898,13 +900,32 @@ func isServeAlphanumeric(character byte) bool {
 }
 
 // validServeBranchRef is a conservative subset of what
-// git check-ref-format --branch accepts, applied to refs/heads/NAME.
+// git check-ref-format --branch accepts, applied to refs/heads/NAME. It
+// governs the branch names an administrator may protect.
 func validServeBranchRef(ref string) bool {
 	name, ok := strings.CutPrefix(ref, serveBranchRefPrefix)
-	if !ok || name == "" || name == "@" {
+	return ok && name != "@" && !strings.HasPrefix(name, "-") && validServeGitRefTail(name)
+}
+
+// validServeGitBranchRef reports whether ref is refs/heads/NAME and
+// git check-ref-format accepts it as a full ref name, which is the set of
+// branch refs git receive-pack lets through to the hooks. Ordinary-branch
+// classification and branch owner records use it, so every branch a mapped
+// actor can create also gets an owner record.
+func validServeGitBranchRef(ref string) bool {
+	name, ok := strings.CutPrefix(ref, serveBranchRefPrefix)
+	return ok && validServeGitRefTail(name)
+}
+
+// validServeGitRefTail applies git check-ref-format's rules to the part of
+// a full ref name after refs/heads/: no empty, leading-dot or .lock
+// component, no "..", "@{", control character, space, ~ ^ : ? * [ or \,
+// and no trailing "." or "/".
+func validServeGitRefTail(name string) bool {
+	if name == "" {
 		return false
 	}
-	if strings.HasPrefix(name, "-") || strings.HasPrefix(name, "/") || strings.HasSuffix(name, "/") ||
+	if strings.HasPrefix(name, "/") || strings.HasSuffix(name, "/") ||
 		strings.HasSuffix(name, ".") || strings.Contains(name, "..") || strings.Contains(name, "//") ||
 		strings.Contains(name, "@{") {
 		return false
@@ -1080,7 +1101,7 @@ func validateServeBranchOwners(owners serveBranchOwners) error {
 		return fmt.Errorf("unsupported branch owners version %d", owners.Version)
 	}
 	for index, branch := range owners.Branches {
-		if !validServeBranchRef(branch.Ref) {
+		if !validServeGitBranchRef(branch.Ref) {
 			return fmt.Errorf("branch owner ref %q is not a valid branch ref", branch.Ref)
 		}
 		if index > 0 {
@@ -1203,6 +1224,28 @@ type servePushLogUpdate struct {
 }
 
 func validateServePushLogEntry(entry servePushLogEntry) error {
+	if err := validateServePushLogHeader(entry); err != nil {
+		return err
+	}
+	if err := validateServePushLogCodeCount(entry.Verdict, int64(len(entry.Codes))); err != nil {
+		return err
+	}
+	for _, code := range entry.Codes {
+		if err := validateServePushLogCode(code); err != nil {
+			return err
+		}
+	}
+	for _, update := range entry.Updates {
+		if err := validateServePushLogUpdate(update); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// validateServePushLogHeader checks the fields of an entry other than its
+// updates and codes.
+func validateServePushLogHeader(entry servePushLogEntry) error {
 	if !validServeTimestamp(entry.Time) {
 		return fmt.Errorf("push log time %q is not RFC 3339 UTC", entry.Time)
 	}
@@ -1212,27 +1255,32 @@ func validateServePushLogEntry(entry servePushLogEntry) error {
 	if !validServeFingerprint(entry.Key) {
 		return fmt.Errorf("push log key %q is not a SHA256 key fingerprint", entry.Key)
 	}
-	switch entry.Verdict {
-	case servePushVerdictAccepted:
-		if len(entry.Codes) != 0 {
-			return errors.New("an accepted push log entry carries no reason codes")
-		}
-	case servePushVerdictRejected:
-		if len(entry.Codes) == 0 {
-			return errors.New("a rejected push log entry needs at least one reason code")
-		}
-	default:
+	if entry.Verdict != servePushVerdictAccepted && entry.Verdict != servePushVerdictRejected {
 		return fmt.Errorf("push log verdict %q is not accepted or rejected", entry.Verdict)
 	}
-	for _, code := range entry.Codes {
-		if !serveReasonKnown(code) {
-			return fmt.Errorf("push log reason code %q is not in the catalogue", code)
-		}
+	return nil
+}
+
+func validateServePushLogCodeCount(verdict string, count int64) error {
+	if verdict == servePushVerdictAccepted && count != 0 {
+		return errors.New("an accepted push log entry carries no reason codes")
 	}
-	for _, update := range entry.Updates {
-		if update.Ref == "" || !validGitOID(update.Old) || !validGitOID(update.New) {
-			return fmt.Errorf("push log update %+v is malformed", update)
-		}
+	if verdict == servePushVerdictRejected && count == 0 {
+		return errors.New("a rejected push log entry needs at least one reason code")
+	}
+	return nil
+}
+
+func validateServePushLogCode(code string) error {
+	if !serveReasonKnown(code) {
+		return fmt.Errorf("push log reason code %q is not in the catalogue", code)
+	}
+	return nil
+}
+
+func validateServePushLogUpdate(update servePushLogUpdate) error {
+	if update.Ref == "" || !validGitOID(update.Old) || !validGitOID(update.New) {
+		return fmt.Errorf("push log update %+v is malformed", update)
 	}
 	return nil
 }
@@ -1261,17 +1309,27 @@ func appendServePushLog(layout serveLayout, name string, entry servePushLogEntry
 		return err
 	}
 	line = append(line, '\n')
+	return appendServePushLogLine(layout, name, bytes.NewReader(line), int64(len(line)))
+}
+
+// appendServePushLogLine appends one complete, already validated push.log
+// line of size bytes read from line.
+func appendServePushLogLine(layout serveLayout, name string, line io.Reader, size int64) error {
 	path := layout.RepoPushLog(name)
 	file, err := openServePushLog(path)
 	if err != nil {
 		return err
 	}
 	info, err := file.Stat()
-	if err == nil && info.Size()+int64(len(line)) > servePushLogLimit {
+	if err == nil && info.Size()+size > servePushLogLimit {
 		err = fmt.Errorf("push log would exceed %d bytes; rotate %s", int64(servePushLogLimit), path)
 	}
 	if err == nil {
-		_, err = file.Write(line)
+		var written int64
+		written, err = io.Copy(file, io.LimitReader(line, size))
+		if err == nil && written != size {
+			err = fmt.Errorf("push log line ended after %d of %d bytes", written, size)
+		}
 	}
 	if err == nil {
 		err = file.Sync()
@@ -1283,6 +1341,141 @@ func appendServePushLog(layout serveLayout, name string, entry servePushLogEntry
 		return serveStateError(path, err)
 	}
 	return nil
+}
+
+// servePushLogStream builds one push.log line in a private staging file,
+// for a push whose updates and codes are too many to hold in memory. The
+// line is byte-identical to the one appendServePushLog writes for the same
+// entry. Add every update first, then every code, then call Append. Append
+// and Discard both remove the staging file.
+type servePushLogStream struct {
+	verdict string
+	path    string
+	file    *os.File
+	out     *bufio.Writer
+	updates int64
+	codes   int64
+	size    int64
+	err     error
+}
+
+const servePushLogStagingPrefix = ".hn-push-log-"
+
+// newServePushLogStream validates the entry's other fields and starts the
+// line in a new staging file in dir. The entry's Updates and Codes are
+// ignored.
+func newServePushLogStream(dir string, entry servePushLogEntry) (*servePushLogStream, error) {
+	if err := validateServePushLogHeader(entry); err != nil {
+		return nil, err
+	}
+	file, err := os.CreateTemp(dir, servePushLogStagingPrefix+"*")
+	if err != nil {
+		return nil, err
+	}
+	stream := &servePushLogStream{verdict: entry.Verdict, path: file.Name(), file: file, out: bufio.NewWriter(file)}
+	stream.write([]byte("{"))
+	for index, field := range [][2]string{{"time", entry.Time}, {"actor", entry.Actor}, {"key", entry.Key}, {"verdict", entry.Verdict}} {
+		if index > 0 {
+			stream.write([]byte(","))
+		}
+		stream.writeJSON(field[0])
+		stream.write([]byte(":"))
+		stream.writeJSON(field[1])
+	}
+	stream.write([]byte(`,"updates":[`))
+	if stream.err != nil {
+		stream.Discard()
+		return nil, stream.err
+	}
+	return stream, nil
+}
+
+func (stream *servePushLogStream) write(data []byte) {
+	if stream.err != nil {
+		return
+	}
+	n, err := stream.out.Write(data)
+	stream.size += int64(n)
+	stream.err = err
+}
+
+func (stream *servePushLogStream) writeJSON(value any) {
+	if stream.err != nil {
+		return
+	}
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		stream.err = err
+		return
+	}
+	stream.write(encoded)
+}
+
+// AddUpdate appends one update. Every update must come before every code.
+func (stream *servePushLogStream) AddUpdate(update servePushLogUpdate) error {
+	if stream.err == nil && stream.codes > 0 {
+		stream.err = errors.New("push log updates must precede its codes")
+	}
+	if stream.err == nil {
+		stream.err = validateServePushLogUpdate(update)
+	}
+	if stream.updates > 0 {
+		stream.write([]byte(","))
+	}
+	stream.writeJSON(update)
+	stream.updates++
+	return stream.err
+}
+
+// AddCode appends one reason code, in the order of the rejection lines.
+func (stream *servePushLogStream) AddCode(code string) error {
+	if stream.err == nil {
+		stream.err = validateServePushLogCode(code)
+	}
+	if stream.codes == 0 {
+		stream.write([]byte(`],"codes":[`))
+	} else {
+		stream.write([]byte(","))
+	}
+	stream.writeJSON(code)
+	stream.codes++
+	return stream.err
+}
+
+// Append completes the line and appends it to the push log of repository
+// name with the same size check as appendServePushLog.
+func (stream *servePushLogStream) Append(layout serveLayout, name string) error {
+	defer stream.Discard()
+	if stream.err == nil && !validServeRepositoryName(name) {
+		stream.err = fmt.Errorf("invalid repository name %q", name)
+	}
+	if stream.err == nil {
+		stream.err = validateServePushLogCodeCount(stream.verdict, stream.codes)
+	}
+	if stream.codes == 0 {
+		stream.write([]byte(`],"codes":[`))
+	}
+	stream.write([]byte("]}\n"))
+	if stream.err == nil {
+		stream.err = stream.out.Flush()
+	}
+	if stream.err == nil {
+		_, stream.err = stream.file.Seek(0, io.SeekStart)
+	}
+	if stream.err != nil {
+		return stream.err
+	}
+	return appendServePushLogLine(layout, name, stream.file, stream.size)
+}
+
+// Discard removes the staging file. It is safe to call more than once.
+func (stream *servePushLogStream) Discard() {
+	if stream.file == nil {
+		return
+	}
+	_ = stream.file.Close()
+	_ = os.Remove(stream.path)
+	stream.file = nil
 }
 
 // openServePushLog opens push.log for appending without following a

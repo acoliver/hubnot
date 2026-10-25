@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"slices"
@@ -1007,5 +1008,426 @@ func TestServePushHooksNeverTakeRepositoryLock(t *testing.T) {
 				t.Fatalf("%s calls %s; hooks run under the wrapper's repository lock", file, forbidden)
 			}
 		}
+	}
+}
+
+// Review cycle 1 regressions.
+
+// requireNoServeHookScratch requires the hooks to have removed every spill
+// directory and push log staging file from state/tmp.
+func requireNoServeHookScratch(t *testing.T, layout serveLayout) {
+	t.Helper()
+	entries, err := os.ReadDir(layout.Tmp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), serveHookSpillPrefix) || strings.HasPrefix(entry.Name(), servePushLogStagingPrefix) {
+			t.Fatalf("hook scratch %s was left in %s", entry.Name(), layout.Tmp)
+		}
+	}
+}
+
+// requireServeOverBudgetFields checks the budget fields and sentence every
+// over-budget rejection of one push carries.
+func requireServeOverBudgetFields(t *testing.T, rejections []serveRejection, limit, measured int64, sentence string) {
+	t.Helper()
+	for index, rejection := range rejections {
+		if rejection.Budget != serveRefUpdatesBudget || rejection.Limit != limit || rejection.Measured != measured ||
+			rejection.Next != serveReasonDefaultNext(serveReasonOverBudget) || rejection.Sentence != sentence {
+			t.Fatalf("rejection %d = %+v; want budget=%s limit=%d measured=%d and sentence %q",
+				index, rejection, serveRefUpdatesBudget, limit, measured, sentence)
+		}
+	}
+}
+
+// requireServeOverBudgetLog checks the last push log entry of an
+// over-budget push: rejected, attributed, every update and one over-budget
+// code per update.
+func requireServeOverBudgetLog(t *testing.T, f *servePushFixture, who string, updates []servePushLogUpdate) {
+	t.Helper()
+	entries := f.pushLog()
+	if len(entries) == 0 {
+		t.Fatal("the over-budget push left no push log entry")
+	}
+	last := entries[len(entries)-1]
+	if last.Verdict != servePushVerdictRejected || last.Actor != f.actors[who] || last.Key != f.keys[who].Fingerprint {
+		t.Fatalf("push log entry %s %s %s, want rejected by %s with key %s", last.Verdict, last.Actor, last.Key, f.actors[who], f.keys[who].Fingerprint)
+	}
+	if !reflect.DeepEqual(last.Updates, updates) {
+		t.Fatalf("push log lists %d updates, want the %d of the push in input order", len(last.Updates), len(updates))
+	}
+	if len(last.Codes) != len(updates) {
+		t.Fatalf("push log has %d codes, want one per ref update (%d)", len(last.Codes), len(updates))
+	}
+	for index, code := range last.Codes {
+		if code != serveReasonOverBudget {
+			t.Fatalf("push log code %d = %s, want %s", index, code, serveReasonOverBudget)
+		}
+	}
+}
+
+// Issue 1: a real push of 10,001 new branches through hn serve git and
+// receive-pack gets one over-budget pair per ref, in ref order and
+// attributed to the pusher, with budget=ref-updates; the push log lists all
+// 10,001 updates; the hosted refs and object database are unchanged.
+func TestServePushOverRefUpdateBudgetRejectsEveryRef(t *testing.T) {
+	f := newServePushFixture(t)
+	tip := f.commitOn("A", "origin/main")
+	count := serveRefUpdateLineLimit + 1
+	var commands strings.Builder
+	want := make(map[string]string, count)
+	expected := make([]servePushLogUpdate, 0, count)
+	for index := 0; index < count; index++ {
+		ref := fmt.Sprintf("refs/heads/over/%05d", index)
+		fmt.Fprintf(&commands, "create %s %s\n", ref, tip)
+		want[ref] = serveReasonOverBudget
+		expected = append(expected, servePushLogUpdate{Ref: ref, Old: servePushZero, New: tip})
+	}
+	create := exec.Command("git", "update-ref", "--stdin")
+	create.Dir, create.Env, create.Stdin = f.work["A"], f.clients["A"].Env, strings.NewReader(commands.String())
+	if output, err := create.CombinedOutput(); err != nil {
+		t.Fatalf("create local branches: %v\n%s", err, output)
+	}
+
+	rejections := f.reject("A", want, "origin", "refs/heads/over/*:refs/heads/over/*")
+	requireServeOverBudgetFields(t, rejections, serveRefUpdateLineLimit, int64(count),
+		fmt.Sprintf("the push carries %d ref updates and the server accepts at most %d in one push; push fewer refs at a time.", count, serveRefUpdateLineLimit))
+	if _, status := f.clients["A"].exec("", "git", "--git-dir="+f.hosted, "cat-file", "-e", tip); status == 0 {
+		t.Fatalf("the rejected commit %s is in the hosted object database", tip)
+	}
+	// Git sends the commands in its own order; the log keeps that order,
+	// which for these names is ref order.
+	entries := f.pushLog()
+	logged := slices.Clone(entries[len(entries)-1].Updates)
+	slices.SortFunc(logged, func(a, b servePushLogUpdate) int { return strings.Compare(a.Ref, b.Ref) })
+	requireServeOverBudgetLog(t, f, "A", entries[len(entries)-1].Updates)
+	if !reflect.DeepEqual(logged, expected) {
+		t.Fatalf("push log updates do not list the %d pushed refs", count)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("push log has %d entries, want only the rejected push", len(entries))
+	}
+	requireNoServeHookScratch(t, f.h.Layout())
+}
+
+// Issue 1, byte bound: pre-receive input over 4 MiB in fewer than 10,000
+// lines, in no particular ref order, gets one over-budget pair per ref in
+// ref order with budget=ref-updates and the byte limit and count, and a
+// push log entry listing the updates in input order.
+func TestServePushOverByteBudgetNamesEveryRef(t *testing.T) {
+	f := newServePushFixture(t)
+	tip := f.hostedRef("refs/heads/main")
+	padding := strings.Repeat("p", 180)
+	var stdin strings.Builder
+	want := map[string]string{}
+	var updates []servePushLogUpdate
+	for index := 0; stdin.Len() <= serveRefUpdateByteLimit; index++ {
+		// 7919 is coprime to 100000, so the suffixes are distinct and
+		// arrive out of ref order.
+		ref := fmt.Sprintf("refs/heads/long/%s/%s/%05d", padding, padding, (index*7919)%100000)
+		fmt.Fprintf(&stdin, "%s %s %s\n", servePushZero, tip, ref)
+		want[ref] = serveReasonOverBudget
+		updates = append(updates, servePushLogUpdate{Ref: ref, Old: servePushZero, New: tip})
+	}
+	if len(updates) > serveRefUpdateLineLimit {
+		t.Fatalf("fixture has %d lines; it must stay within the line bound", len(updates))
+	}
+	env := map[string]string{
+		"HN_SERVE_ACTOR":      f.actors["A"],
+		"HN_SERVE_KEY":        f.keys["A"].Fingerprint,
+		"HN_SERVE_REPOSITORY": "r",
+		"GIT_DIR":             ".",
+	}
+	before := f.refs()
+	output, status := f.h.Exec(serveHarnessRun{Env: env, Stdin: stdin.String(), Dir: f.hosted}, "serve", "hook", "pre-receive")
+	if status != 1 {
+		t.Fatalf("pre-receive over 4 MiB: exit %d, want 1", status)
+	}
+	if after := f.refs(); after != before {
+		t.Fatal("an over-budget pre-receive changed hosted refs")
+	}
+	rejections := requireServePushRejections(t, output, f.actors["A"], want)
+	measured := int64(stdin.Len())
+	requireServeOverBudgetFields(t, rejections, serveRefUpdateByteLimit, measured,
+		fmt.Sprintf("the push's ref update lines take %d bytes and the server reads at most %d bytes of them in one push; push fewer refs at a time.", measured, serveRefUpdateByteLimit))
+	requireServeOverBudgetLog(t, f, "A", updates)
+	requireNoServeHookScratch(t, f.h.Layout())
+}
+
+// Issue 2: refs/heads/@ is a branch Git accepts, so a mapped actor can
+// create it, becomes its owner and the ownership rules apply to it.
+func TestServePushBranchNamedAt(t *testing.T) {
+	f := newServePushFixture(t)
+	const at = "refs/heads/@"
+	b := f.actors["B"]
+	hostedAt := func() string {
+		return strings.TrimSpace(serveHarnessGit(t, f.hosted, "for-each-ref", "--format=%(objectname)", at))
+	}
+
+	created := f.commitOn("B", "origin/main")
+	f.push("B", "origin", "HEAD:"+at)
+	if got := hostedAt(); got != created {
+		t.Fatalf("%s = %q, want %s", at, got, created)
+	}
+	if owner, recorded := lookupServeBranchOwner(f.owners(), at); !recorded || owner.Owner != b {
+		t.Fatalf("owner record for %s = %+v, %v; want owner B", at, owner, recorded)
+	}
+
+	forced := f.commitOn("A", "origin/main")
+	rejections := f.reject("A", map[string]string{at: serveReasonBranchNotOwner}, "--force", "origin", "HEAD:"+at)
+	if !reflect.DeepEqual(rejections[0].IDs, []string{b}) {
+		t.Fatalf("branch-not-owner ids %q, want B", rejections[0].IDs)
+	}
+	f.reject("A", map[string]string{at: serveReasonBranchNotOwner}, "origin", ":"+at)
+
+	rewritten := f.commitOn("B", "origin/main")
+	f.push("B", "--force", "origin", "HEAD:"+at)
+	f.push("M", "origin", ":"+at)
+	if got := hostedAt(); got != "" {
+		t.Fatalf("%s still exists at %s after the maintainer deleted it", at, got)
+	}
+	if _, recorded := lookupServeBranchOwner(f.owners(), at); recorded {
+		t.Fatalf("the owner record for %s survived its deletion", at)
+	}
+	f.requirePushLog([]servePushLogWant{
+		{"B", servePushVerdictAccepted, []servePushLogUpdate{{at, servePushZero, created}}, nil},
+		{"A", servePushVerdictRejected, []servePushLogUpdate{{at, created, forced}}, []string{serveReasonBranchNotOwner}},
+		{"A", servePushVerdictRejected, []servePushLogUpdate{{at, created, servePushZero}}, []string{serveReasonBranchNotOwner}},
+		{"B", servePushVerdictAccepted, []servePushLogUpdate{{at, created, rewritten}}, nil},
+		{"M", servePushVerdictAccepted, []servePushLogUpdate{{at, rewritten, servePushZero}}, nil},
+	})
+}
+
+// Issue 2: ordinary-branch classification and owner records accept exactly
+// the refs/heads/ names git check-ref-format accepts, while protected
+// branches keep the stricter --branch subset.
+func TestServePushBranchRefsMatchGitCheckRefFormat(t *testing.T) {
+	config, err := newServeRepoConfig("r", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{
+		"feature/x", "@", "-dash", "a/-b", "a@b", "@/x", "x/@", "{x}", "\xc3\xbcber", "a.b", "a/b.c",
+		"", "x.lock", "a.lock/b", "a/b.lock", "a..b", "a/.b", ".a", "a/", "a.", "a//b", "a@{b",
+		"a b", "a~b", "a^b", "a:b", "a?b", "a*b", "a[b", "a\\b", "a\x01b", "a\x7fb",
+	} {
+		ref := serveBranchRefPrefix + name
+		check := exec.Command("git", "check-ref-format", ref)
+		gitAccepts := check.Run() == nil
+		if got := validServeGitBranchRef(ref); got != gitAccepts {
+			t.Errorf("validServeGitBranchRef(%q) = %v, git check-ref-format says %v", ref, got, gitAccepts)
+		}
+		wantClass := serveRefReserved
+		if gitAccepts {
+			wantClass = serveRefBranch
+		}
+		if got := classifyServeRef(config, ref); got != wantClass {
+			t.Errorf("classifyServeRef(%q) = %s, want %s", ref, got, wantClass)
+		}
+	}
+	owners := serveBranchOwners{Version: serveBranchOwnersVersion, Branches: []serveBranchOwner{
+		{Ref: "refs/heads/-dash", Owner: serveStateTestActor("a"), Created: "2026-10-25T10:00:00Z"},
+		{Ref: "refs/heads/@", Owner: serveStateTestActor("b"), Created: "2026-10-25T10:00:00Z"},
+	}}
+	if err := validateServeBranchOwners(owners); err != nil {
+		t.Fatalf("owner records for Git-valid branches refused: %v", err)
+	}
+	for _, ref := range []string{"refs/heads/@", "refs/heads/-dash"} {
+		if validServeBranchRef(ref) {
+			t.Errorf("validServeBranchRef(%q) accepted a name git check-ref-format --branch refuses", ref)
+		}
+	}
+}
+
+// The spill sorts in bounded runs and merges in bounded groups; with tiny
+// limits a few hundred updates exercise several merge passes. Equal refs
+// keep their input order, and eachInput returns the input order.
+func TestServePushSpillSortsAcrossRuns(t *testing.T) {
+	spill, err := newServeRefUpdateSpill(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	spill.runLimit, spill.fanIn = 300, 3
+	var input []serveRefUpdate
+	for index := 0; index < 500; index++ {
+		update := serveRefUpdate{
+			Old: fmt.Sprintf("%040x", index), New: strings.Repeat("b", 40),
+			Ref: fmt.Sprintf("refs/heads/s%03d", (index*37)%211),
+		}
+		input = append(input, update)
+		if err := spill.add(update); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := spill.finish(); err != nil {
+		t.Fatal(err)
+	}
+	if spill.files <= 3 || len(spill.runs) > spill.fanIn {
+		t.Fatalf("%d files written and %d runs left; want several runs merged down to at most %d", spill.files, len(spill.runs), spill.fanIn)
+	}
+	want := slices.Clone(input)
+	slices.SortStableFunc(want, func(a, b serveRefUpdate) int { return strings.Compare(a.Ref, b.Ref) })
+	var sorted, ordered []serveRefUpdate
+	if err := spill.eachSorted(func(update serveRefUpdate) error { sorted = append(sorted, update); return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if err := spill.eachInput(func(update serveRefUpdate) error { ordered = append(ordered, update); return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(sorted, want) {
+		t.Fatal("eachSorted is not a stable sort of the input by ref")
+	}
+	if !reflect.DeepEqual(ordered, input) || spill.count != int64(len(input)) {
+		t.Fatalf("eachInput returned %d updates out of input order; count %d", len(ordered), spill.count)
+	}
+	dir := spill.dir
+	if err := spill.remove(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(dir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("spill directory %s survived remove: %v", dir, err)
+	}
+}
+
+// readServeRefUpdates keeps updates in memory within the bounds, spills
+// every update beyond them when given a directory, and reports malformed
+// lines, including one longer than a pkt-line, without spilling more.
+func TestServePushReadRefUpdatesSpillsBeyondBounds(t *testing.T) {
+	old, newer := strings.Repeat("a", 40), strings.Repeat("b", 40)
+	parent := t.TempDir()
+	within, err := readServeRefUpdates(strings.NewReader(numberedServeRefUpdates(old, newer, 3)), 40, parent)
+	if err != nil || within.spill != nil || len(within.Updates) != 3 || within.Budget() != nil {
+		t.Fatalf("within bounds: %+v, %v", within, err)
+	}
+
+	many := numberedServeRefUpdates(old, newer, serveRefUpdateLineLimit+5)
+	beyond, err := readServeRefUpdates(strings.NewReader(many), 40, parent)
+	if err != nil || beyond.Malformed != nil || beyond.Updates != nil || beyond.spill == nil {
+		t.Fatalf("beyond the line bound: %+v, %v", beyond, err)
+	}
+	if beyond.spill.count != serveRefUpdateLineLimit+5 || beyond.Lines != serveRefUpdateLineLimit+5 || beyond.Bytes != int64(len(many)) {
+		t.Fatalf("spilled %d updates of %d lines and %d bytes", beyond.spill.count, beyond.Lines, beyond.Bytes)
+	}
+	if budget := beyond.Budget(); budget == nil || budget.Budget != serveRefUpdatesBudget || budget.Measured != serveRefUpdateLineLimit+5 {
+		t.Fatalf("budget = %+v", budget)
+	}
+	if err := beyond.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if entries, _ := os.ReadDir(parent); len(entries) != 0 {
+		t.Fatalf("Close left %d entries in the spill parent", len(entries))
+	}
+
+	for name, input := range map[string]string{
+		"malformed after the bound": many + "zz " + newer + " refs/heads/bad\n",
+		"overlong line":             old + " " + newer + " refs/heads/" + strings.Repeat("x", serveRefUpdateMaxLine) + "\n",
+		"unterminated":              old + " " + newer + " refs/heads/x",
+		"repeated ref":              old + " " + newer + " refs/heads/x\n" + old + " " + newer + " refs/heads/x\n",
+	} {
+		read, err := readServeRefUpdates(strings.NewReader(input), 40, parent)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if read.Malformed == nil || read.Updates != nil {
+			t.Fatalf("%s: malformed %v with %d updates kept", name, read.Malformed, len(read.Updates))
+		}
+		if err := read.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if entries, _ := os.ReadDir(parent); len(entries) != 0 {
+		t.Fatalf("malformed input left %d entries in the spill parent", len(entries))
+	}
+}
+
+// The streamed push log line is byte-identical to appendServePushLog's for
+// the same entry, and an invalid stream changes nothing and leaves no
+// staging file.
+func TestServePushLogStreamMatchesAppend(t *testing.T) {
+	actor, key := serveStateTestActor("stream"), serveTestFingerprint("stream")
+	entry := servePushLogEntry{
+		Time: "2026-10-25T10:00:00Z", Actor: actor, Key: key, Verdict: servePushVerdictRejected,
+		Updates: []servePushLogUpdate{
+			{Ref: "refs/heads/<a&b>", Old: servePushZero, New: strings.Repeat("2", 40)},
+			{Ref: "refs/heads/@", Old: strings.Repeat("1", 40), New: servePushZero},
+		},
+		Codes: []string{serveReasonOverBudget, serveReasonOverBudget},
+	}
+	direct, streamed := newServeTestLayout(t), newServeTestLayout(t)
+	addServeTestRepo(t, direct, "demo")
+	addServeTestRepo(t, streamed, "demo")
+	if err := appendServePushLog(direct, "demo", entry); err != nil {
+		t.Fatal(err)
+	}
+	staging := t.TempDir()
+	stream, err := newServePushLogStream(staging, entry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, update := range entry.Updates {
+		if err := stream.AddUpdate(update); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, code := range entry.Codes {
+		if err := stream.AddCode(code); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := stream.Append(streamed, "demo"); err != nil {
+		t.Fatal(err)
+	}
+	want, _ := os.ReadFile(direct.RepoPushLog("demo"))
+	got, _ := os.ReadFile(streamed.RepoPushLog("demo"))
+	if len(want) == 0 || !bytes.Equal(got, want) {
+		t.Fatalf("streamed line:\n%s\nwant:\n%s", got, want)
+	}
+	accepted := servePushLogEntry{Time: entry.Time, Actor: actor, Key: key, Verdict: servePushVerdictAccepted}
+	stream, err = newServePushLogStream(staging, accepted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := stream.Append(direct, "demo"); err != nil {
+		t.Fatal(err)
+	}
+	if err := appendServePushLog(streamed, "demo", accepted); err != nil {
+		t.Fatal(err)
+	}
+	want, _ = os.ReadFile(direct.RepoPushLog("demo"))
+	got, _ = os.ReadFile(streamed.RepoPushLog("demo"))
+	if !bytes.Equal(got, want) {
+		t.Fatalf("streamed accepted entry:\n%s\nwant:\n%s", got, want)
+	}
+
+	for name, build := range map[string]func(*servePushLogStream) error{
+		"rejected without codes": func(*servePushLogStream) error { return nil },
+		"bad update": func(stream *servePushLogStream) error {
+			_ = stream.AddUpdate(servePushLogUpdate{Ref: "refs/heads/x", Old: "zz", New: "zz"})
+			return stream.AddCode(serveReasonOverBudget)
+		},
+		"unknown code": func(stream *servePushLogStream) error { return stream.AddCode("nope") },
+		"update after codes": func(stream *servePushLogStream) error {
+			_ = stream.AddCode(serveReasonOverBudget)
+			return stream.AddUpdate(entry.Updates[0])
+		},
+	} {
+		stream, err := newServePushLogStream(staging, servePushLogEntry{Time: entry.Time, Actor: actor, Key: key, Verdict: servePushVerdictRejected})
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = build(stream)
+		if err := stream.Append(streamed, "demo"); err == nil {
+			t.Fatalf("%s: appended an invalid streamed entry", name)
+		}
+		if after, _ := os.ReadFile(streamed.RepoPushLog("demo")); !bytes.Equal(after, got) {
+			t.Fatalf("%s: an invalid streamed entry changed push.log", name)
+		}
+	}
+	if _, err := newServePushLogStream(staging, servePushLogEntry{Time: "now", Actor: actor, Key: key, Verdict: servePushVerdictAccepted}); err == nil {
+		t.Fatal("started a stream with an invalid time")
+	}
+	if entries, _ := os.ReadDir(staging); len(entries) != 0 {
+		t.Fatalf("streams left %d staging files", len(entries))
 	}
 }
