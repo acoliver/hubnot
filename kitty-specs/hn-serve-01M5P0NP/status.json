@@ -206,6 +206,9 @@
       "last_event_id": "01M5S5F3NT68WTJQ953Y692NR5",
       "last_transition_at": "2026-10-25T09:15:03.227049+00:00",
       "model": "__resolved_model_absent__",
+      "notes": [
+        "WP06 implemented in 672fcca (planning-artifact cleanup in ae13e65). hn serve git --key: closed SSH_ORIGINAL_COMMAND grammar (no shell), checks in contract order (unknown-key, unsupported-command, unhosted-repository, repository-busy) with one hn-serve/1 ref=- line on stderr, empty stdout, exit 1; Git started with env built from scratch (HN_INTERNAL_TESTING test exception documented), upload-pack --strict without lock, receive-pack under the repo lock with -c core.hooksPath/receive.fsckObjects/receive.advertisePushOptions; Git exit status passes through; LFS refused in isolated serveLFSSession arm guarded by serveLFSEnabled (WP14). Route wired in serveRouteFor(git). lookupServeKey added to serve_state.go (WP01 maintainer note). Harness: sshd-like shim running the exact command= value under env -i, client Git/GitFailure/Hn/HnFailure helpers. Tests: grammar tables, env builder, US2-1..5 via real git through the shim (v0 and v2, packet-trace verified), LFS seam, lock busy plus concurrent clone, fake-git check of exact argv/env/lock hold, exit status and usage; lock and protocol mutations confirmed caught. Docs: serve guide Connecting over SSH, threat-model hn serve trust boundary. WP07 activity log got the hooks-never-take-RepoLock note. Gate: gofmt -l clean; go vet ./... and go build ./... pass; git diff --check clean; go test -race -count=1 -timeout 60m -skip ^TestMemoryIndexTenThousandRecordsPerformanceAndRecovery$ ./... ok (518.9s); go test -count=1 -run ^TestMemoryIndexTenThousandRecordsPerformanceAndRecovery$ . ok (44.1s). Pre-existing tests unmodified."
+      ],
       "provider": "__resolved_provider_absent__",
       "role": "implementer",
       "shell_pid": 254411,
