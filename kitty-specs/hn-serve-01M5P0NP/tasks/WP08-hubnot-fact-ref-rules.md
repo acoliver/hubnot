@@ -208,3 +208,4 @@ Black-box pushes with real signed facts through the shim. Run `go test -race -ru
 ## Activity Log
 
 - 2026-10-25T00:09:18Z – system – Prompt generated via /spec-kitty.tasks
+- 2026-10-25T10:16:47Z – llxprt – WP07 independent review requests changes for over-budget per-ref diagnostics/audit completeness and valid refs/heads/@ classification. See tasks/WP07-hook-and-verdict-framework/review-feedback-1.md. WP08 must wait for the corrected WP07 framework and rebase any existing work onto the corrected lane head before continuing. No WP08 status change is requested.

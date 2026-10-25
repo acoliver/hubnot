@@ -228,3 +228,5 @@ Real governance evidence through the public CLIs on hosted repositories, with ad
 ## Activity Log
 
 - 2026-10-25T00:09:18Z – system – Prompt generated via /spec-kitty.tasks
+- 2026-10-25T11:27:14Z – llxprt – WP08 independent review requests changes: admitted within-budget logs can poison subsequent hosted-fact reads, and partial measurements violate required budget rejection priority. See tasks/WP08-hubnot-fact-ref-rules/review-feedback-1.md. Wait for corrected WP08 and rebase any existing work onto the corrected lane head before continuing. This handoff does not request a WP09 status change.
+- 2026-10-25T11:58:07Z – llxprt – WP08 independent review cycle 2 returned WP08 to planned: NFR-002/T048.3 range measurement double-counts an older hosted signature blob reused as a valid run log, causing valid at-limit max-objects and max-total-bytes pushes to fail. See tasks/WP08-hubnot-fact-ref-rules/review-feedback-2.md. Wait for corrected WP08 and rebase any existing work onto the corrected lane head before continuing. No WP09 status change requested; preserve the protected-rule ownership.
