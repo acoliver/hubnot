@@ -1,19 +1,19 @@
 {
-  "event_count": 103,
-  "last_event_id": "01M5SFNM69D4X58PT8X7QE556E",
-  "materialized_at": "2026-10-25T12:13:22.505879+00:00",
+  "event_count": 104,
+  "last_event_id": "01M5SGBC9YT2RPT89E8TDAGGHY",
+  "materialized_at": "2026-10-25T12:25:15.326857+00:00",
   "mission_number": "",
   "mission_slug": "hn-serve-01M5P0NP",
   "mission_type": "",
   "summary": {
-    "approved": 8,
+    "approved": 9,
     "blocked": 0,
     "canceled": 0,
     "claimed": 0,
     "done": 0,
     "for_review": 0,
     "in_progress": 0,
-    "in_review": 1,
+    "in_review": 0,
     "planned": 5
   },
   "work_packages": {
@@ -267,14 +267,14 @@
       }
     },
     "WP08": {
-      "actor": "llxprt",
+      "actor": "user",
       "agent": "llxprt",
       "agent_profile": "__resolved_profile_absent__",
       "agent_profile_version": "__resolved_profile_version_absent__",
       "force_count": 2,
-      "lane": "in_review",
-      "last_event_id": "01M5SFNM69D4X58PT8X7QE556E",
-      "last_transition_at": "2026-10-25T12:13:22.505879+00:00",
+      "lane": "approved",
+      "last_event_id": "01M5SGBC9YT2RPT89E8TDAGGHY",
+      "last_transition_at": "2026-10-25T12:25:15.326857+00:00",
       "model": "__resolved_model_absent__",
       "notes": [
         "Implemented T048-T053 in commit 010d99f. serve_verdict_facts.go: actor rule (rewrite, key mismatch, budgets via measureServeActorRangeUnderBudgets over OLD..NEW plus the batched hosted prefix, validateQuarantinedActorRange with a diagnostic walk naming the full event ID even for broken signatures, replicationEventDependencyWithOptions with AllowAbsentProposalCode, closure/issue/identity projection, accepted events added to PushFacts); proposal rule (immutable, dependency-missing, signed head, base ancestry, budgets); memory rule (append-only, owner, budgets, loadMemoryStreamAt); over-budget mapping in contract order; hosted-load failure rejects every fact and protected update. serve_verdict.go: placeholders removed, protected placeholder kept for WP09. Range helper lives in serve_verdict_facts.go (owned file) and a unit test asserts identical totals and inclusive limits vs measureQuarantinedSelectionUnderBudgets, including repeated run logs. serve_facts_test.go covers US1-1, code-ref ordering, rejected actor events not leaking, US1-3, US1-4, US1-5, dependency-missing, proposal and memory rules, all five budgets at limit and one over, and the documented example. docs/serve-v0.md section written. Gate: gofmt -l clean; go vet and go build pass; go test -race -count=1 -timeout 60m -skip TestMemoryIndexTenThousandRecordsPerformanceAndRecovery ./... pass (230s); perf test without -race pass (11s).",
@@ -284,10 +284,10 @@
       "provider": "__resolved_provider_absent__",
       "review": null,
       "review_result": {
-        "feedback_path": "/home/acoliver/projects/appaday/gitium/hubnot/kitty-specs/hn-serve-01M5P0NP/tasks/WP08-hubnot-fact-ref-rules/review-cycle-2.md",
-        "reference": "review-cycle://hn-serve-01M5P0NP/WP08-hubnot-fact-ref-rules/review-cycle-2.md",
+        "feedback_path": "/home/acoliver/projects/appaday/gitium/hubnot/kitty-specs/hn-serve-01M5P0NP/tasks/WP08-hubnot-fact-ref-rules/review-cycle-3.md",
+        "reference": "review-cycle://hn-serve-01M5P0NP/WP08-hubnot-fact-ref-rules/review-cycle-3.md",
         "reviewer": "user",
-        "verdict": "changes_requested"
+        "verdict": "approved"
       },
       "role": "reviewer",
       "shell_pid": 2593644,
