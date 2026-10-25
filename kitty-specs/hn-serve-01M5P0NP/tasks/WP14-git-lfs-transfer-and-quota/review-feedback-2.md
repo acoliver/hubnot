@@ -1,13 +1,3 @@
----
-affected_files: []
-cycle_number: 2
-mission_slug: hn-serve-01M5P0NP
-reproduction_command:
-reviewed_at: '2026-10-25T17:11:58Z'
-reviewer_agent: user
-wp_id: WP14
----
-
 # WP14 review cycle 2
 
 ## Verdict: changes requested
