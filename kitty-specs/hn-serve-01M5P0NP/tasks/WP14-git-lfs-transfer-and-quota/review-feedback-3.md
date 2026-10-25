@@ -1,13 +1,3 @@
----
-affected_files: []
-cycle_number: 3
-mission_slug: hn-serve-01M5P0NP
-reproduction_command:
-reviewed_at: '2026-10-25T17:54:18Z'
-reviewer_agent: user
-wp_id: WP14
----
-
 # WP14 review cycle 3: changes requested
 
 ## Blocking finding: a stored OID bypasses the upload staging bound
