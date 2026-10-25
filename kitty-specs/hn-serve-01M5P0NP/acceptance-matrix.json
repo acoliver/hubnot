@@ -28,10 +28,10 @@
       "criterion_id": "FR-003",
       "description": "Verify FR-003 is satisfied",
       "proof_type": "automated_test",
-      "evidence": "TestServeAdminKeysMaintainAuthorizedKeys, TestServeAdminRegistryBindingDefect, TestServeStateRegistryRefusesInvalidContent, TestServeStateFingerprintShape, TestServeQualityWrittenPathsAndModes; gate log /home/acoliver/projects/appaday/gitium/.scratch/accept/hn-serve-independent-61f7d39/race.log",
+      "evidence": "TestServeAdminKeysMaintainAuthorizedKeys; TestServeAdminRegistryBindingDefect; TestServeStateRegistryRefusesInvalidContent; TestServeStateFingerprintShape; gate log /home/acoliver/projects/appaday/gitium/.scratch/accept/race.log; candidate 151b7be421b507596728c507370adcb5b14ccfdf",
       "pass_fail": "pass",
       "verified_by": "llxprt-gpt-sol-high",
-      "verified_at": "2026-10-25T19:08:44.288644+00:00",
+      "verified_at": "2026-10-25T20:10:22.907919+00:00",
       "notes": "TODO: replace with a real acceptance criterion"
     },
     {
