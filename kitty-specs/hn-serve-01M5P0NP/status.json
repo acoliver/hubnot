@@ -445,6 +445,9 @@
       "last_event_id": "01M5STW82JXWE13901D0S4YFTV",
       "last_transition_at": "2026-10-25T15:29:13.810585+00:00",
       "model": "__resolved_model_absent__",
+      "notes": [
+        "WP13 ready for review (commit aeeaefd). Added serve_quality_test.go (FR-023 example guard; NFR-001 timing p95 706ms over 20 restored 1,000-event runs; NFR-004 snapshot audit with sentinel TMPDIR plus enforced bwrap write boundary with probes, NFR-008 mode audit; traceability check) and serve_sshd_test.go (real OpenSSH 10.2 round trip, restrict refuses PTY and -L forwarding). Harness gains optional Wrap/Env for WP14; two mission-added extractors pass full marker literals. docs/serve-v0.md verification and traceability section (70 rows, LFS rows pending WP14); docs/threat-model.md consolidated. Gate: gofmt clean, go vet ok, go build ok, race suite ok (689s, perf test skipped), perf test without race ok (10.8s), git diff --check clean, no pre-existing test modified since 6ecca57, C-001/C-009/C-011 checks recorded."
+      ],
       "provider": "__resolved_provider_absent__",
       "role": "implementer",
       "shell_pid": 1082786,
