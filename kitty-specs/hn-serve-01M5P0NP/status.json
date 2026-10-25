@@ -2,7 +2,7 @@
   "event_count": 150,
   "last_event_id": "01M5TA31WRD326TW2GJFGV9GPV",
   "materialized_at": "2026-10-25T19:55:05.496920+00:00",
-  "mission_number": "",
+  "mission_number": "2",
   "mission_slug": "hn-serve-01M5P0NP",
   "mission_type": "software-dev",
   "summary": {

@@ -1,4 +1,18 @@
 {
+  "accept_commit": "78bfc768c8280c78ac5ba76c2738b3e39202cbc3",
+  "acceptance_history": [
+    {
+      "accept_commit": "78bfc768c8280c78ac5ba76c2738b3e39202cbc3",
+      "acceptance_mode": "pr",
+      "accepted_at": "2026-10-25T20:14:12.729067+00:00",
+      "accepted_by": "acoliver (maintainer)",
+      "accepted_from_commit": "288190ce87563b762ee8a92adbe76ae8fafbda03"
+    }
+  ],
+  "acceptance_mode": "pr",
+  "accepted_at": "2026-10-25T20:14:12.729067+00:00",
+  "accepted_by": "acoliver (maintainer)",
+  "accepted_from_commit": "288190ce87563b762ee8a92adbe76ae8fafbda03",
   "coordination_branch": "kitty/mission-hn-serve-01M5P0NP",
   "created_at": "2026-10-24T03:53:32.837247+00:00",
   "flattened": false,
@@ -12,6 +26,7 @@
   "purpose_tldr": "Add an optional hn serve command that hosts repositories over SSH and refuses protected-branch updates that lack Hubnot governance evidence.",
   "slug": "hn-serve-01M5P0NP",
   "source_description": "Mission brief ../notes/mission-1-hn-serve-brief.md ingested by spec-kitty intake (brief_hash 751c75f89dd92dcfd3e56dcfba6c5c42eafb17479cb5916c116304b10a01bada); specified non-interactively with brief design decisions as maintainer answers.",
+  "status_phase": "1",
   "target_branch": "mission/hn-serve",
   "topology": "coord",
   "vcs": "git"
