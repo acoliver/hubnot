@@ -1,7 +1,7 @@
 {
-  "event_count": 56,
-  "last_event_id": "01M5RZEA1QAVH77RHJK9ABB5J4",
-  "materialized_at": "2026-10-25T07:29:45.527887+00:00",
+  "event_count": 58,
+  "last_event_id": "01M5RZG9QKG4QDC7S3HE79255N",
+  "materialized_at": "2026-10-25T07:30:50.720784+00:00",
   "mission_number": "",
   "mission_slug": "hn-serve-01M5P0NP",
   "mission_type": "",
@@ -12,9 +12,9 @@
     "claimed": 0,
     "done": 0,
     "for_review": 0,
-    "in_progress": 1,
+    "in_progress": 2,
     "in_review": 0,
-    "planned": 10
+    "planned": 9
   },
   "work_packages": {
     "WP01": {
@@ -124,14 +124,14 @@
       }
     },
     "WP04": {
-      "actor": "user",
+      "actor": "llxprt",
       "agent": null,
       "agent_profile": "__resolved_profile_absent__",
       "agent_profile_version": "__resolved_profile_version_absent__",
       "force_count": 1,
-      "lane": "planned",
-      "last_event_id": "01M5RZEA1QAVH77RHJK9ABB5J4",
-      "last_transition_at": "2026-10-25T07:29:45.527887+00:00",
+      "lane": "in_progress",
+      "last_event_id": "01M5RZG9QKG4QDC7S3HE79255N",
+      "last_transition_at": "2026-10-25T07:30:50.720784+00:00",
       "model": "__resolved_model_absent__",
       "notes": [
         "WP04 done (T020-T026). policy.go: evaluateProposal split into shared lineage/code/evidence steps with unchanged error precedence; new evaluateProposalUnderPolicy, evaluateProposalWithCode(proposalCodeState) and pipelineDefinitionError (same text). quarantine.go: validateQuarantinedActorRange and replicationEventDependencyWithOptions{AllowAbsentProposalCode}; zero option keeps the original check byte-identical. Consumers: WP08 (range validator, dependency option) and WP09 (destination evaluation); evaluateProposal (live hn proposal status/merge path) now runs through the shared evidence step. validation_seams_test.go covers equivalence, destination semantics, range defects, dependency option, and FR-015: a proposal.merged fact with commit==head validates locally and through replication with no validation change. docs/governance-v0.md gained two sections. No pre-existing test changed. Lane setup: resolved planning-commit and lane-b merge conflicts in kitty-specs only, then ran the authorized planning-artifact cleanup. Gate: gofmt clean; go vet/build ok; git diff --check ok; go test -race -count=1 -timeout 60m -skip perf ./... ok (384s); perf test without -race ok (31s)."
@@ -144,7 +144,7 @@
         "reviewer": "user",
         "verdict": "changes_requested"
       },
-      "role": "reviewer",
+      "role": "implementer",
       "shell_pid": null,
       "shell_pid_created_at": null,
       "subtasks": {
