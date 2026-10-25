@@ -286,6 +286,154 @@ Publication uses ordinary explicit Git pushes of local actor and candidate
 refs. `hn sync` never publishes the repository's primary branch; use a
 separate explicit `git push` for that outcome.
 
+## hn serve wire surface
+
+`hn serve` hosts repositories over SSH and answers with ordinary Git
+transports. This section defines what a client can observe from such a server:
+a marker ref, two push options and a line format for rejections. `serve_wire.go`
+and `serve_reasons.go` implement it.
+
+### Server marker and identification
+
+Every hosted repository advertises:
+
+```text
+refs/hn/serve/v1
+```
+
+The ref points at a blob whose content is exactly the 11 bytes `hn-serve/1`
+followed by one newline (`0x0a`). A push that targets the ref is refused with
+`reserved-ref`.
+
+A client identifies a remote by running
+`git ls-remote --refs REMOTE refs/hn/serve/v1` and computing
+`git hash-object --stdin` of the same 11 bytes in its own repository, without
+writing the object. The remote identifies as `hn serve` only when the listing
+is exactly one line, that line names `refs/hn/serve/v1`, and its object ID
+equals the computed ID. The ID depends on the object format, so a SHA-256
+client identifies only a SHA-256 marker and a SHA-1 client only a SHA-1
+marker. A transport error, an empty listing, an extra line, a different ref or
+a different object ID all mean the remote does not identify as `hn serve`.
+
+Identification only decides which client modes are allowed, such as
+all-trusted selection and `hn merge --remote`. It grants no trust. Anyone can
+create the marker on an ordinary remote, so a client validates every ref it
+imports exactly as it does for any other remote.
+
+### Push options
+
+A client may send these push options with `git push --push-option`:
+
+| Option | Value | Rule |
+|----|----|----|
+| `hn-advance` | full candidate event ID, `sha256:` followed by 64 lowercase hex digits | requests advancement of a protected branch to that candidate's signed head |
+| `hn-expected-tip` | full commit ID of the branch tip the client read | the update is refused with `protected-stale-tip` when the branch has moved |
+
+Each option may appear at most once. A push with `hn-advance` must contain
+exactly one ref update, and that update must target a protected branch. Any
+other option, a repeated option, a malformed value, or an `hn-advance` push
+with another shape rejects every ref update in the push with
+`unsupported-command`.
+
+### Rejection lines
+
+Each rejected ref update produces exactly two lines on stderr. Git relays them
+to the pushing client with a `remote: ` prefix.
+
+```text
+hn-serve/1 reject ref=REF actor=ACTOR code=CODE [ids=ID[,ID]...] [missing=KIND[,KIND]...] [budget=NAME limit=N measured=N] next="NEXT"
+hn-serve: SENTENCE
+```
+
+Fields appear in the order shown, separated by single spaces. Bracketed fields
+are omitted when they have no value.
+
+| Field | Content |
+|----|----|
+| `ref` | full ref name, or `-` for a refusal of the whole session |
+| `actor` | full mapped actor fingerprint, or `-` when the key is unknown |
+| `code` | one code from the reason-code table below |
+| `ids` | comma-separated full `sha256:` event IDs and full commit IDs |
+| `missing` | comma-separated evidence kinds, always in the order `proposal`, `review`, `ci`, `acceptance` |
+| `budget`, `limit`, `measured` | the exceeded budget, its limit and the measured value; see the budget fields below |
+| `next` | the next action in double quotes; always last |
+
+Every value is printable ASCII. Control bytes and non-ASCII bytes in any value
+are replaced with `?`, one `?` per byte. Space, `=` and `,` inside `ref`,
+`actor`, `code`, `ids`, `missing` and `budget` values are also replaced with
+`?`, and so are `"` and `` inside `next`. The sentence follows the same
+control and non-ASCII rule and stays on one line.
+
+When a push has several rejected ref updates, the line pairs appear in byte
+order of the ref. A session refusal uses `ref=-`.
+
+A parser accepts a line only when it starts with `hn-serve/1 reject ` and every
+following field matches this grammar in this order. Unknown fields, fields out
+of order, repeated fields, an unknown code, an unknown or repeated evidence
+kind, a limit that is not canonical decimal, a missing `next` and text after
+the closing quote are all errors. The sentence line is not parsed. A new field
+or a change to an existing field requires a new version prefix such as
+`hn-serve/2`.
+
+A client reading `git push` stderr removes one leading `remote: ` prefix and
+the trailing spaces Git adds to relayed lines, treats a carriage return as a
+line break, ignores Git's own lines such as `! [remote rejected]`, and pairs
+each rejection line with the `hn-serve: ` line that follows it.
+
+For example, a push of `main` one commit ahead with no proposal produces:
+
+```text
+remote: hn-serve/1 reject ref=refs/heads/main actor=4f1c9a6d0d2b7e3a8c5f6e1b9d0a7c3e2f4b6d8a0c1e3f5a7b9d1c3e5f7a9b1c code=protected-no-proposal ids=9b2e4c6a8d0f1e3c5a7b9d1f3e5c7a9b2d4f6e8a missing=proposal,review,ci,acceptance next="open a proposal for 9b2e4c6a8d0f1e3c5a7b9d1f3e5c7a9b2d4f6e8a"
+remote: hn-serve: refs/heads/main is protected and 9b2e4c6a has no accepted, CI-tested proposal.
+```
+
+### Budget fields
+
+`budget`, `limit` and `measured` appear together and only with the codes
+`over-budget` and `lfs-quota`. `limit` and `measured` are non-negative decimal
+integers without a sign or leading zeros. `over-budget` names the exceeded
+server budget. For a pushed Hubnot ref that is the first exceeded replication
+budget, using the names `hn replication show` prints: `max-events`,
+`max-objects`, `max-object-bytes`, `max-attachment-bytes` or
+`max-total-bytes`. `lfs-quota` uses
+`budget=lfs-quota`, with the quota in bytes as `limit` and the stored bytes the
+upload would produce as `measured`.
+
+### Reason codes
+
+The next action is a template. A server replaces placeholders such as
+`<commit>` with the full ID before it sends the line.
+
+| Code | Meaning | Typical next action |
+|----|----|----|
+| `unknown-key` | The authenticating key is not in the registry | ask the administrator to run `hn serve key add` |
+| `unhosted-repository` | The requested repository is not hosted or its path is unsafe | check the clone URL |
+| `unsupported-command` | The SSH request, push option set or advancement shape is not supported | use `git fetch`, `git push`, `hn merge --remote` or `git lfs` |
+| `repository-busy` | Another push held the repository lock for more than 120 seconds | retry the push |
+| `actor-key-mismatch` | The pushed actor chain belongs to another actor | push only `refs/hn/actors/<your actor>` |
+| `actor-chain-invalid` | An event fails signature, sequence, shape or relationship validation | inspect the named event with `hn log` |
+| `actor-chain-rewrite` | The push deletes or rewrites hosted actor history | append new events instead |
+| `dependency-missing` | A referenced event or Git object is not hosted and not in the push | publish the named fact or commit first |
+| `protected-no-proposal` | No proposal has the pushed commit as its signed head | open a proposal for `<commit>` |
+| `protected-not-ready` | Review, CI or acceptance is unmet under the base policy | run `hn proposal status <candidate>` |
+| `protected-destination-policy` | A threshold of the destination policy is unmet | gather the evidence the current policy requires |
+| `protected-not-fast-forward` | The head does not descend from the current tip | revise the proposal onto `<tip>` with `hn proposal revise` |
+| `protected-stale-tip` | The branch moved since the client read it | fetch, then retry or revise |
+| `protected-blocked` | The candidate is superseded, its lineage is closed or conflicted, it is merged, or a maintainer rejected it | run `hn proposal status <candidate>` |
+| `protected-policy-invalid` | Base or destination policy is missing or malformed, or the push creates the branch | ask the administrator; see recovery in the serve guide |
+| `protected-deletion` | The push deletes a protected branch | protected branches cannot be deleted |
+| `advance-not-maintainer` | The advancement requester is not a maintainer under both policies | ask a maintainer to run `hn merge --remote` |
+| `proposal-ref-mismatch` | A proposal ref differs from its candidate's signed head or does not descend from its base | push the signed head |
+| `proposal-ref-immutable` | The push moves or deletes a hosted proposal ref | create a revision instead |
+| `memory-key-mismatch` | The memory stream belongs to another actor | push only your own memory refs |
+| `memory-invalid` | The memory stream fails hn-memory/0 validation or is rewritten | inspect the stream with `hn memory show` |
+| `reserved-ref` | The ref is outside every supported class | push branches, tags and Hubnot refs only |
+| `tag-immutable` | The push moves or deletes an existing tag | create a new tag |
+| `branch-not-owner` | A forced update or deletion of another actor's branch | ask the owner or a maintainer |
+| `over-budget` | A pushed Hubnot ref exceeds a server budget | split the history or ask the administrator |
+| `lfs-quota` | An LFS upload would exceed the repository quota | ask the administrator to raise the quota |
+| `lfs-object-mismatch` | Uploaded LFS content does not match its object ID or size | retry the upload |
+
 ## Known limits
 
 - One actor remains single-writer; disconnected concurrent writers sharing a
