@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -33,6 +34,7 @@ const (
 	serveLockPollInterval      = 10 * time.Millisecond
 	serveFingerprintPrefix     = "SHA256:"
 	serveBranchRefPrefix       = "refs/heads/"
+	serveHookStagingPrefix     = ".hn-hook-"
 )
 
 // serveHookNames lists the generated hook scripts in byte order, which is
@@ -43,6 +45,14 @@ var serveHookNames = []string{"post-receive", "pre-receive"}
 // wait. hn serve repo lock-exec and pushes (WP06) report it as
 // repository-busy.
 var errServeLockBusy = errors.New("hn serve repository lock is busy")
+
+// serveLockKind selects an exclusive or shared flock.
+type serveLockKind int
+
+const (
+	serveLockExclusive serveLockKind = iota
+	serveLockShared
+)
 
 // serveValidationMode selects what validateServeLayout may do. The zero value
 // is the read-only session mode so a forgotten mode can never write.
@@ -161,6 +171,9 @@ func resolveServeLayout() (serveLayout, error) {
 
 // ensureServeLayout creates the fixed directories with mode 0700. Only
 // administration commands call it; sessions require an existing layout.
+// Concurrent administration commands may race to create the same
+// directory, so a directory that appears between Lstat and Mkdir is
+// checked like one that already existed.
 func ensureServeLayout(layout serveLayout) error {
 	for _, directory := range []string{layout.Root, layout.Hooks, layout.Repositories, layout.State, layout.Tmp, layout.Repos} {
 		info, err := os.Lstat(directory)
@@ -170,7 +183,13 @@ func ensureServeLayout(layout serveLayout) error {
 				return err
 			}
 		case errors.Is(err, os.ErrNotExist):
-			if err := ensurePrivateDirectory(directory); err != nil {
+			err := ensurePrivateDirectory(directory)
+			switch {
+			case errors.Is(err, os.ErrExist):
+				if err := requireServeDirectory(directory); err != nil {
+					return err
+				}
+			case err != nil:
 				return serveStateError(directory, err)
 			}
 		default:
@@ -189,12 +208,67 @@ func validateServeLayout(layout serveLayout, mode serveValidationMode) error {
 	if err != nil {
 		return err
 	}
+	return validateServeLayoutFor(layout, mode, hnPath)
+}
+
+// validateServeLayoutFor validates against the hook scripts generated for
+// hnPath while holding the layout lock: exclusively in administration mode,
+// which rewrites the hooks, and shared in session mode. A validator therefore
+// never runs while another command has a hook staging file in hooks/, and
+// any staging file it does see was abandoned by an interrupted command.
+func validateServeLayoutFor(layout serveLayout, mode serveValidationMode, hnPath string) error {
+	kind := serveLockShared
 	if mode == serveAdministrationValidation {
-		if err := ensureServeHooks(layout, hnPath); err != nil {
-			return err
-		}
+		kind = serveLockExclusive
 	}
-	return checkServeLayout(layout, hnPath)
+	release, err := lockServeLayout(layout, kind)
+	if err != nil {
+		return err
+	}
+	if mode == serveAdministrationValidation {
+		err = ensureServeHooks(layout, hnPath)
+	}
+	if err == nil {
+		err = checkServeLayout(layout, hnPath)
+	}
+	if releaseErr := release(); releaseErr != nil && err == nil {
+		err = serveStateError(layout.Root, releaseErr)
+	}
+	return err
+}
+
+// lockServeLayout takes an flock on the .hn-serve directory itself and
+// returns its release function. Locking the directory adds no file to the
+// layout, and the read-only open keeps session validation write-free. The
+// lock covers hook regeneration and whole-layout validation only; commands
+// release it before doing their own work.
+func lockServeLayout(layout serveLayout, kind serveLockKind) (func() error, error) {
+	if err := requireServeDirectory(layout.Root); err != nil {
+		return nil, err
+	}
+	before, err := os.Lstat(layout.Root)
+	if err != nil {
+		return nil, serveDefect(layout.Root, "cannot inspect: %v", err)
+	}
+	directory, err := os.Open(layout.Root)
+	if err != nil {
+		return nil, serveStateError(layout.Root, err)
+	}
+	after, err := directory.Stat()
+	if err != nil {
+		_ = directory.Close()
+		return nil, serveStateError(layout.Root, err)
+	}
+	if !os.SameFile(before, after) {
+		_ = directory.Close()
+		return nil, serveDefect(layout.Root, "changed while it was being opened")
+	}
+	wait := serveLockWait()
+	release, err := holdServeLock(directory, layout.Root, kind, wait)
+	if errors.Is(err, errServeLockBusy) {
+		return nil, fmt.Errorf("hn serve layout is busy: another hn serve command held the lock on %s for %v; try again when it finishes", layout.Root, wait)
+	}
+	return release, err
 }
 
 func checkServeLayout(layout serveLayout, hnPath string) error {
@@ -229,8 +303,22 @@ func checkServeHooks(layout serveLayout, hnPath string) error {
 	if err := requireServeDirectory(layout.Hooks); err != nil {
 		return err
 	}
-	if _, err := listServeDirectory(layout.Hooks, serveHookNames...); err != nil {
+	entries, err := listServeDirectory(layout.Hooks)
+	if err != nil {
 		return err
+	}
+	for _, entry := range entries {
+		if slices.Contains(serveHookNames, entry) {
+			continue
+		}
+		path := filepath.Join(layout.Hooks, entry)
+		// Every hook writer holds the layout lock exclusively and this check
+		// runs under the same lock, so a staging file seen here belongs to
+		// no running command.
+		if strings.HasPrefix(entry, serveHookStagingPrefix) {
+			return serveDefect(path, "abandoned hook staging file left by an interrupted hn serve command; remove it, then run any hn serve repo or hn serve key command")
+		}
+		return serveDefect(path, "unexpected entry")
 	}
 	for _, name := range serveHookNames {
 		path := filepath.Join(layout.Hooks, name)
@@ -954,9 +1042,16 @@ func acquireServeLock(path string, wait time.Duration) (func() error, error) {
 	if err != nil {
 		return nil, err
 	}
+	return holdServeLock(file, path, serveLockExclusive, wait)
+}
+
+// holdServeLock polls for a kind flock on the open file until wait elapses
+// and returns a release function that closes file once. It closes file
+// itself on failure.
+func holdServeLock(file *os.File, path string, kind serveLockKind, wait time.Duration) (func() error, error) {
 	deadline := time.Now().Add(wait)
 	for {
-		locked, err := tryServeFileLock(file)
+		locked, err := tryServeFileLock(file, kind)
 		if err != nil {
 			_ = file.Close()
 			return nil, serveStateError(path, err)
@@ -1038,6 +1133,8 @@ func serveHookScript(name, hnPath string) []byte {
 }
 
 // ensureServeHooks atomically rewrites both hook scripts with mode 0700.
+// Production callers hold the layout lock exclusively (see
+// validateServeLayoutFor) so no validator sees the staging files.
 func ensureServeHooks(layout serveLayout, hnPath string) error {
 	if _, err := checkServeExecutablePath(hnPath); err != nil {
 		return err
@@ -1060,34 +1157,49 @@ func ensureServeHooks(layout serveLayout, hnPath string) error {
 // writePrivateFileAtomic: temporary file in the same directory, fsync,
 // rename, directory fsync.
 func writeServeExecutableAtomic(path string, contents []byte) error {
-	directory := filepath.Dir(path)
-	temporary, err := os.CreateTemp(directory, ".hn-hook-*")
+	staged, err := stageServeExecutable(path, contents)
 	if err != nil {
 		return err
 	}
+	if err := commitServeExecutable(staged, path); err != nil {
+		_ = os.Remove(staged)
+		return err
+	}
+	return nil
+}
+
+// stageServeExecutable writes contents to a synced 0700 staging file named
+// .hn-hook-* next to path and returns the staging path. The staging file
+// stays in hooks/ until commitServeExecutable renames it, which is why hook
+// writers hold the layout lock exclusively.
+func stageServeExecutable(path string, contents []byte) (string, error) {
+	temporary, err := os.CreateTemp(filepath.Dir(path), serveHookStagingPrefix+"*")
+	if err != nil {
+		return "", err
+	}
 	temporaryPath := temporary.Name()
-	closed := false
-	defer func() {
-		if !closed {
-			_ = temporary.Close()
-		}
+	err = temporary.Chmod(0o700)
+	if err == nil {
+		_, err = temporary.Write(contents)
+	}
+	if err == nil {
+		err = temporary.Sync()
+	}
+	if closeErr := temporary.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
 		_ = os.Remove(temporaryPath)
-	}()
-	if err := temporary.Chmod(0o700); err != nil {
+		return "", err
+	}
+	return temporaryPath, nil
+}
+
+// commitServeExecutable renames a staged file over path and syncs the
+// directory so the rename is durable.
+func commitServeExecutable(staged, path string) error {
+	if err := os.Rename(staged, path); err != nil {
 		return err
 	}
-	if _, err := temporary.Write(contents); err != nil {
-		return err
-	}
-	if err := temporary.Sync(); err != nil {
-		return err
-	}
-	if err := temporary.Close(); err != nil {
-		return err
-	}
-	closed = true
-	if err := os.Rename(temporaryPath, path); err != nil {
-		return err
-	}
-	return syncPrivateDirectory(directory)
+	return syncPrivateDirectory(filepath.Dir(path))
 }

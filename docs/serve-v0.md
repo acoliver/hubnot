@@ -100,7 +100,10 @@ in `state/tmp/`.
 
 An interrupted state write can leave a temporary file such as
 `state/.hn-private-1234` behind. Validation reports it as an unexpected entry;
-remove it and rerun the command. The push log grows by one line per push. Archive
+remove it and rerun the command. An administration command that stops while it
+rewrites a hook can leave a staging file such as `hooks/.hn-hook-1234`.
+Validation reports it as an abandoned hook staging file; remove it, then run any
+`hn serve repo` or `hn serve key` command to regenerate the hooks. The push log grows by one line per push. Archive
 or truncate it before it reaches 64 MiB.
 
 ### Administration commands and sessions
@@ -125,6 +128,19 @@ exec /usr/local/bin/hn serve hook pre-receive
 After you move or upgrade `hn`, run any `hn serve repo` or `hn serve key`
 command to regenerate the hooks and the `authorized_keys` block. Until then,
 every fetch and push refuses with a hook-script defect.
+
+### Concurrent commands
+
+Many `hn serve` commands can run at once, for example several pushes and an
+administrator's `hn serve repo list`. They coordinate through an `flock(2)` lock
+on the `.hn-serve` directory itself, so the layout gains no extra file.
+An administration command holds the lock exclusively while it rewrites the hooks
+and validates the layout. A session command holds it shared while it validates,
+so sessions run side by side and never see a hook script half written. Each
+command releases the lock after validation, before it does its own work. A
+command that cannot get the lock within 120 seconds stops with
+`hn: hn serve layout is busy: ...`; run it again when the other command
+finishes.
 
 The hook scripts and `authorized_keys` contain the `hn` path without quotes, and
 `/bin/sh` runs the hooks. `hn` therefore accepts only a clean absolute path made

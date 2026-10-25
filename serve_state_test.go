@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -14,6 +15,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -1664,6 +1666,122 @@ func TestServeStateBinaryCommands(t *testing.T) {
 			t.Fatalf("holder lock-exec: %v", err)
 		}
 	})
+
+	// Every administration command rewrites both hooks. Concurrent commands,
+	// and session validation in another process, must never report another
+	// command's in-progress hook write as a state defect.
+	invoke := func(home string, args ...string) (string, error) {
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+		command := exec.CommandContext(ctx, binary, args...)
+		command.Dir = home
+		command.Env = []string{"HOME=" + home, "PATH=" + os.Getenv("PATH"), "LANG=C", "HN_INTERNAL_TESTING=0"}
+		output, err := command.CombinedOutput()
+		if err != nil {
+			return string(output), fmt.Errorf("hn %s: %v: %s", strings.Join(args, " "), err, output)
+		}
+		return string(output), nil
+	}
+	fanOut := func(calls, workers int, call func(int) error) []error {
+		jobs := make(chan int)
+		var mutex sync.Mutex
+		var failures []error
+		var group sync.WaitGroup
+		for range workers {
+			group.Add(1)
+			go func() {
+				defer group.Done()
+				for job := range jobs {
+					if err := call(job); err != nil {
+						mutex.Lock()
+						failures = append(failures, err)
+						mutex.Unlock()
+					}
+				}
+			}()
+		}
+		for job := range calls {
+			jobs <- job
+		}
+		close(jobs)
+		group.Wait()
+		return failures
+	}
+
+	t.Run("concurrent cold start", func(t *testing.T) {
+		home := newHome(t)
+		failures := fanOut(32, 16, func(int) error {
+			output, err := invoke(home, "serve", "repo", "list")
+			if err == nil && output != "" {
+				err = fmt.Errorf("hn serve repo list printed %q on an empty server", output)
+			}
+			return err
+		})
+		if len(failures) != 0 {
+			t.Fatalf("%d of 32 concurrent first commands failed; first: %v", len(failures), failures[0])
+		}
+		t.Setenv("HOME", home)
+		layout, err := resolveServeLayout()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := validateServeLayoutFor(layout, serveSessionValidation, binary); err != nil {
+			t.Fatalf("layout after a concurrent cold start: %v", err)
+		}
+	})
+
+	t.Run("concurrent commands and session validation", func(t *testing.T) {
+		home := newHome(t)
+		addRepo(t, home)
+		t.Setenv("HOME", home)
+		layout, err := resolveServeLayout()
+		if err != nil {
+			t.Fatal(err)
+		}
+		commands := []struct {
+			args []string
+			want string
+		}{
+			{[]string{"serve", "repo", "list"}, "demo\n"},
+			{[]string{"serve", "key", "list"}, ""},
+			{[]string{"serve", "repo", "show", "demo"}, ""},
+		}
+		stop := make(chan struct{})
+		sessions := make(chan []error, 1)
+		go func() {
+			var errs []error
+			for count := 0; ; count++ {
+				select {
+				case <-stop:
+					if count == 0 {
+						errs = append(errs, errors.New("session validation never ran"))
+					}
+					sessions <- errs
+					return
+				default:
+				}
+				if err := validateServeLayoutFor(layout, serveSessionValidation, binary); err != nil {
+					errs = append(errs, err)
+				}
+			}
+		}()
+		failures := fanOut(160, 16, func(job int) error {
+			command := commands[job%len(commands)]
+			output, err := invoke(home, command.args...)
+			if err == nil && command.want != "" && output != command.want {
+				err = fmt.Errorf("hn %s printed %q, want %q", strings.Join(command.args, " "), output, command.want)
+			}
+			return err
+		})
+		close(stop)
+		sessionFailures := <-sessions
+		if len(failures) != 0 {
+			t.Fatalf("%d of 160 concurrent administration commands failed; first: %v", len(failures), failures[0])
+		}
+		if len(sessionFailures) != 0 {
+			t.Fatalf("%d concurrent session validations failed; first: %v", len(sessionFailures), sessionFailures[0])
+		}
+	})
 }
 
 // T006: hook scripts.
@@ -1849,5 +1967,131 @@ func TestServeStateGeneratedHooksExecuteTheLiteralPath(t *testing.T) {
 			t.Fatalf("hook %s ran %q, want %q", name, contents, want)
 		}
 		removeServeTest(t, record)
+	}
+}
+
+// A validator in either mode waits while an administration command is
+// between staging and renaming a hook script, then sees the finished hooks.
+func TestServeStateValidationWaitsForInProgressHookWrite(t *testing.T) {
+	layout := newServeTestLayout(t)
+	hnPath := serveTestExecutable(t)
+	hook := filepath.Join(layout.Hooks, "pre-receive")
+	release, err := lockServeLayout(layout, serveLockExclusive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = release() })
+	staged, err := stageServeExecutable(hook, serveHookScript("pre-receive", hnPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if filepath.Dir(staged) != layout.Hooks || !strings.HasPrefix(filepath.Base(staged), serveHookStagingPrefix) {
+		t.Fatalf("staging file %s is not a %s* file in %s", staged, serveHookStagingPrefix, layout.Hooks)
+	}
+
+	results := make(chan error, 2)
+	for _, mode := range []serveValidationMode{serveSessionValidation, serveAdministrationValidation} {
+		go func() { results <- validateServeLayout(layout, mode) }()
+	}
+	select {
+	case err := <-results:
+		t.Fatalf("validation finished during an in-progress hook write: %v", err)
+	case <-time.After(300 * time.Millisecond):
+	}
+	if _, err := os.Lstat(staged); err != nil {
+		t.Fatalf("staging file disappeared while the writer held the layout lock: %v", err)
+	}
+
+	if err := commitServeExecutable(staged, hook); err != nil {
+		t.Fatal(err)
+	}
+	if err := release(); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		select {
+		case err := <-results:
+			if err != nil {
+				t.Fatalf("validation after the hook write finished: %v", err)
+			}
+		case <-time.After(30 * time.Second):
+			t.Fatal("validation never resumed after the hook write finished")
+		}
+	}
+	if entries, err := os.ReadDir(layout.Hooks); err != nil || len(entries) != 2 {
+		t.Fatalf("hooks/ after the write = %v (%v), want only the two scripts", entries, err)
+	}
+}
+
+// With no writer holding the layout lock, a staging file is left over from
+// an interrupted command. It stays a defect in every mode until removed.
+func TestServeStateAbandonedHookStagingFileIsADefect(t *testing.T) {
+	layout := newServeTestLayout(t)
+	staged, err := stageServeExecutable(filepath.Join(layout.Hooks, "post-receive"), serveHookScript("post-receive", serveTestExecutable(t)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := snapshotLegacyPrivateTree(t, layout.Home)
+	requireServeDefect(t, validateServeLayout(layout, serveSessionValidation), staged, "abandoned hook staging file")
+	if after := snapshotLegacyPrivateTree(t, layout.Home); !reflect.DeepEqual(before, after) {
+		t.Fatalf("session validation changed the layout:\nbefore %v\nafter  %v", before, after)
+	}
+	requireServeDefect(t, validateServeLayout(layout, serveAdministrationValidation), staged, "abandoned hook staging file")
+	for _, args := range [][]string{{"serve", "repo", "list"}, {"serve", "key", "list"}} {
+		output, err := runServeTest(t, args...)
+		requireServeDefect(t, err, staged, "abandoned hook staging file")
+		if output != "" {
+			t.Fatalf("hn %s printed %q with an abandoned staging file", strings.Join(args, " "), output)
+		}
+	}
+	if _, err := os.Lstat(staged); err != nil {
+		t.Fatalf("validation removed the abandoned staging file instead of reporting it: %v", err)
+	}
+	removeServeTest(t, staged)
+	requireServeTestOutput(t, "", "serve", "repo", "list")
+	if err := validateServeLayout(layout, serveSessionValidation); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Sessions share the layout lock with each other; administration commands
+// take it alone and report a busy layout after the lock wait.
+func TestServeStateLayoutLockCoordinatesCommands(t *testing.T) {
+	layout := newServeTestLayout(t)
+	t.Setenv("HN_INTERNAL_TESTING", "1")
+	t.Setenv("HN_TEST_SERVE_LOCK_WAIT", "100ms")
+	const busy = "hn serve layout is busy: another hn serve command held the lock on "
+
+	shared, err := lockServeLayout(layout, serveLockShared)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validateServeLayout(layout, serveSessionValidation); err != nil {
+		t.Fatalf("session validation beside another session: %v", err)
+	}
+	requireServeErrorContains(t, validateServeLayout(layout, serveAdministrationValidation), busy+layout.Root)
+	output, err := runServeTest(t, "serve", "key", "list")
+	requireServeErrorContains(t, err, busy+layout.Root)
+	if output != "" {
+		t.Fatalf("busy hn serve key list printed %q", output)
+	}
+	if err := shared(); err != nil {
+		t.Fatal(err)
+	}
+
+	exclusive, err := lockServeLayout(layout, serveLockExclusive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, mode := range []serveValidationMode{serveSessionValidation, serveAdministrationValidation} {
+		requireServeErrorContains(t, validateServeLayout(layout, mode), busy+layout.Root)
+	}
+	if err := exclusive(); err != nil {
+		t.Fatal(err)
+	}
+	for _, mode := range []serveValidationMode{serveSessionValidation, serveAdministrationValidation} {
+		if err := validateServeLayout(layout, mode); err != nil {
+			t.Fatalf("validation after the lock was released (mode %d): %v", mode, err)
+		}
 	}
 }
