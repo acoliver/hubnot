@@ -252,4 +252,3 @@ Black-box pushes through the shim against real hosted repositories, plus unit te
 ## Activity Log
 
 - 2026-10-25T00:09:18Z – system – Prompt generated via /spec-kitty.tasks
-- 2026-10-25T09:14:22Z – llxprt – Handoff from WP06 (T037): hn serve git holds state/repos/NAME/lock for the whole receive-pack run. Hook code (hn serve hook pre-receive/post-receive) must never take RepoLock itself; a second flock from another process would block until the wait budget expires. Hooks rely on the wrapper's lock. HN_SERVE_ACTOR/KEY/REPOSITORY come from buildServeGitEnvironment; HN_INTERNAL_TESTING=1 also passes HN_TEST_SERVE_* through to hooks.
