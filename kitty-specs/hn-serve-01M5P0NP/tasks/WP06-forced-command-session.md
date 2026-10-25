@@ -104,6 +104,10 @@ Extend the test harness with the SSH command shim (OQ-9, C-009), and document co
 | `docs/serve-v0.md` | CHANGE. "Connecting over SSH" section only. |
 | `docs/threat-model.md` | CHANGE. New section on the `hn serve` trust boundary. |
 
+## Maintainer note: carried over from WP01
+
+WP01 left `lookupServeKey` (fingerprint to binding lookup over the validated registry) for its first caller, the session wrapper in this WP. Add it in `serve_state.go` next to the registry loader, with tests.
+
 ## Subtasks
 
 ### Subtask T034: `SSH_ORIGINAL_COMMAND` grammar parser

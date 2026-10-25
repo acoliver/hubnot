@@ -111,6 +111,10 @@ Every command runs as the server user, validates state (WP01), regenerates the h
 | `docs/serve-v0.md` | CHANGE. "Administering hosted repositories" section only. |
 | `README.md` | CHANGE. Add the serve guide to the documentation list. |
 
+## Maintainer note: carried over from WP01
+
+WP01 already implemented and tested `hn serve repo list`, `repo show`, `repo lock-exec` and `hn serve key list` (administration mode) in `serve_commands.go` and `serve_state.go`. Reuse them; do not reimplement. WP01 deliberately left these APIs for their first callers, which are in this WP: `saveServeRegistry`, `newServeRepoConfig` (contract defaults, protected list default-first) and `saveServeRepoConfig`. Their schemas and validators already exist in `serve_state.go`; add the writers there, atomically, using the existing private-file helpers, with tests for byte-stable round trips.
+
 ## Subtasks
 
 ### Subtask T027: `hn serve key add`, `remove` and `list`
