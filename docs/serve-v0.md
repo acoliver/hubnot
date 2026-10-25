@@ -1449,6 +1449,27 @@ clone without an identity signs nothing and publishes nothing, but it still
 needs a bound key to connect. The administrator binds that key to an actor
 fingerprint reserved for the verifier.
 
+### Choosing an SSH key per clone
+
+When several participants share one Unix account, as a maintainer, a runner
+and a verifier on one build machine do, each clone selects its own key in its
+Git configuration:
+
+```sh
+git clone -c core.sshCommand="ssh -i ~/.ssh/runner -o IdentitiesOnly=yes" \
+  hn@server.example:demo.git runner
+```
+
+`git clone -c` saves the setting in the new clone, so later `git fetch` and
+`git push` use the same key. `hn sync` and `hn runner` use it too. The clone's
+`core.sshCommand`, `ssh.*`, `http.*`, `credential.*` and `protocol.*` settings
+apply to the fetch of every selected actor chain, proposal and memory stream,
+even though that fetch writes into a temporary quarantine repository instead
+of the clone. `GIT_SSH_COMMAND` in the environment still overrides the clone's
+setting, as it does for Git. This needs Git 2.31 or later on the client. With
+an older Git, export `GIT_SSH_COMMAND` instead. Details are in
+[Exact fetch and quarantine lifecycle](replication-v0.md#exact-fetch-and-quarantine-lifecycle).
+
 ### Saving the all-trusted selection
 
 Run this once in each runner or verifier clone:

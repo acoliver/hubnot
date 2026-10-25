@@ -194,6 +194,10 @@ func runReplicationTransaction(selection ReplicationSelection) (replicationTrans
 	if err != nil {
 		return result, replicationPhaseError(selection.Remote, "repository setup")
 	}
+	// The quarantine fetch runs with --git-dir set to the quarantine, which
+	// has none of the clone's configuration, so the clone's transport
+	// settings travel with it (core.sshCommand selects a per-clone key).
+	transportEnv := cloneTransportConfigEnvironment()
 	requests, initialOutcomes, err := resolveReplicationRequests(selection, remoteURL)
 	if err != nil {
 		return result, err
@@ -230,7 +234,7 @@ func runReplicationTransaction(selection ReplicationSelection) (replicationTrans
 
 	fetched := make([]replicationRequest, 0, len(requests))
 	for _, request := range requests {
-		if _, err := gitOutputAt(quarantineDir, "fetch", "--no-tags", "--no-write-fetch-head", "--", remoteURL,
+		if _, err := gitInputWithDirectory(quarantineDir, nil, transportEnv, "fetch", "--no-tags", "--no-write-fetch-head", "--", remoteURL,
 			"+"+request.SourceRef+":"+request.QuarantineRef); err != nil {
 			result.Outcomes = append(result.Outcomes, failedReplicationOutcome(request, replicationStructuralInvalid,
 				fmt.Sprintf("selection %s %s failed exact fetch from remote %s", request.Kind, request.ID, selection.Remote)))

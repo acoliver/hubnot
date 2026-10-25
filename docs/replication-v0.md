@@ -230,6 +230,35 @@ operations remain fail-closed. Durable anchors/receipts prevent an interrupted
 copy from being mistaken for acceptance; retry reconciles exact transaction
 state.
 
+### Transport settings for the quarantine fetch
+
+Hubnot fetches each selection into a temporary bare repository under
+`.git/hn/replication/quarantine/`, and that repository has no configuration of
+its own. So that the fetch reaches the remote the way `git fetch` in the clone
+does, Hubnot reads the clone's local and worktree configuration, includes
+followed, and passes the transport settings to the fetch: `core.sshCommand`,
+`core.gitProxy`, `core.askPass` and every `ssh.*`, `http.*`, `credential.*` and
+`protocol.*` key. A clone that selects its SSH key with
+`git config core.sshCommand "ssh -i KEY -o IdentitiesOnly=yes"` therefore
+imports with that key. System and global configuration already apply to the
+fetch.
+
+The settings travel in `GIT_CONFIG_COUNT` environment entries, so a value such
+as an `http.extraHeader` token never appears in a process argument list.
+Settings already in the environment keep their precedence. `GIT_SSH_COMMAND`
+overrides `core.sshCommand`, and `GIT_CONFIG_COUNT` entries or `git -c` values
+that hn inherits override the clone's settings, as they do for any Git command
+in the clone. Refs, hooks, remotes, `url.*` rewrites and every other key stay
+out of the quarantine. `git remote get-url` has already applied `url.*` rewrites
+to the URL that Hubnot fetches.
+
+The environment entries need Git 2.31 or later, which added `GIT_CONFIG_COUNT`
+([2.31.0 release notes](https://github.com/git/git/blob/master/Documentation/RelNotes/2.31.0.adoc)),
+and reading the configuration by scope needs Git 2.26
+([2.26.0 release notes](https://github.com/git/git/blob/master/Documentation/RelNotes/2.26.0.adoc)).
+With an older Git the quarantine fetch sees only system, global and
+environment settings, so export `GIT_SSH_COMMAND` to choose a key.
+
 ## Budget semantics
 
 Budgets are evaluated per selected ref. Objects shared by two selections count

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"maps"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -1094,5 +1095,198 @@ func TestServeReplicationPhaseZeroFlow(t *testing.T) {
 	closed := decodeServeReplicationIssue(t, team.Hn("verifier", "issue", "show", issueEvent.ID, "--json"))
 	if closed.Data.State.Status != "closed" || closed.Data.State.Title != "Serve the ball" {
 		t.Fatalf("verifier sees issue %+v, want it closed", closed.Data)
+	}
+}
+
+// serveReplicationSSHTrap is a GIT_SSH program that refuses every
+// connection. Git runs GIT_SSH only when neither GIT_SSH_COMMAND nor
+// core.sshCommand is set, so a Git process that reaches the trap has lost
+// the clone's configuration.
+const serveReplicationSSHTrap = "ssh trap: the clone's core.sshCommand was not applied"
+
+// UseCloneSSHConfig moves who's SSH settings from the environment into
+// who's clone, the way a user with several identities on one Unix account
+// selects a key per clone: core.sshCommand names the shim, ssh.variant
+// keeps protocol v2, GIT_SSH_COMMAND and GIT_SSH_VARIANT are removed and
+// GIT_SSH points at the trap.
+func (team *serveReplicationTeam) UseCloneSSHConfig(who string) {
+	team.t.Helper()
+	client := team.clients[who]
+	client.Env = serveReplicationCloneSSHEnv(team.t, client.Env)
+	team.clients[who] = client
+	if team.work[who] != "" {
+		team.Git(who, "config", "core.sshCommand", serveHarnessShellQuote(client.Shim))
+		team.Git(who, "config", "ssh.variant", "ssh")
+	}
+}
+
+// serveReplicationCloneSSHEnv is env without GIT_SSH_COMMAND and
+// GIT_SSH_VARIANT and with GIT_SSH set to the trap.
+func serveReplicationCloneSSHEnv(t *testing.T, env []string) []string {
+	t.Helper()
+	trap := filepath.Join(t.TempDir(), "ssh-trap")
+	writeServeTestFile(t, trap, "#!/bin/sh\necho \""+serveReplicationSSHTrap+"\" >&2\nexit 255\n", 0o700)
+	kept := []string{"GIT_SSH=" + trap}
+	for _, entry := range env {
+		if !strings.HasPrefix(entry, "GIT_SSH_COMMAND=") && !strings.HasPrefix(entry, "GIT_SSH_VARIANT=") && !strings.HasPrefix(entry, "GIT_SSH=") {
+			kept = append(kept, entry)
+		}
+	}
+	return kept
+}
+
+// Maintainer review cycle 2 of WP12: participants that select their SSH
+// key only with their clone's core.sshCommand import each other's actor
+// chains and proposals with hn sync, and the maintainer advances main with
+// hn merge --remote. The replication quarantine fetch used to run Git
+// without the clone's configuration, so every exact fetch reached the
+// default SSH program and failed.
+func TestServeReplicationHonoursCloneSSHCommand(t *testing.T) {
+	team := newServeReplicationTeam(t)
+	participants := []string{serveReplicationMaintainer, serveReplicationImplementer, serveReplicationReviewer, serveReplicationRunner}
+	maintainer, implementer := team.actors[serveReplicationMaintainer], team.actors[serveReplicationImplementer]
+	reviewer, runner := team.actors[serveReplicationReviewer], team.actors[serveReplicationRunner]
+	for _, who := range participants {
+		team.UseCloneSSHConfig(who)
+		team.SelectAllTrusted(who)
+	}
+	// Outside a clone, Git has no core.sshCommand and reaches the trap, so
+	// the configuration in each clone is the only working SSH setting.
+	trapped, status := team.run(serveReplicationMaintainer, "", "git", "ls-remote", serveHarnessCloneURL(serveReplicationRepository))
+	if status == 0 || !strings.Contains(trapped, serveReplicationSSHTrap) {
+		t.Fatalf("git ls-remote outside a clone exited %d without the trap:\n%s", status, trapped)
+	}
+
+	proposal := team.OpenProposal(serveReplicationImplementer, "feature/clone-ssh", "Serve over the clone's SSH command")
+	requireServeReplicationOutcomes(t, team.Hn(serveReplicationMaintainer, "sync", "origin"),
+		serveReplicationPromoted([]string{implementer}, []string{proposal.ID}))
+	team.Hn(serveReplicationMaintainer, "run", "request", proposal.ID, "test")
+	request := team.Latest(serveReplicationMaintainer)
+	team.Hn(serveReplicationMaintainer, "sync", "origin")
+
+	requireServeReplicationOutcomes(t, team.Hn(serveReplicationRunner, "sync", "origin"),
+		serveReplicationPromoted([]string{implementer, maintainer}, []string{proposal.ID}))
+	team.Hn(serveReplicationRunner, "runner", "once", "--accept-pipeline", "test", "--accept-actor", maintainer,
+		"--backend", "host", "--allow-unsafe-host-execution")
+	if result := team.Latest(serveReplicationRunner); result.Kind != "run.result" || result.Subject != request.ID {
+		t.Fatalf("runner recorded %+v, want a result for %s", result, request.ID)
+	}
+	team.Hn(serveReplicationRunner, "sync", "origin")
+
+	reviewed := team.Hn(serveReplicationReviewer, "sync", "origin")
+	assertOperationalContains(t, reviewed, "Replication actor "+runner+": promoted\n", "Replication proposal "+proposal.ID+": promoted\n")
+	assertAllTrustedOmits(t, reviewed, "failed", "hn:")
+	team.Hn(serveReplicationReviewer, "review", proposal.ID, "--approve", "--body", "Imported over the clone's SSH command.")
+	team.Hn(serveReplicationReviewer, "sync", "origin")
+
+	decided := team.Hn(serveReplicationMaintainer, "sync", "origin")
+	assertOperationalContains(t, decided, "Replication actor "+runner+": promoted\n", "Replication actor "+reviewer+": promoted\n")
+	assertAllTrustedOmits(t, decided, "failed", "hn:")
+	team.Hn(serveReplicationMaintainer, "decide", proposal.ID, "--accept", "--body", "Accepted over the clone's SSH command.")
+	merged := team.Hn(serveReplicationMaintainer, "merge", proposal.ID, "--remote", "origin")
+	mergeFact := team.Latest(serveReplicationMaintainer)
+	if want := serveAdvanceSuccessLines("origin", proposal.Head, proposal.ID, mergeFact.ID, 1); merged != want {
+		t.Fatalf("hn merge --remote printed:\n%s\nwant:\n%s", merged, want)
+	}
+	if tip := team.ServerRef(serveReplicationMain); tip != proposal.Head {
+		t.Fatalf("hosted main = %s, want the proposal head %s", tip, proposal.Head)
+	}
+
+	// A verifier that clones with the SSH command in its clone's
+	// configuration imports the merged proposal and its evidence.
+	team.FreshClient("verifier")
+	team.UseCloneSSHConfig("verifier")
+	verifier := filepath.Join(t.TempDir(), "clone-verifier")
+	team.run("verifier", "", "git", "clone", "-q", "-c", "core.sshCommand="+serveHarnessShellQuote(team.clients["verifier"].Shim),
+		"-c", "ssh.variant=ssh", serveHarnessCloneURL(serveReplicationRepository), verifier)
+	team.work["verifier"] = verifier
+	team.SelectAllTrusted("verifier")
+	verified := team.Hn("verifier", "sync", "origin")
+	assertAllTrustedOmits(t, verified, "failed", "hn:")
+	assertOperationalContains(t, team.Hn("verifier", "proposal", "status", proposal.ID), "Status:   merged", "Pipeline: test 1/1 trusted passes")
+	team.requireServeReplicationLog(append(participants, "verifier")...)
+}
+
+// cloneTransportConfigEnvironment hands a Git process in another
+// repository exactly the clone's local transport keys, keeps an implicit
+// boolean true, lets inherited GIT_CONFIG_COUNT and git -c entries win as
+// the command scope does in the clone, and leaves every other key behind.
+func TestCloneTransportConfigEnvironment(t *testing.T) {
+	global := filepath.Join(t.TempDir(), "global-config")
+	writeServeTestFile(t, global, "[http]\n\tproxy = http://global.invalid\n", 0o600)
+	t.Setenv("GIT_CONFIG_GLOBAL", global)
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	clone := filepath.Join(t.TempDir(), "clone")
+	runOperationalGit(t, "", "init", "-q", clone)
+	included := filepath.Join(t.TempDir(), "included-config")
+	writeServeTestFile(t, included, "[credential]\n\thelper = store\n", 0o600)
+	for _, setting := range [][]string{
+		{"core.sshCommand", "ssh -i 'key file' -o IdentitiesOnly=yes"},
+		{"ssh.variant", "ssh"},
+		{"protocol.version", "2"},
+		{"http.postBuffer", "1048576"},
+		{"http.https://example.invalid/.extraHeader", "Authorization: Bearer clone-token"},
+		{"include.path", included},
+		{"core.hooksPath", "/clone/hooks"},
+		{"remote.origin.uploadpack", "/clone/upload-pack"},
+		{"url.ssh://elsewhere.invalid/.insteadOf", "ssh://example.invalid/"},
+		{"user.name", "Clone User"},
+	} {
+		runOperationalGit(t, clone, "config", setting[0], setting[1])
+	}
+	config, err := os.OpenFile(filepath.Join(clone, ".git", "config"), os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := config.WriteString("[http]\n\tsslVerify\n"); err != nil {
+		t.Fatal(err)
+	}
+	if err := config.Close(); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GIT_CONFIG_COUNT", "1")
+	t.Setenv("GIT_CONFIG_KEY_0", "protocol.version")
+	t.Setenv("GIT_CONFIG_VALUE_0", "1")
+	t.Setenv("GIT_CONFIG_PARAMETERS", "'http.postbuffer'='2048'") // what an outer git -c passes on
+	t.Chdir(clone)
+
+	environment := cloneTransportConfigEnvironment()
+	other := filepath.Join(t.TempDir(), "other.git")
+	runOperationalGit(t, "", "init", "-q", "--bare", other)
+	lookup := func(key string) string {
+		t.Helper()
+		command := exec.Command("git", "--git-dir="+other, "config", "--get", key)
+		command.Env = append(os.Environ(), environment...)
+		output, _ := command.Output()
+		return strings.TrimSpace(string(output))
+	}
+	for key, want := range map[string]string{
+		"core.sshCommand":  "ssh -i 'key file' -o IdentitiesOnly=yes",
+		"ssh.variant":      "ssh",
+		"http.postBuffer":  "2048", // an inherited git -c value still wins
+		"protocol.version": "1",    // the inherited command scope is read last and wins
+		"http.https://example.invalid/.extraHeader": "Authorization: Bearer clone-token",
+		"http.sslVerify":                         "true",
+		"credential.helper":                      "store",
+		"http.proxy":                             "http://global.invalid",
+		"core.hooksPath":                         "",
+		"remote.origin.uploadpack":               "",
+		"url.ssh://elsewhere.invalid/.insteadOf": "",
+		"user.name":                              "",
+		"include.path":                           "",
+	} {
+		if got := lookup(key); got != want {
+			t.Errorf("%s in the other repository = %q, want %q", key, got, want)
+		}
+	}
+	if slices.ContainsFunc(environment, func(entry string) bool { return strings.Contains(entry, "global.invalid") }) {
+		t.Errorf("global configuration was copied into the environment: %q", environment)
+	}
+
+	empty := filepath.Join(t.TempDir(), "empty")
+	runOperationalGit(t, "", "init", "-q", empty)
+	t.Chdir(empty)
+	if environment := cloneTransportConfigEnvironment(); environment != nil {
+		t.Fatalf("clone without transport keys: environment %q, want none", environment)
 	}
 }
