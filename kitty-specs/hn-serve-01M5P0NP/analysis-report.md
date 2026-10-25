@@ -4,8 +4,8 @@ artifact_type: spec-kitty.analysis-report
 command: /spec-kitty.analyze
 mission_slug: hn-serve-01M5P0NP
 mission_id: 01M5P0NPCQXWXNN63MXCBQSRVP
-generated_at: '2026-10-25T01:28:27.665071+00:00'
-analyzer_agent: independent-analyzer
+generated_at: '2026-10-25T01:46:04.498316+00:00'
+analyzer_agent: unknown
 input_artifacts:
   spec.md:
     path: kitty-specs/hn-serve-01M5P0NP/spec.md
@@ -21,265 +21,263 @@ input_artifacts:
     sha256: 404c65fe9e64919858d009c763644aefbfd369884d573d1986e3db7fa1f14bc9
 verdict: blocked
 issue_counts:
+  medium: 4
   critical: 0
-  medium: 2
-  high: 1
   low: 0
+  high: 1
   info: 0
 findings:
-- id: AUD-002
-  severity: high
-  category: dependency-inconsistency
-  summary: WP13 requires a green traceability gate before WP14 starts, while T083 requires declarations of tests that WP14 creates and provides no pending-work exception for FR-020 and FR-021.
-- id: AUD-003
-  severity: medium
-  category: coverage
-  summary: NFR-002 specifies inclusive boundaries for five server budgets, but the assigned acceptance fixtures require boundary pairs only for event and object counts, leaving three byte budgets without explicit server-boundary verification.
 - id: AUD-004
   severity: medium
   category: verification
-  summary: NFR-004 requires inspection of every path written, but T081 observes only before-and-after snapshots of HOME and one sentinel directory, which cannot detect writes elsewhere or transient writes.
+  summary: The written-path audit mounts a writable tmpfs at /tmp while requiring writes there to fail, and its SSH-shim boundary does not explicitly encompass administration commands.
+- id: AUD-005
+  severity: high
+  category: dependency-inconsistency
+  summary: WP14 enables LFS while WP06 retains an unconditional LFS-disabled acceptance assertion, and WP14's permitted changes exclude that test file.
+- id: AUD-006
+  severity: medium
+  category: implementation-plan-consistency
+  summary: The mandatory reused budget helper rereads the complete actor chain commit by commit, contradicting the planned range-only hosted-history handling.
+- id: AUD-007
+  severity: medium
+  category: contract-consistency
+  summary: Budget measurement verifies signatures before WP08's diagnostic pass, so its generic error path bypasses the required full failing-event-ID diagnosis.
+- id: AUD-008
+  severity: medium
+  category: requirement-consistency
+  summary: WP01 excludes temporary and LFS contents from validation despite NFR-008 and the state contract requiring refusal for unsafe server-state entries and symlinks.
 ---
 
 ## Specification Analysis Report
 
-### Scope and prerequisite metadata
+### Scope and reviewed revision
 
-Independent full artifact re-analysis of mission `hn-serve-01M5P0NP` at commit `2fe54a4ef0848f4433f8e6fa9b7b187aba6afaaa`. This analysis evaluates specified behavior, planned implementation, verification design, dependencies and governance. Implementation completion and runtime performance remain unverified. No source tests, builds or implementation commands were run. No remediation was performed.
+Independent, non-remediating analysis of mission **hn-serve-01M5P0NP**, branch **mission/hn-serve**, at **de2c7cd0752150032593e4fe854ee16508bd844e**. Reviewed the previous report at **0a97fd3** and the exact **de2c7cd** diff. The worktree was clean before report persistence.
 
-The prerequisite command ran once from the repository root with `--json --include-tasks --mission hn-serve-01M5P0NP`. It returned `valid: true`, no errors or warnings, version `3.2.7`, and `branch_matches_target: true`.
+**Verdict: blocked.** AUD-005 is the sole active HIGH finding. Four MEDIUM findings require follow-up. AUD-002 and AUD-003 are resolved; AUD-004 remains active. These conclusions concern planning consistency and verification feasibility. They do not assert an implemented runtime failure.
 
-| Metadata | Value |
+#### Citation register and review evidence
+
+Paths below are relative to the repository root. `label:line` and `label:first-last` are current, one-based line citations. Mission artifact paths begin at `kitty-specs/hn-serve-01M5P0NP/`.
+
+| Label | Path |
 |---|---|
-| Repository root | `/home/acoliver/projects/appaday/gitium/hubnot` |
-| Feature directory | `/home/acoliver/projects/appaday/gitium/hubnot/kitty-specs/hn-serve-01M5P0NP` |
-| Current branch | `mission/hn-serve` |
-| Target branch | `mission/hn-serve` |
-| Base/planning branch | `mission/hn-serve` |
-| Available documents | `data-model.md`, `plan.md`, `quickstart.md`, `research.md`, `spec.md`, `tasks.md` |
-| Specification | `/home/acoliver/projects/appaday/gitium/hubnot/kitty-specs/hn-serve-01M5P0NP/spec.md` |
-| Plan | `/home/acoliver/projects/appaday/gitium/hubnot/kitty-specs/hn-serve-01M5P0NP/plan.md` |
-| Tasks inventory | `/home/acoliver/projects/appaday/gitium/hubnot/kitty-specs/hn-serve-01M5P0NP/tasks.md` |
-| Contracts directory | `/home/acoliver/projects/appaday/gitium/hubnot/kitty-specs/hn-serve-01M5P0NP/contracts` |
-| Work-package directory | `/home/acoliver/projects/appaday/gitium/hubnot/kitty-specs/hn-serve-01M5P0NP/tasks` |
-| Persisted report | `/home/acoliver/projects/appaday/gitium/hubnot/kitty-specs/hn-serve-01M5P0NP/analysis-report.md` |
+| S | kitty-specs/hn-serve-01M5P0NP/spec.md |
+| P | kitty-specs/hn-serve-01M5P0NP/plan.md |
+| I | kitty-specs/hn-serve-01M5P0NP/tasks.md |
+| M | kitty-specs/hn-serve-01M5P0NP/data-model.md |
+| R | kitty-specs/hn-serve-01M5P0NP/research.md |
+| Q | kitty-specs/hn-serve-01M5P0NP/quickstart.md |
+| CLI | kitty-specs/hn-serve-01M5P0NP/contracts/serve-cli.md |
+| STATE | kitty-specs/hn-serve-01M5P0NP/contracts/server-state.md |
+| PUSH | kitty-specs/hn-serve-01M5P0NP/contracts/push-verdict.md |
+| ADV | kitty-specs/hn-serve-01M5P0NP/contracts/advancement.md |
+| SELECT | kitty-specs/hn-serve-01M5P0NP/contracts/all-trusted-selection.md |
+| LFS | kitty-specs/hn-serve-01M5P0NP/contracts/lfs-transfer.md |
+| W01 | kitty-specs/hn-serve-01M5P0NP/tasks/WP01-server-state-foundation.md |
+| W02 | kitty-specs/hn-serve-01M5P0NP/tasks/WP02-ssh-keys-authorized-keys.md |
+| W03 | kitty-specs/hn-serve-01M5P0NP/tasks/WP03-rejection-protocol-and-marker.md |
+| W04 | kitty-specs/hn-serve-01M5P0NP/tasks/WP04-validation-seams.md |
+| W05 | kitty-specs/hn-serve-01M5P0NP/tasks/WP05-repository-and-key-administration.md |
+| W06 | kitty-specs/hn-serve-01M5P0NP/tasks/WP06-forced-command-session.md |
+| W07 | kitty-specs/hn-serve-01M5P0NP/tasks/WP07-hook-and-verdict-framework.md |
+| W08 | kitty-specs/hn-serve-01M5P0NP/tasks/WP08-hubnot-fact-ref-rules.md |
+| W09 | kitty-specs/hn-serve-01M5P0NP/tasks/WP09-protected-branch-governance.md |
+| W10 | kitty-specs/hn-serve-01M5P0NP/tasks/WP10-advancement-and-merge-fact.md |
+| W11 | kitty-specs/hn-serve-01M5P0NP/tasks/WP11-all-trusted-selection.md |
+| W12 | kitty-specs/hn-serve-01M5P0NP/tasks/WP12-fan-out-and-phase0-flow.md |
+| W13 | kitty-specs/hn-serve-01M5P0NP/tasks/WP13-quality-evidence-and-threat-model.md |
+| W14 | kitty-specs/hn-serve-01M5P0NP/tasks/WP14-git-lfs-transfer-and-quota.md |
+| CY | .kittify/charter/charter.yaml |
+| CM | .kittify/charter/charter.md |
+| BUDGET | quarantine.go |
+| STORE | store.go |
 
-All required artifacts exist. References below are relative to the feature directory unless prefixed with a repository-root path.
+The independent architect review read all six principal mission documents, all six complete contracts, and **all 14 complete WP prompts and 91 subtask bodies**. Additional review covered AGENTS.md, mission checklist, task README, lane and mission metadata, decision summaries/status, and relevant status events. Limited source inspection supported validation-helper and publication-order interpretation.
 
-Reviewed firsthand:
+The requested `charter/charter.md` does not exist. **CY is authoritative**, as CM:3-4 explicitly states. Active governance, HN-001 through HN-005 and selected doctrine summaries were evaluated; unselected catalogue entries were not activated as obligations.
 
-- Complete `spec.md`, including intent, five stories and 27 scenarios, invariant, edges, all FR/NFR/constraints, success criteria, assumptions and confirmed OQs.
-- Complete `plan.md`, `tasks.md`, `data-model.md`, `research.md` and `quickstart.md`.
-- All six complete contracts: `contracts/serve-cli.md`, `contracts/server-state.md`, `contracts/push-verdict.md`, `contracts/advancement.md`, `contracts/all-trusted-selection.md` and `contracts/lfs-transfer.md`.
-- All 14 complete WP prompts, enumerated in the work-package table below. All 91 subtask bodies were inspected.
-- `.kittify/charter/charter.md`, the authoritative YAML's active governance, HN-001 through HN-005 and selected doctrine summaries; `AGENTS.md`; `lanes.json`; `meta.json`; `checklists/requirements.md`; the previous report; status and final answers of all 24 Decision Moments. The enforcement-point Decision Moment was also inspected in full.
-- Commit `2fe54a4` metadata and exact diff. Limited read-only source context in repository-root `quarantine.go:739-847` and `governance.go:130-308` supported interpretation of reused budget and merge interfaces. This was not a source implementation audit.
+The review also located and read the original brief at `/home/acoliver/projects/appaday/gitium/notes/mission-1-hn-serve-brief.md` and Phase 0 findings at `/home/acoliver/projects/appaday/gitium/notes/phase0-hubnot-findings.md`. The brief's SHA-256 is **751c75f89dd92dcfd3e56dcfba6c5c42eafb17479cb5916c116304b10a01bada**, matching mission metadata.
 
-The original brief and Phase 0 findings files were absent from the workspace search. Their six acceptance examples and flow are explicitly restated in `tasks/WP13-quality-evidence-and-threat-model.md:79` and `tasks/WP12-fan-out-and-phase0-flow.md:123-140`. This limitation does not prevent analysis of the mission's self-contained specification and contracts.
-
-### Findings
+### Active findings
 
 | ID | Category | Severity | Location(s) | Summary | Recommendation |
 |---|---|---|---|---|---|
-| AUD-002 | Dependency inconsistency | HIGH | `tasks/WP13-quality-evidence-and-threat-model.md:147-152,173-178,188-196`; `tasks/WP14-git-lfs-transfer-and-quota.md:4-5,155-168,174-176`; `tasks.md:450,473,482` | T083 requires every FR and US row to name covering tests and requires each named test declaration to exist. WP14 creates the LFS tests after WP13. The only absence exception applies to US5 rows and requires them to say the work moved to another mission. It supplies no pending-WP14 state, and FR-020/FR-021 rows have no exception at all. WP13 therefore cannot satisfy its prescribed green gate in the documented order when LFS remains scheduled in this mission. This is a blocking acceptance/dependency conflict. | Under separately authorized planning remediation, define explicit pending-LFS traceability for every affected FR and US row before WP14, with declaration checks becoming mandatory once LFS lands, or relocate the final traceability gate after WP14. Preserve a green, truthful WP13 gate and C-010's separability. Re-analyze the resulting order. |
-| AUD-003 | Coverage | MEDIUM | `spec.md:198`; `tasks/WP08-hubnot-fact-ref-rules.md:107,127,137,148,153-168,192`; `tasks/WP05-repository-and-key-administration.md:200-203,236` | NFR-002 defines inclusive acceptance and one-unit-over refusal for five budgets. T052 explicitly requires pairs only for max-events and max-objects, and the WP DoD accepts those two as its minimum. Largest-object bytes, largest-attachment bytes and total bytes have implementation mappings and settings tests, but no explicit hosted-push boundary fixtures in any of the 14 prompts. Reusing the measurement helper supplies implementation intent without establishing server wiring and unchanged refs for those boundaries. | Assign at-limit and one-byte-over hosted-push fixtures for the remaining three budgets, exercising relevant ref classes and asserting the budget diagnostics and byte-identical hosted refs after refusal. Retain existing client regression tests. |
-| AUD-004 | Verification | MEDIUM | `spec.md:200`; `contracts/server-state.md:3`; `tasks/WP13-quality-evidence-and-threat-model.md:121-129`; `tasks/WP14-git-lfs-transfer-and-quota.md:165` | NFR-004 requires a test inspecting every written path. T081 walks server HOME before and after and observes one external sentinel directory. A write to an unrelated absolute path is invisible; a transient file removed before the second snapshot is also invisible. WP14 repeats the same audit pattern. These observations establish a narrower guarantee than the stated acceptance requirement. | Define a written-operation observation boundary covering all server descendants and actual write destinations, including temporary files, and validate it with an intentional out-of-root write. Keep HOME/sentinel snapshots as supplementary evidence. If a narrower guarantee is intended, obtain an explicit requirement revision and document its limits. |
+| AUD-004 | Verification | MEDIUM | S:200; W13:125-130,194; W14:165 | The boundary mounts `/tmp` as a writable tmpfs while requiring an intentional write there to fail. The prescribed boundary-validation test cannot satisfy that expectation on this host. The wrapper is placed in the SSH shim, while the acceptance run includes administration commands whose containment is not explicitly assigned. Before/after snapshots still miss transient writes and unrelated absolute destinations. | Make all disallowed destinations read-only, validate the resulting boundary, and explicitly encompass administration plus every server descendant. Retain snapshots as supplementary evidence. Record skipped containment as an evidence limitation. |
+| AUD-005 | Dependency inconsistency | HIGH | W06:202,227-238; W14:69,94-98,116,183-193; I:61,75,482 | T039 requires a registered LFS download session to be refused as unsupported with the not-enabled sentence. T087 replaces that behavior with the LFS protocol. WP14 permits only its LFS files, one session arm and documentation changes, leaving the earlier session test outside its edit scope. No feature-conditioned seam-test transition is specified. The prescribed WP06 assertion and enabled WP14 behavior cannot both pass the integrated gate as written. This acceptance/ownership conflict is separate from AUD-002's repaired traceability order. | Define and assign the seam test's transition when LFS lands, or prescribe an explicit capability-conditioned assertion from WP06 onward. Keep the refusal test meaningful when LFS is deferred and preserve all tests predating this mission. |
+| AUD-006 | Implementation-plan consistency | MEDIUM | P:127-130; R:57-58; W04:180-188; W08:107,117,205; BUDGET:828-843; STORE:220-239 | T048 mandates the existing budget helper, whose actor attachment measurement unconditionally calls the full-chain loader. That loader walks every actor commit and reads its event/signature individually. Passing hosted OLD discounts object measurements but does not limit this attachment-loading pass. This contradicts the no-per-event-hosted-prefix design; neither the range validator nor the batched hosted reader removes it. NFR-001 remains measurable, but its planned performance mechanism is incomplete. | Assign a compatible budget-measurement seam using validated hosted data and appended-range reads, preserving current budget semantics and ordinary-client behavior. Retain the end-to-end timing gate. No measured timing failure is claimed. |
+| AUD-007 | Contract consistency | MEDIUM | S:48,181; PUSH:31-33; W08:107-108,162; BUDGET:828-831; STORE:189-204 | The budget helper verifies each actor event before T048 reaches its failing-event diagnostic pass. A broken signature returns through step 3's generic actor-chain-invalid path, rather than step 4's payload-derived full event-ID diagnosis. The supplied steps do not assign recovery of that ID on the earlier error path, although US1-4 and T052 explicitly require it. | Specify full-ID diagnosis for non-budget measurement errors, or separate safe measurement from signature validation so the designated diagnostic stage handles them. Keep the real broken-signature CLI fixture and rejection precedence. |
+| AUD-008 | Requirement consistency | MEDIUM | S:204; STATE:32; W01:171-178; W14:124,145; W05:239 | NFR-008 and the state contract require refusal for unsafe server-state modes, symlinks and unexpected entries. T002 explicitly avoids inspecting temporary and LFS contents. WP14 assigns staging cleanup, regular-file counting and an object-open check, without a complete check of these excluded state subtrees. An unsafe entry below an excluded subtree can therefore escape the prescribed startup validation. This concerns server state rather than Git's ordinary internal file modes. | Specify the validation scope consistently and assign bounded, path-safe checks plus public-CLI fixtures for excluded state subtrees. Intentional exceptions require an explicit requirement/contract revision and safe handling at each use boundary. |
 
-Active findings: **critical 0, high 1, medium 2, low 0, info 0**. Computed verdict: **blocked**, because AUD-002 is high. No finding asserts that a planned runtime implementation has failed a test. Recommendations identify future authorized work; this audit changes no remediation target.
+**Read-only boundary evidence:** Bubblewrap successfully started during independent review. Mount inspection showed a writable tmpfs overlay at `/tmp`. A separate no-write permission query under the same read-only-root and tmpfs options returned `tmp_writable=True` and `outside_home_writable=False`. No file-write probe was attempted. This confirms the mount-policy contradiction; it does not constitute execution of the future acceptance audit.
 
-### AUD-001 disposition and maintainer commit verification
+### Previous findings and exact-fix verification
 
-**AUD-001 is resolved in the current planning artifact.** The previous report at the audited commit recorded it as the sole high finding (`git show 2fe54a4:kitty-specs/hn-serve-01M5P0NP/analysis-report.md`, historical lines 29-46). Its defect was accumulating 50 events per sample while resetting only `main`.
-
-The independently inspected commit `2fe54a4ef0848f4433f8e6fa9b7b187aba6afaaa`, titled `tasks(hn-serve): restore an identical 1,000-event fixture before each NFR-001 sample (AUD-001)`, changes exactly one line in the WP13 prompt. It was HEAD at analysis startup.
-
-Current evidence:
-
-- `spec.md:197` fixes the workload at 1,000 hosted events, up to 50 added events and one protected update, under five seconds at p95 over 20 runs.
-- `tasks/WP13-quality-evidence-and-threat-model.md:114` creates 1,000 events across at least three actors, including ready, accepted and CI-tested proposal evidence, and publishes through the shim.
-- **Line 115** now snapshots the hosted bare repository, its repository state and the client clone; restores all three before each of 20 samples; starts each sample at the same `main` tip; appends 50 events; times the atomic actor-plus-protected push; requires acceptance; asserts exactly 1,000 hosted events before timing; and excludes restoration time.
-- **Line 116** sorts the 20 durations, takes the nineteenth observation for p95 and requires it below five seconds. **Line 117** retains the full-gate/non-short execution and non-race measured binary.
-
-Restoring both Git refs/objects and repository state removes inter-sample accumulation and restores branch/governance preconditions. Restoring the client prevents its actor chain from accumulating across samples. The pre-push event-count assertion explicitly guards the original defect. The old finding is excluded from active severity counts. This establishes a corrected verification design; the performance result still requires implementation and execution.
-
-### Semantic models and detection passes
-
-The requirement model contains 23 functional requirements, eight measurable NFRs and eleven constraints. Six success criteria and 27 numbered acceptance scenarios are tracked separately. The task model contains 91 distinct subtasks in 14 WPs. Requirement keys below preserve the specification's IDs as their canonical identifiers.
-
-The behavior model follows administrator provisioning and key attribution, forced-command transport, quarantined fact validation, per-class ref policy, dual-policy protected advancement, client-signed merge recording and repair, all-trusted discovery, and separable verified LFS storage. Important cross-boundary invariants are append-only signed history, exact-head evidence, server verdicts carrying no evidentiary authority, fail-closed policy handling and independent client verification.
-
-| Detection pass | Result |
-|---|---|
-| Duplication | No actionable duplicated business rule was found. Repeated invariant and reason-code descriptions have intentional contract, implementation-prompt and documentation roles; T019 requires catalogue/document agreement (`tasks/WP03-rejection-protocol-and-marker.md:204-210`). Duplication count: 0. |
-| Ambiguity | No unresolved business-rule ambiguity was substantiated after applying confirmed OQs and detailed contract precedence. Protected-list ordering is explicitly resolved by WP01 T004. The narrower write-audit evidence is recorded as AUD-004 rather than inventing an alternative security requirement. |
-| Underspecification | AUD-004 identifies the missing observation method for the full written-path guarantee. LFS client-specific behavior, SSH harness skips and ordinary-remote compatibility have explicit contracts and task owners. |
-| Charter alignment | No direct MUST conflict was substantiated. Required implementation review, test-first execution and quality gates remain binding. Verification-plan weaknesses are recorded at their stated severity; this analysis supplies no waiver of charter requirements. |
-| Coverage | Every normative requirement and story scenario maps to planned work. AUD-003 identifies incomplete NFR-002 boundary verification. AUD-004 limits the evidence planned for NFR-004. Planned traceability is 100%; behavioral proof remains future work. |
-| Inconsistency and ordering | AUD-002 is the material WP13/WP14 gate conflict. The 91 task-index IDs exactly match 91 unique prompt subtasks. The dependency graph is acyclic, and unordered WPs have no overlapping declared owned files. |
-
-Documented resolutions were applied before raising findings:
-
-- The first protected ref remains the default, with only later entries sorted (`tasks/WP01-server-state-foundation.md:243-245`; `tasks/WP05-repository-and-key-administration.md:156`). The older `data-model.md:51` wording still says the whole list is sorted. The task explicitly resolves this behavior; no new ambiguity finding is counted.
-- Maintainer-tightened branch ownership in `spec.md:179,264` controls over the older OQ-6 Decision Moment answer. `contracts/push-verdict.md:57-59` and WP07 T044-T046 implement and test creator ownership, maintainer override and unowned-branch behavior.
-- Separate publication and advancement pushes preserve valid facts after a refused branch update (`research.md:49-51`; `contracts/advancement.md:17-29`), reconciling FR-014 with per-push all-or-nothing verdicts.
-- Missing candidate code during actor publication is a narrow, documented exception; a protected update still requires the accepted proposal code ref (`contracts/push-verdict.md:31-36,76-86`; WP04 T023 and WP09 T055).
-- Destination evaluation uses destination roles and thresholds with the signed base digest (`tasks/WP04-validation-seams.md:147-161`), preserving signed decisions while applying both policies.
-- Multiple maintainers may record separate merge facts for the same candidate; competing merged candidates create lineage conflict (`contracts/advancement.md:61`). The local legacy merge path and remote fast-forward repair are explicitly separate.
-- The real rust-pingpong run is a manual dogfooding check; T077 reproduces its command flow in an automated portable fixture (`tasks/WP12-fan-out-and-phase0-flow.md:129`). This scope is explicit.
-- A non-atomic push's post-validation I/O failure is acknowledged in `plan.md:295`; the design's all-or-nothing rejection tests target refused verdicts. Atomic pushes remain recommended. No claim of tested disk-failure atomicity is inferred.
-- `lanes.json:9-33` assigns WP03 to lane-b and WP04/WP11 to lane-c, reversing the illustrative labels in `tasks.md:41-42`. `tasks.md:38` explicitly makes the computed file authoritative. Membership and owned surfaces are consistent, so this creates no new scheduling finding.
-
-### Coverage Summary Table
-
-`Yes` means an identifiable planned task exists. `Yes; partial evidence` means task coverage exists with the listed verification gap. This table does not certify implemented or passing behavior.
-
-| Requirement Key | Has Task? | Task IDs | Notes |
+| Historical ID | Disposition | Current citations | Rationale |
 |---|---|---|---|
-| FR-001 optional hosting | Yes | T001-T007, T034-T039, T085 | Isolated command group and ordinary-workflow regression. |
-| FR-002 repository administration | Yes | T004, T028-T032 | Seeded create/list/show/set, protected bootstrap and recovery administration. |
-| FR-003 key registry | Yes | T003, T008-T009, T027, T032 | Full fingerprints, binding uniqueness, owner-only storage and administration. |
-| FR-004 managed authorized_keys | Yes | T010-T013, T027, T032-T033 | Forced command, restrict, preservation and rewrite failures. |
-| FR-005 forced dispatch | Yes | T034-T039, T082, T087 | Closed grammar, unknown-key and unsafe-path refusals; final LFS dispatch. |
-| FR-006 push attribution | Yes | T035-T036, T041, T043, T045-T046 | Registry identity carried to hooks, reasons and push log. |
-| FR-007 actor-chain validation | Yes | T022-T023, T025, T048, T051-T052 | Range validation, full relationships, dependencies and attribution. |
-| FR-008 protected governance | Yes | T020-T021, T025, T054-T059 | Both policies, code matching, blocked lineages and exact signed head. |
-| FR-009 tested commit only | Yes | T054-T059, T063-T065 | Trusted CI, ancestry and absence of a new merge commit. |
-| FR-010 other governed ref classes | Yes | T042-T044, T046, T049-T053 | Proposal and memory validation, tag immutability and reserved refs. |
-| FR-011 ordinary branches | Yes | T004, T044-T047 | Creator ownership, shared fast-forward and maintainer-only unowned rewrites. |
-| FR-012 all-or-nothing verdict | Yes | T043, T046, T051-T052, T057, T059 | Mixed accepted/rejected refs and quarantined-object discard. |
-| FR-013 structured refusals | Yes | T014-T019, T035, T043, T046, T059, T063 | Versioned grammar, first-failure precedence, full IDs and client extraction. |
-| FR-014 advancement request | Yes | T056, T061-T065 | Maintainer authorization under both policies and separate fact publication. |
-| FR-015 fast-forward merge fact | Yes | T024-T026, T063-T065 | Exact-head merge fact, ordinary-remote validation and interruption repair. |
-| FR-016 legacy merge unchanged | Yes | T061, T065, T085 | Early remote dispatch preserves no-flag --no-ff flow. |
-| FR-017 advertisement/identification | Yes | T017-T019, T028, T068, T071-T072, T074 | Marker, all accepted refs and re-identification. |
-| FR-018 all-trusted selection | Yes | T068-T075, T077 | Additive exact selectors, memory exclusion, budgets and absent refs. |
-| FR-019 existing selection parity | Yes | T068-T072, T076 | Byte-identical legacy selection and hosted/ordinary parity. |
-| FR-020 LFS transfer | Yes | T086-T088, T090-T091 | WP14 creates tests; WP13 declaration gate is blocked by AUD-002. |
-| FR-021 LFS quota/locking | Yes | T004, T029-T030, T087-T091 | Inclusive verified-object quota and unsupported locking; AUD-002 affects traceability order. |
-| FR-022 serialization | Yes | T005, T037, T039, T054, T059, T066 | Session lock and stale-tip race evidence. |
-| FR-023 tested documentation | Yes | T007, T013, T019, T026, T033, T040, T047, T053, T060, T067, T073, T078-T079, T083-T084, T091 | Surface-specific examples and threat model; AUD-002 affects the consolidated gate. |
-| NFR-001 verdict time | Yes | T022, T048, T080 | Corrected constant 1,000-event fixture; 20 observations and p95; AUD-001 resolved. |
-| NFR-002 incoming budgets | Yes; partial evidence | T030, T048-T052 | Five budget paths assigned; three byte-boundary test pairs absent, AUD-003. |
-| NFR-003 fail closed | Yes | T007, T018, T025, T032, T039, T041-T042, T046, T052, T059 | Malformed state, commands, policy, signatures and missing dependencies. |
-| NFR-004 least privilege | Yes; partial evidence | T001-T002, T012, T032, T036, T081, T090 | Root refusal and path/mode checks; written-path observation gap, AUD-004. |
-| NFR-005 race safety | Yes | T005, T037, T054, T066 | Fifty repetitions of ten concurrent expected-tip pushes. |
-| NFR-006 client independence | Yes | T024, T059, T065, T072, T074-T077 | Identity-less verification and forged-marker rejection through client validation. |
-| NFR-007 regression gate | Yes | T025, T065, T072, T085 | Full gate per WP; baseline assertions protected. WP13 gate order affected by AUD-002. |
-| NFR-008 private server state | Yes | T002-T007, T012, T027, T032, T081, T088, T090 | Strict state schemas, pairing, modes, symlinks and LFS file handling. |
-| C-001 optional service | Yes | T001, T007, T061, T068-T072, T085 | No ordinary workflow gains a mandatory server. |
-| C-002 OpenSSH | Yes | T008-T013, T034-T040, T082 | Managed forced commands, real Git programs, shim and real-sshd test. |
-| C-003 standard library first | Yes | T001-T013, T086-T091 | No new module dependency; LFS uses standard library. |
-| C-004 both policies | Yes | T020-T021, T025-T026, T054-T059 | Signed base digest and destination thresholds/lists/pipelines. |
-| C-005 no untested merge commit | Yes | T054-T060, T063-T065 | Fast-forward only and no server/client commit creation in remote advancement. |
-| C-006 no new authority | Yes | T013, T020-T026, T036, T053, T056, T064-T065, T073, T084 | Registry grants attribution; clients sign and verify facts. |
-| C-007 immutable history | Yes | T022-T023, T048-T053, T055, T059-T060 | Append-only actors, immutable proposal refs and successor revisions. |
-| C-008 protocol/docs together | Yes | T019, T026, T040, T047, T053, T060, T067, T073, T079, T084, T091 | Each changed trust or wire surface has a documentation owner. |
-| C-009 black-box acceptance | Yes | T032-T033, T038-T039, T046, T052, T059, T065-T066, T072, T074-T077, T080-T082, T090 | Real temporary remotes and public clients; unit/metadata checks are supplementary. |
-| C-010 LFS last/separable | Yes | T037, T083, T086-T091 | Explicit final WP and refusal seam; AUD-002 prevents the intended intermediate green gate. |
-| C-011 excluded scope | Yes | T084-T085 | Threat-model non-goals and reviewer scope check. |
-| SC-001 six brief examples | Yes | T046, T052, T059, T065, T075, T077, T083 | Six examples restated in WP13:79 and individually assigned. |
-| SC-002 rejection integrity | Yes | T018, T039, T046, T052, T059, T065 | Byte-identical ref snapshots and parseable per-failing-ref reasons. |
-| SC-003 governed successful tips | Yes | T054-T059, T065 | Dual-policy fixture set and fresh-verifier checks after protected acceptance. |
-| SC-004 Phase 0 flow | Yes | T077-T078 | Five roles, all-trusted discovery and no participant direct main push. |
-| SC-005 evidence reproduction | Yes | T024, T065, T074, T077 | Fresh identity-less verifier obtains the same evidence IDs. |
-| SC-006 traceability and gate | Yes | T079, T083, T085 | Explicit mapping/gate tasks; AUD-002, AUD-003 and AUD-004 constrain planned evidence. |
-| US1-1 feature and own actor | Yes | T048, T051-T052 | Accepted branch, actor and candidate publication. |
-| US1-2 direct main refusal | Yes | T054-T059 | Missing proposal/review/CI/acceptance and unchanged refs. |
-| US1-3 another actor refusal | Yes | T048, T052 | Mapped-actor mismatch. |
-| US1-4 broken signature | Yes | T022, T025, T048, T052 | Rejection names altered payload's full event ID. |
-| US1-5 actor rewrite refusal | Yes | T048, T052 | Rewind, deletion and divergence. |
-| US1-6 ordinary branch ownership | Yes | T044-T046 | Other actor refused; owner and maintainer permitted. |
-| US2-1 hosting and clone | Yes | T027-T028, T032, T038-T039 | Managed restrict entry and clone through the forced command. |
-| US2-2 unregistered key | Yes | T035, T039 | Protocol stdout remains empty and no data transfer starts. |
-| US2-3 unsupported command | Yes | T034-T036, T039 | Shell, extra arguments, archive and unsafe syntax refusal. |
-| US2-4 outside/unhosted path | Yes | T002, T034-T035, T039 | Traversal, multi-segment, symlink and missing repository cases. |
-| US2-5 remove binding | Yes | T027, T032, T035, T039 | Managed entry removed; subsequent direct and shim sessions refused. |
-| US3-1 exact tested advancement | Yes | T054-T057, T062-T065 | Server equals proposal head and client records merge fact. |
-| US3-2 identity-less verifier | Yes | T065 | Same review, CI, acceptance and merge IDs. |
-| US3-3 obsolete head | Yes | T054, T059, T063, T065 | Non-fast-forward refusal and revision guidance. |
-| US3-4 stronger destination | Yes | T021, T025, T056, T059, T065 | Unmet approval threshold and removed reviewer/pipeline edges. |
-| US3-5 missing CI | Yes | T056, T059 | Protected-not-ready with missing CI. |
-| US3-6 concurrent maintainers | Yes | T054, T065-T066 | One winner; stale expected tip or documented newly read-tip outcome. |
-| US4-1 discover and execute | Yes | T068-T072, T075 | New candidate/run request imports and runner execution. |
-| US4-2 unpublished actor | Yes | T070-T072, T076 | Exact absent actor is nonfailure; pure discovery produces no request. |
-| US4-3 exact memory only | Yes | T070, T072 | Other advertised memory excluded. |
-| US4-4 ordinary remote refusal | Yes | T017-T018, T068, T072 | Mode refused before selection is saved. |
-| US4-5 legacy parity | Yes | T072, T076 | Exact/all/no-selection outcomes compare with identical ref sets. |
-| US4-6 Phase 0 | Yes | T077 | Command log proves no actor/proposal selectors or participant direct main pushes. |
-| US5-1 LFS round trip | Yes | T087-T088, T090 | Real client and byte-identical second clone. |
-| US5-2 LFS mismatch | Yes | T088, T090 | Mismatched content discarded before object visibility. |
-| US5-3 quota boundary | Yes | T089-T090 | Inclusive ten-byte remainder and one-byte-over refusal. |
-| US5-4 locking unsupported | Yes | T087, T090 | No locking capability; lock/list-lock receive 501. |
+| AUD-001, previously HIGH | Resolved, retained | S:197; W13:114-117 | Each of 20 samples restores the hosted repository, repository state and client clone, asserts exactly 1,000 hosted events, then times the accepted 50-event/protected update. The earlier accumulation defect remains corrected. Runtime performance is unverified. |
+| AUD-002, previously HIGH | **Resolved** | W13:152-153,197; W14:176,193 | All six LFS rows, FR-020/FR-021 and US5-1 through US5-4, may carry `pending WP14` before the LFS test file exists. Non-LFS exceptions are rejected. Once the file exists, real declarations are mandatory and markers forbidden. WP14 explicitly removes the markers. This repairs the WP13-before-WP14 traceability gate while retaining separability. |
+| AUD-003, previously MEDIUM | **Resolved** | W08:167-168; S:198 | T052 requires inclusive and one-byte-over hosted-push fixtures for largest-object, attachment and total-byte budgets, alongside event/object counts, with budget diagnostics and unchanged hosted refs. The weaker minimum wording at W08:192 does not cancel the mandatory T052 fixtures. |
+| AUD-004, previously MEDIUM | **Active, partially addressed** | W13:125-130,194; W14:165 | de2c7cd adds a containment run and boundary probes and makes LFS reuse them. Its writable tmpfs contradicts the required failing probe; administration coverage remains unclear. The observation-boundary problem is not fully resolved. Preserve AUD-004. |
 
-### Work packages, dependency and task completeness
+The exact fix commit changes only W08, W13 and W14. It introduces no other requirement revisions. Resolved historical findings are excluded from active counts.
 
-| WP prompt inspected | Subtasks | Required predecessors | Analysis conclusion |
-|---|---|---|---|
-| `tasks/WP01-server-state-foundation.md` | T001-T007 | None | State/dispatcher foundation; explicit protected-list resolution. |
-| `tasks/WP02-ssh-keys-authorized-keys.md` | T008-T013 | WP01 | SSH key primitives and byte-preserving managed block. |
-| `tasks/WP03-rejection-protocol-and-marker.md` | T014-T019 | None | Shared wire vocabulary and marker; isolated write scope. |
-| `tasks/WP04-validation-seams.md` | T020-T026 | None | Policy/range seams and merge-fact assumption tests. |
-| `tasks/WP05-repository-and-key-administration.md` | T027-T033 | WP01, WP02, WP03 | Seed-only administration and harness foundation. |
-| `tasks/WP06-forced-command-session.md` | T034-T040 | WP05 | Closed request grammar, environment and session lock. |
-| `tasks/WP07-hook-and-verdict-framework.md` | T041-T047 | WP06 | All-ref framework, branches/tags and attribution. |
-| `tasks/WP08-hubnot-fact-ref-rules.md` | T048-T053 | WP07, WP04 | Fact validation and budgets; AUD-003. |
-| `tasks/WP09-protected-branch-governance.md` | T054-T060 | WP08 | Ordered dual-policy gates and shared governed fixture. |
-| `tasks/WP10-advancement-and-merge-fact.md` | T061-T067 | WP09 | Remote advancement, repair, independent verifier and race test. |
-| `tasks/WP11-all-trusted-selection.md` | T068-T073 | WP03, WP04 | Client mode against marked/unmarked real remotes. |
-| `tasks/WP12-fan-out-and-phase0-flow.md` | T074-T078 | WP10, WP11 | Server/client fan-in and team-flow evidence. |
-| `tasks/WP13-quality-evidence-and-threat-model.md` | T079-T085 | WP12 | AUD-001 resolved; AUD-002 gate conflict and AUD-004 observation gap. |
-| `tasks/WP14-git-lfs-transfer-and-quota.md` | T086-T091 | WP13 | Last and separable; tests required prematurely by WP13. |
+### Coverage summary
 
-The computed lanes have disjoint owned-file sets across concurrently eligible WPs. Shared `main.go`, dispatcher, verdict arms, harness, guide and `quarantine.go` changes are ordered by dependencies. The computed lane-level dependency collapse can reduce advertised parallelism; it introduces no uncovered task or unsafe write overlap. All task-index IDs and prompt subtask IDs agree, with no duplicate or missing IDs.
+Coverage means identifiable planned work. It does not establish implementation, passing tests or independent review. Phrase keys are stable descriptive keys; specification IDs remain authoritative. Every FR and NFR is individually inventoried.
 
-### Charter alignment
+| Requirement | Requirement key | Has Task? | Task IDs | Notes |
+|---|---|---|---|---|
+| FR-001 | optional-hosting | Yes | T001-T007, T034-T039, T085 | Isolated command family and ordinary-workflow regression. |
+| FR-002 | repository-administration | Yes | T004, T028-T032 | Seeded provisioning, protected configuration and recovery. |
+| FR-003 | key-registry | Yes | T003, T008-T009, T027, T032 | Full fingerprints, unique binding and private state. |
+| FR-004 | managed-authorized-keys | Yes | T010-T013, T027, T032-T033 | Restrict/forced command and exterior-byte preservation. |
+| FR-005 | forced-dispatch | Yes | T034-T040, T082, T087, T090 | Closed grammar and safe paths; AUD-005 affects LFS transition. |
+| FR-006 | push-attribution | Yes | T035-T036, T041, T043, T045-T046 | Registry-derived actor in refusals and push log. |
+| FR-007 | actor-chain-validation | Yes | T022-T023, T025, T048, T051-T052 | Signature, sequence, relationships and ownership; AUD-007. |
+| FR-008 | protected-governance | Yes | T020-T021, T025, T054-T059 | Exact candidate, both policies, blocked lineage and code matching. |
+| FR-009 | tested-commit-only | Yes | T054-T059, T063-T065 | Trusted CI and fast-forward; no synthesized commit. |
+| FR-010 | governed-ref-classes | Yes | T042-T044, T046, T049-T053 | Immutable proposals/tags, owned memory, reserved refs. |
+| FR-011 | ordinary-branch-ownership | Yes | T004, T044-T047 | Creator ownership, shared fast-forward, maintainer override. |
+| FR-012 | all-or-nothing-verdict | Yes | T043, T046, T051-T052, T057, T059 | Mixed push rejection and quarantined-object discard. |
+| FR-013 | structured-rejections | Yes | T014-T019, T035, T043, T046, T052, T059, T063 | Versioned grammar and full IDs; AUD-007. |
+| FR-014 | maintainer-advancement | Yes | T056, T061-T065 | Facts published separately; requester checked under both policies. |
+| FR-015 | fast-forward-merge-fact | Yes | T024-T026, T063-T065 | Client-signed exact-head fact and interruption repair. |
+| FR-016 | legacy-merge-parity | Yes | T061, T065, T085 | Existing no-flag merge and repair remain intact. |
+| FR-017 | fact-advertisement | Yes | T017-T019, T028, T068, T071-T072, T074 | Marker, accepted facts and repeated identification. |
+| FR-018 | all-trusted-selection | Yes | T068-T075, T077 | Discovery, additive exact selectors, memory exclusion, quarantine. |
+| FR-019 | existing-selection-parity | Yes | T068-T072, T076 | Exact/all/no-selection parity and unchanged serialized output. |
+| FR-020 | lfs-transfer | Yes | T086-T088, T090-T091 | Real-client round trip and mismatch refusal; AUD-005. |
+| FR-021 | lfs-quota-locking | Yes | T004, T029-T030, T087-T091 | Inclusive quota, verified storage and unsupported locking. |
+| FR-022 | protected-serialization | Yes | T005, T037, T039, T054, T059, T066 | Session lock and expected-tip rejection. |
+| FR-023 | tested-documentation | Yes | T007, T013, T019, T026, T033, T040, T047, T053, T060, T067, T073, T078-T079, T083-T084, T091 | Surface-specific executed examples and traceability. |
+| NFR-001 | verdict-latency | Yes | T022, T048, T080 | Fixed 1,000-event workload, 20 samples, p95; AUD-006. |
+| NFR-002 | incoming-data-budgets | Yes | T030, T048-T052 | All five inclusive/one-over fixture pairs explicitly assigned. |
+| NFR-003 | fail-closed-refusals | Yes | T007, T018, T025, T032, T039, T041-T042, T046, T052, T059 | Malformed state/input, signature, dependencies and policies. |
+| NFR-004 | least-privilege-writes | Yes | T001-T002, T012, T032, T036, T081, T090 | Root refusal and write/mode audit; AUD-004 remains. |
+| NFR-005 | concurrent-race-safety | Yes | T005, T037, T054, T066 | 50 rounds of ten concurrent expected-tip pushes. |
+| NFR-006 | independent-verification | Yes | T024, T059, T065, T072, T074-T077 | Identity-less verifier and invalid facts behind forged marker. |
+| NFR-007 | regression-quality-gate | Yes | T025, T065, T072, T085; every WP gate | Original assertions protected; AUD-005 final-gate conflict. |
+| NFR-008 | private-server-state | Yes | T002-T007, T012, T027, T032, T081, T088, T090 | Strict schemas and modes; AUD-008 subtree scope conflict. |
+| C-001 | optional-service | Yes | T001, T007, T061, T068-T072, T085 | Ordinary workflows remain independent. |
+| C-002 | openssh-forced-commands | Yes | T008-T013, T034-T040, T082 | Installed Git, SSH shim and real-sshd test. |
+| C-003 | standard-library-first | Yes | T001-T013, T086-T091 | No new module dependency. |
+| C-004 | both-policies-govern | Yes | T020-T021, T025-T026, T054-T059 | Base-signed decisions with destination roles/thresholds. |
+| C-005 | no-untested-merge-commit | Yes | T054-T060, T063-T065 | Exact tested-head fast-forward. |
+| C-006 | no-new-authority | Yes | T013, T020-T026, T036, T053, T056, T064-T065, T073, T084 | Attribution and unsigned verdicts confer no evidence authority. |
+| C-007 | immutable-history | Yes | T022-T023, T048-T053, T055, T059-T060 | Append-only actors and successor revisions. |
+| C-008 | protocol-docs-together | Yes | T019, T026, T040, T047, T053, T060, T067, T073, T079, T084, T091 | Documentation owner for changed boundaries. |
+| C-009 | black-box-acceptance | Yes | T032-T033, T038-T039, T046, T052, T059, T065-T066, T072, T074-T077, T080-T082, T090 | Real temporary repositories and public CLIs. |
+| C-010 | lfs-last-separable | Yes | T037, T083, T086-T091 | No WP depends on WP14; AUD-005 seam-test lifecycle. |
+| C-011 | excluded-scope | Yes | T084-T085 | Explicit non-goals and scope review. |
+| SC-001 | six-brief-examples | Yes | T046, T052, T059, T065, T075, T077, T083 | Original brief lines 98-109. |
+| SC-002 | rejection-integrity | Yes | T018, T039, T046, T052, T059, T065 | Ref snapshots and per-failing-ref reasons. |
+| SC-003 | governed-successful-tips | Yes | T054-T059, T065 | Dual-policy and trusted-CI acceptance fixtures. |
+| SC-004 | phase-zero-flow | Yes | T077-T078 | Automated five-role surrogate; actual Rust run manual. |
+| SC-005 | evidence-reproduction | Yes | T024, T065, T074, T077 | Fresh-verifier evidence IDs. |
+| SC-006 | traceability-and-review | Yes | T079, T083, T085; independent WP reviews | Mapping and gate; declarations alone prove no behavior. |
 
-No direct charter MUST conflict was established. Active requirements remain unchanged:
+#### Story-scenario coverage
 
-| Charter rule and source | Planned alignment |
+| Scenarios | Task IDs and planned observations |
 |---|---|
-| Go/standard library and Git-native optional product, `.kittify/charter/charter.md:15-18`; YAML HN-001 at lines 60-66 | Optional command family, Git transport/store, no new module dependency or mandatory service database. |
-| Exact evidence and immutable signed history, YAML HN-002 at lines 69-74 and HN-004 at lines 88-94 | Dual-policy reuse of base-signed facts, exact-head CI, successor revisions, append-only actors and immutable candidate refs. |
-| Hostile data and least authority, YAML HN-003 at lines 78-84 | Quarantine, explicit role policy, budgets, closed command grammar, root refusal and explicit unsafe-host runner flags. AUD-003/AUD-004 identify verification gaps requiring follow-up. |
-| Public examples and independent verification, `.kittify/charter/charter.md:23-24,33-36` | Real temporary remote acceptance, shim plus real-sshd test, identity-less verifier. Source/metadata checks are supplementary engineering checks. |
-| Test-first and full quality gates, YAML lines 3-13 and 269-274; `.kittify/charter/charter.md:28-31` | Binding implementation workflow and per-WP gate. This audit executes no implementation work. AUD-002 must be resolved before the planned intermediate gate is feasible. |
-| Protocol/docs synchronization, YAML HN-005 at lines 99-104 | Explicit owners for protocol, governance, replication, threat-model and serve documentation in this mission. |
-| Focused branches, lanes and independent review, YAML lines 10,17-22 | Mission target preserved and computed lanes used; implementation/review approval evidence remains required. |
+| US1-1 | T048, T051-T052: feature/actor publication accepted. |
+| US1-2 | T054-T059: direct main refusal and missing evidence. |
+| US1-3 / US1-4 / US1-5 | T022, T025, T048, T052: wrong actor, broken signature with full ID, actor rewrite; AUD-007 affects US1-4. |
+| US1-6 | T044-T046: owner/maintainer authorization and other-actor refusal. |
+| US2-1 | T027-T028, T032, T038-T039: provision, bind and clone. |
+| US2-2 / US2-3 / US2-4 / US2-5 | T034-T039, plus T027/T032: unknown key, unsupported request, unsafe/unhosted path, key removal. |
+| US3-1 / US3-2 | T054-T057, T062-T065: tested head, merge fact and identity-less evidence reproduction. |
+| US3-3 / US3-4 / US3-5 | T021, T025, T054, T056, T059, T063, T065: stale ancestry, stronger destination and missing CI. |
+| US3-6 | T054, T065-T066: one winner; stale-tip or documented post-reread non-fast-forward outcome. |
+| US4-1 / US4-2 / US4-3 | T068-T072, T075-T076: discovery/execution, unpublished actor, exact memory only. |
+| US4-4 / US4-5 / US4-6 | T017-T018, T068, T072, T076-T077: ordinary-remote refusal, legacy parity and team flow. |
+| US5-1 / US5-2 / US5-3 / US5-4 | T087-T090: byte-identical LFS transfer, mismatch discard, inclusive quota and unsupported locking; AUD-005 affects integration. |
 
-Unselected entries in the charter's reference catalogue were not treated as additional activated mandates. No waiver, invented charter section or altered governance rule is proposed.
+All **27 scenarios** have identifiable planned tests. No scenario is counted as executed.
 
-### Unmapped Tasks
+### Complete task inventory and sequencing
 
-None. Every subtask T001-T091 maps to a functional requirement, NFR, constraint, scenario, or directly necessary implementation/test/documentation support in the tables above. No unrelated scope expansion was substantiated.
+Ranges are inclusive and enumerate every subtask once. Mechanical comparison confirmed that index, prompt frontmatter and subtask headings agree.
+
+| Prompt | Task inventory | Predecessors |
+|---|---|---|
+| W01 | T001-T007 | None |
+| W02 | T008-T013 | WP01 |
+| W03 | T014-T019 | None |
+| W04 | T020-T026 | None |
+| W05 | T027-T033 | WP01, WP02, WP03 |
+| W06 | T034-T040 | WP05 |
+| W07 | T041-T047 | WP06 |
+| W08 | T048-T053 | WP07, WP04 |
+| W09 | T054-T060 | WP08 |
+| W10 | T061-T067 | WP09 |
+| W11 | T068-T073 | WP03, WP04 |
+| W12 | T074-T078 | WP10, WP11 |
+| W13 | T079-T085 | WP12 |
+| W14 | T086-T091 | WP13 |
+
+The dependency graph is acyclic. No dependency-unordered pair declares overlapping owned files. Computed lanes are authoritative under I:38. They serialize more work than I:44's illustrative parallelism promises; protocol/client lane labels also differ. This affects scheduling expectations rather than task coverage or dependency correctness. AUD-005 concerns an earlier assertion surviving into a later feature stage despite otherwise valid dependencies.
+
+**Unmapped Tasks: None.** All T001-T091 support a requirement, constraint, scenario, quality check or necessary harness/recovery capability. T031 supplies administrator recovery; T038 supplies the public transport harness; T079/T083 are supplementary engineering checks. No unrelated feature expansion was established.
+
+### Detection passes
+
+| Pass | Result |
+|---|---|
+| Duplication | No actionable duplicated business rule. Repeated invariant/reason descriptions serve specification, contract and WP roles; W03 T019 assigns catalogue/document agreement. |
+| Ambiguity | No unresolved business-rule choice after confirmed OQs and explicit WP resolutions. M:51's sorted-list wording is superseded operationally by W01:243-245 and W05:156, preserving entry zero as default. Canonical wording should be synchronized during authorized follow-up. |
+| Underspecification and consistency | AUD-004/AUD-008 concern verification/state-validation scope; AUD-006/AUD-007 expose indirect helper behavior missing from planned seams. |
+| Coverage | 42/42 normative requirements, 6/6 outcomes and 27/27 scenarios have planned work. Active findings qualify feasibility and evidence completeness. |
+| Sequencing and verification feasibility | AUD-002's traceability is repaired. AUD-005 identifies a separate LFS assertion-lifecycle conflict. AUD-004's prescribed sandbox probe contradicts its mount options. |
+| Scope discipline | LFS is deliberately last/separable. Runner cycle isolation, shared identity, queues and other C-011 exclusions remain intentionally deferred. Missing implementation and pending LFS work are not planning omissions. |
+
+### Charter Alignment Issues
+
+**No direct charter MUST conflict was substantiated; critical count is zero.** Active findings identify inconsistent plans or incomplete mechanisms. They grant no waiver of mandatory gates.
+
+- **HN-001, CY:60-68; CM:15-18:** optional command family, Git transport/store, no mandatory service/database/forge/Docker dependency.
+- **HN-002, CY:69-77:** exact-head evidence, base-policy decision digests and client-signed merge facts. Destination checks reuse signed facts with destination roles and thresholds (W04:147-161). No signed bytes or event kinds change.
+- **HN-003, CY:78-87:** quarantine, budgets, closed grammar, root refusal and explicit unsafe-host runner opt-in are assigned. AUD-004/AUD-008 qualify verification and state-validation completeness.
+- **HN-004, CY:88-98:** successor revision after stale ancestry, immutable proposals and append-only actor chains.
+- **HN-005, CY:99-107; CM:28-31:** protocol, governance, replication, serve and threat-model documentation have owners alongside tests.
+- **Testing/review, CY:3-13,17-22; CM:23-36:** test-first implementation, full Go gate, targeted staging and independent WP review remain required. T079/T083's marker/declaration checks are structural evidence; separately assigned CLI tests establish behavior.
+- CY:14-16's runtime governance timeout supplies no explicit universal hosted-push SLA; no new product deadline was inferred. S:197 defines the mission's measured push workload.
+- Administrative hook regeneration is an explicit repair exception (W01:314-323). Separate fact-publication and advancement pushes reconcile retention with all-or-nothing verdicts (ADV:17-29). The absent-candidate-code exception is narrow and protected advancement still requires matching code (PUSH:15,31-36,78).
 
 ### Metrics
 
 | Metric | Value |
 |---|---|
-| Total Requirements | 42 normative IDs: 23 FR + 8 NFR + 11 constraints |
-| Total Tasks | 91 unique subtasks, T001-T091 |
-| Work Packages Inspected | 14 of 14 |
-| Requirements With Planned Tasks | 42 of 42 |
-| Coverage % | 100% planned requirement traceability |
-| Acceptance Scenarios With Planned Tasks | 27 of 27, 100% |
-| Success Criteria With Planned Tasks | 6 of 6, 100% |
-| NFRs With Explicit Evidence Gaps | 2 of 8: NFR-002 and NFR-004 |
-| Unmapped Tasks | 0 |
-| Ambiguity Count | 0 unresolved business-rule ambiguities after documented resolutions |
-| Duplication Count | 0 actionable duplications |
-| Critical Issues Count | 0 |
-| Active Findings | 3: high 1, medium 2, low 0, critical 0, info 0 |
-| Resolved Prior Findings | 1: AUD-001 |
-| Computed Verdict | blocked |
+| Total Requirements | **42 normative IDs: 23 FR + 8 NFR + 11 constraints** |
+| Functional/nonfunctional subset | 31 |
+| Total Tasks | **91 unique subtasks, T001-T091** |
+| WP prompts reviewed | **14/14** |
+| Contracts reviewed | **6/6** |
+| Planned requirement coverage | **42/42, 100%**; FR/NFR subset 31/31 |
+| Planned success-criterion coverage | 6/6, 100% |
+| Planned scenario coverage | 27/27, 100% |
+| Unmapped/duplicate/missing task IDs | 0 / 0 / 0 |
+| Dependency cycles / unordered owned-file collisions | 0 / 0 |
+| Unresolved business-rule ambiguity count | 0 |
+| Actionable duplication count | 0 |
+| Critical Issues Count | **0** |
+| Active findings | **5: critical 0, high 1, medium 4, low 0, info 0** |
+| Resolved historical findings | AUD-001, AUD-002, AUD-003 |
+| Computed verdict | **blocked** |
 
 ### Next Actions
 
-1. Review AUD-002 and authorize a focused planning correction to T083's pending-LFS semantics or final-gate placement. Preserve C-010 and truthful traceability for both FR-020/FR-021 and US5. No such correction was made during this analysis.
-2. Assign the missing byte-budget boundary evidence for AUD-003 and strengthen the written-operation observation boundary for AUD-004, or explicitly approve a narrower NFR-004 requirement. Preserve the charter's security and testing requirements.
-3. After approved artifact changes, rerun the full `/spec-kitty.analyze --mission hn-serve-01M5P0NP` analysis and persist it through `spec-kitty agent mission record-analysis --mission hn-serve-01M5P0NP --input-file - --json`. AUD-001 needs no further planning remediation; retain its constant-fixture assertions.
-4. After the high finding is cleared and required approval is complete, implementation can begin with `spec-kitty agent action implement WP01 --agent <implementer> --mission hn-serve-01M5P0NP`. Execute test-first development and each WP's prescribed quality gate in its assigned lane. This command was not run during the audit.
-5. Foreground may review the report-only diff with `git diff -- kitty-specs/hn-serve-01M5P0NP/analysis-report.md` and handle the authorized commit separately. The installed recorder automatically created report-only commit `5090be5` on its first call. No standalone commit or push command was issued. The corrected recording disables the recorder's best-effort commit using empty invocation-scoped Git author and committer names; foreground owns the remaining commit decision.
+1. Resolve AUD-005's seam-test transition and edit ownership through separately authorized planning changes before `/implement`. For example, manually refine WP06/WP14 acceptance and allowed-file scopes, then rerun `/spec-kitty.analyze --mission hn-serve-01M5P0NP`.
+2. Address AUD-004's mount policy and process coverage, assign budget-helper integration/diagnostics work for AUD-006/AUD-007, and reconcile the state-validation scope in AUD-008. Changes to specification or architecture belong in a separate `/spec-kitty.specify` or `/spec-kitty.plan` refinement with explicit mission selection.
+3. Retain the repaired AUD-001 timing fixture, AUD-002 pending-LFS traceability and AUD-003 five-budget boundary fixtures. Re-analyze after authorized changes.
+4. During implementation, execute test-first behavioral checks, specified race/timing tests, documented examples and independent reviews. Record infrastructure skips visibly.
 
-### Analysis boundaries
+Remediation edits require separate explicit approval. No remediation was performed in this non-interactive analysis.
 
-The only content mutation is this report through the canonical recorder. No temporary files, implementation changes, remediation edits, pushes, source tests or builds were produced. The working tree was clean before recording. The first recorder call unexpectedly auto-committed report-only commit `5090be5` and normalized the unwrapped YAML carrier as `verdict: unknown`. The carrier was corrected to the recorder-required YAML frontmatter delimiters, then resubmitted through stdin with invocation-scoped empty Git identity settings to prevent another automatic commit. The automatic commit is preserved for foreground review; no reset or history rewrite was attempted. The final blocked verdict concerns AUD-002, while AUD-001's planning fix is independently confirmed.
+### Verification limits
+
+The independent analysis performed read-only Git inspection, line-numbered artifact reads, in-memory inventory checks, a marker-byte-length check and Bubblewrap mount/permission inspection. The marker literal is correctly 11 bytes. It made no file edits or temporary files and ran no builds or source test suites. Report persistence and the report-only commit are separate foreground workflow actions.
+
+Full implementation security, Git LFS interoperability and measured performance remain unverified. Full decision rationales, the entire doctrine catalogue and historical Rust project execution were outside this artifact audit's verification boundary.
