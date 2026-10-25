@@ -983,14 +983,15 @@ func TestServeAdminDocumentedExamples(t *testing.T) {
 	}
 	for _, example := range []struct {
 		name    string
+		marker  string
 		command map[string]string
 		output  map[string]string
 	}{
-		{"repo-create", map[string]string{documentedSource: source}, map[string]string{documentedAccount: account.Username + "@" + host}},
-		{"key-add", map[string]string{"alice.pub": keyFile}, map[string]string{documentedFingerprint: key.Fingerprint}},
+		{"repo-create", "<!-- example: repo-create -->", map[string]string{documentedSource: source}, map[string]string{documentedAccount: account.Username + "@" + host}},
+		{"key-add", "<!-- example: key-add -->", map[string]string{"alice.pub": keyFile}, map[string]string{documentedFingerprint: key.Fingerprint}},
 	} {
 		t.Run(example.name, func(t *testing.T) {
-			command, output := serveAdminTestExample(t, guide, example.name)
+			command, output := serveAdminTestExample(t, guide, example.marker)
 			fields := strings.Fields(command)
 			if len(fields) < 5 || strings.Join(fields[:4], " ") != "sudo -u hn-serve hn" {
 				t.Fatalf("example %s command %q does not run hn as the server account", example.name, command)
@@ -1017,10 +1018,12 @@ func TestServeAdminDocumentedExamples(t *testing.T) {
 }
 
 // serveAdminTestExample returns the one command line and the output block
-// that follow the example marker.
-func serveAdminTestExample(t *testing.T, guide, name string) (string, string) {
+// that follow the example marker. Callers pass the complete marker comment
+// so the documented-example guard of serve_quality_test.go finds it.
+func serveAdminTestExample(t *testing.T, guide, marker string) (string, string) {
 	t.Helper()
-	marker := "<!-- example: " + name + " -->\n"
+	name := strings.TrimSuffix(strings.TrimPrefix(marker, "<!-- example: "), " -->")
+	marker += "\n"
 	if strings.Count(guide, marker) != 1 {
 		t.Fatalf("the serve guide must contain exactly one %q", strings.TrimSpace(marker))
 	}

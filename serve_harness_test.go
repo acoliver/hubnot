@@ -23,6 +23,17 @@ type serveHarness struct {
 	t      *testing.T
 	Binary string
 	Home   string
+
+	// Wrap, when set, is a command line that every server-side process the
+	// harness starts runs under: administration commands through Exec, and
+	// forced commands (with the hooks and Git programs they start) through
+	// shims built afterwards. WP13 sets it with EnforceWriteBoundary; WP14
+	// reuses it for LFS transfers.
+	Wrap []string
+	// Env is added to the environment of every server-side process, before
+	// the entries of one run or one shim, which win on conflict. Set it
+	// before building client shims.
+	Env map[string]string
 }
 
 // serveHarnessRun describes one invocation beyond its arguments.
@@ -77,12 +88,17 @@ func (h *serveHarness) Exec(run serveHarnessRun, args ...string) (string, int) {
 	h.t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	command := exec.CommandContext(ctx, h.Binary, args...)
+	program, arguments := h.Binary, args
+	if len(h.Wrap) > 0 {
+		program = h.Wrap[0]
+		arguments = append(append(append([]string{}, h.Wrap[1:]...), h.Binary), args...)
+	}
+	command := exec.CommandContext(ctx, program, arguments...)
 	command.Dir = run.Dir
 	if command.Dir == "" {
 		command.Dir = h.Home
 	}
-	command.Env = serveHarnessEnvironment(h.Home, run.Env)
+	command.Env = serveHarnessEnvironment(h.Home, serveHarnessMergeEnv(h.Env, run.Env))
 	command.Stdin = strings.NewReader(run.Stdin)
 	output, err := command.CombinedOutput()
 	if ctx.Err() != nil {
@@ -147,6 +163,68 @@ func serveHarnessEnvironment(home string, extra map[string]string) []string {
 		environment = append(environment, key+"="+extra[key])
 	}
 	return environment
+}
+
+// serveHarnessMergeEnv returns base overlaid with override, or nil when
+// both are empty.
+func serveHarnessMergeEnv(base, override map[string]string) map[string]string {
+	if len(base) == 0 && len(override) == 0 {
+		return nil
+	}
+	merged := make(map[string]string, len(base)+len(override))
+	for key, value := range base {
+		merged[key] = value
+	}
+	for key, value := range override {
+		merged[key] = value
+	}
+	return merged
+}
+
+// serveHarnessWriteBoundary is the bubblewrap command line that confines a
+// server-side process to writes below $HOME/.hn-serve and $HOME/.ssh, the
+// only locations NFR-004 allows. The whole filesystem is bound read-only,
+// with no tmpfs: /tmp, the rest of HOME and every other path stay
+// read-only, so any write elsewhere, including a transient temporary file,
+// fails the command that attempts it.
+func serveHarnessWriteBoundary(bwrap, home string) []string {
+	root := filepath.Join(home, serveHomeDirectoryName)
+	sshDir := filepath.Join(home, ".ssh")
+	return []string{
+		bwrap,
+		"--ro-bind", "/", "/",
+		"--dev", "/dev",
+		"--proc", "/proc",
+		"--bind", root, root,
+		"--bind", sshDir, sshDir,
+	}
+}
+
+// EnforceWriteBoundary runs every later server-side process inside
+// serveHarnessWriteBoundary and returns the wrapper. Bind mounts need
+// existing targets, so it creates $HOME/.hn-serve and $HOME/.ssh with mode
+// 0700 when they are absent, the mode hn serve itself creates them with.
+// It skips the test with the reason when bubblewrap or unprivileged user
+// namespaces are unavailable.
+func (h *serveHarness) EnforceWriteBoundary() []string {
+	h.t.Helper()
+	bwrap, err := exec.LookPath("bwrap")
+	if err != nil {
+		h.t.Skipf("NFR-004 evidence limitation: enforced write boundary skipped because bubblewrap (bwrap) is not on PATH: %v", err)
+	}
+	for _, directory := range []string{filepath.Join(h.Home, serveHomeDirectoryName), filepath.Join(h.Home, ".ssh")} {
+		if err := os.Mkdir(directory, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
+			h.t.Fatal(err)
+		}
+	}
+	wrap := serveHarnessWriteBoundary(bwrap, h.Home)
+	probe := exec.Command(wrap[0], append(append([]string{}, wrap[1:]...), "true")...)
+	probe.Env = serveHarnessEnvironment(h.Home, nil)
+	if output, err := probe.CombinedOutput(); err != nil {
+		h.t.Skipf("NFR-004 evidence limitation: enforced write boundary skipped because bwrap cannot create its sandbox (unprivileged user namespaces may be disabled): %v\n%s", err, output)
+	}
+	h.Wrap = wrap
+	return wrap
 }
 
 // serveHarnessActor is a deterministic full actor fingerprint for tests.
@@ -272,7 +350,9 @@ func serveHarnessShellQuote(value string) string {
 // serveHarnessShim writes the SSH shim for key and returns its path.
 // extraEnv is added to the forced command's environment, after HOME, PATH,
 // SSH_ORIGINAL_COMMAND and, when the client sets it, GIT_PROTOCOL; it stands
-// in for variables the server account's sshd session would carry.
+// in for variables the server account's sshd session would carry. The
+// harness Env comes first and extraEnv wins on conflict. When the harness
+// has a Wrap command line, the forced command runs under it.
 //
 // The shim skips the ssh options Git may pass (-o VALUE, -p PORT, -l USER,
 // -i FILE, -F FILE, -4, -6, -T), takes the host and requires exactly one
@@ -286,16 +366,21 @@ func serveHarnessShim(t *testing.T, h *serveHarness, key serveTestKey, extraEnv 
 		t.Fatalf("malformed test key line %q", key.PublicLine)
 	}
 	canonical := fields[0] + " " + fields[1]
-	names := make([]string, 0, len(extraEnv))
-	for name := range extraEnv {
+	merged := serveHarnessMergeEnv(h.Env, extraEnv)
+	names := make([]string, 0, len(merged))
+	for name := range merged {
 		names = append(names, name)
 	}
 	sort.Strings(names)
 	var extra strings.Builder
 	for _, name := range names {
-		extra.WriteString(" " + serveHarnessShellQuote(name+"="+extraEnv[name]))
+		extra.WriteString(" " + serveHarnessShellQuote(name+"="+merged[name]))
 	}
-	base := "env -i HOME=" + serveHarnessShellQuote(h.Home) +
+	var wrap strings.Builder
+	for _, word := range h.Wrap {
+		wrap.WriteString(serveHarnessShellQuote(word) + " ")
+	}
+	base := wrap.String() + "env -i HOME=" + serveHarnessShellQuote(h.Home) +
 		" PATH=" + serveHarnessShellQuote(os.Getenv("PATH")) +
 		` SSH_ORIGINAL_COMMAND="$request"`
 	authorizedKeys := serveHarnessShellQuote(filepath.Join(h.Home, ".ssh", "authorized_keys"))

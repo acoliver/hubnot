@@ -886,7 +886,7 @@ func TestServeAdvanceDocumentedExample(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	command, output := serveAdminTestExample(t, string(contents), "advance")
+	command, output := serveAdminTestExample(t, string(contents), "<!-- example: advance -->")
 	fields := strings.Fields(command)
 	const documentedCandidate = "sha256:1c2d3e4f..."
 	if len(fields) < 2 || fields[0] != "hn" || !slices.Contains(fields, documentedCandidate) {

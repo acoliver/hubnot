@@ -9,7 +9,9 @@ update before Git moves it. The service is optional: no other `hn` command
 depends on it, and clients that push to ordinary Git remotes see no change. The
 replication rules it reuses are described in
 [replication-v0.md](replication-v0.md), and the trust boundaries in
-[threat-model.md](threat-model.md).
+[threat-model.md](threat-model.md). The
+[Verification and traceability](#verification-and-traceability) section maps
+each requirement to the tests that check it.
 
 ## Server account and state layout
 
@@ -1602,7 +1604,149 @@ maintainer's `hn merge --remote` requests the advancement.
 shell pipeline in place of the project's cargo pipeline.
 
 ## Verification and traceability
-<!-- section owned by WP13 -->
+
+Every requirement of the `hn serve` mission maps to test functions in the
+repository root. `TestServeQualityTraceabilityTestsExist` in
+`serve_quality_test.go` parses the tables in this section and fails when a
+table names a test function that no `*_test.go` file declares, when a row is
+missing or duplicated, or when a row names no test. A renamed or deleted test
+therefore breaks the gate until this section follows it.
+`TestServeQualityDocumentedExamplesAreExecuted` fails when an example marker
+anywhere in `docs/`, an HTML comment of the form `example: NAME`, has no test
+that contains the same complete marker as its search key.
+
+The Git LFS rows (FR-020, FR-021 and US5-1 to US5-4) name the tests that the
+LFS work package plans and carry the marker `pending WP14` while
+`serve_lfs_test.go` does not exist. Once that file exists, the check refuses
+the marker on every row and requires every named LFS test to be declared.
+
+The regression gate for the mission is:
+
+```sh
+gofmt -l .
+go vet ./...
+go build ./...
+go test -race ./...
+git diff --check
+```
+
+### Requirements and success criteria
+
+| ID | Requirement | Tests |
+|----|----|----|
+| FR-001 | Optional hosting command | `TestServeStateUsageListsServeCommands`, `TestServeSessionCloneAndFetchOverSSH`, `TestServeAdvanceKeepsLocalMerge`, `TestServeReplicationSelectionsMatchOrdinaryRemote` |
+| FR-002 | Repository administration | `TestServeAdminCreateImportsOnlyBranchesAndTags`, `TestServeAdminCreateRefusalsLeaveNothingBehind`, `TestServeAdminRepoListAndShow`, `TestServeAdminRepoSet` |
+| FR-003 | Key registry administration | `TestServeAdminKeysMaintainAuthorizedKeys`, `TestServeAdminRegistryBindingDefect`, `TestServeStateRegistryRefusesInvalidContent`, `TestServeStateFingerprintShape` |
+| FR-004 | Managed authorized_keys | `TestServeKeysMergeGoldenCases`, `TestServeKeysWritePreservesAdministratorLines`, `TestServeAdminKeysMaintainAuthorizedKeys`, `TestServeSSHDRoundTrip` |
+| FR-005 | Forced-command dispatch | `TestParseServeRequestAcceptsEveryGrammarForm`, `TestParseServeRequestRefusesEverythingElse`, `TestServeSessionUnsupportedCommandsRefusedWithoutChanges`, `TestServeSessionUnsafeAndUnhostedPathsRefused` |
+| FR-006 | Push attribution | `TestServePushBranchOwnershipAndPushLog`, `TestBuildServeGitEnvironmentKeepsOnlyServerValues` |
+| FR-007 | Actor chain check | `TestServeFactsActorKeyMismatch`, `TestServeFactsAlteredEventIsInvalid`, `TestServeFactsActorChainRewrite`, `TestServeFactsDependencyMissing`, `TestValidationSeamsActorRangeValidation` |
+| FR-008 | Protected-branch check | `TestServeProtectedAcceptsGovernedDirectPush`, `TestServeProtectedNotReady`, `TestServeProtectedBlocked`, `TestServeProtectedDestinationPolicy`, `TestServeProtectedNotFastForwardAndStaleTip` |
+| FR-009 | Tested commit only | `TestServeProtectedNotReady`, `TestServeAdvanceFastForwardsAndVerifies`, `TestServeAdvanceRefusesNotFastForward` |
+| FR-010 | Rules for other governed ref classes | `TestServeFactsProposalRefRules`, `TestServeFactsMemoryRefRules`, `TestServePushTagsAndReservedRefs`, `TestServeProtectedCreationAndDeletion` |
+| FR-011 | Ordinary branches | `TestServePushBranchOwnershipAndPushLog`, `TestServePushDocumentedExample` |
+| FR-012 | All-or-nothing verdict | `TestServePushAllOrNothing`, `TestServeFactsRejectedActorEventsDoNotReachLaterChecks` |
+| FR-013 | Structured rejection reasons | `TestServeReasonsEveryCodeRoundTrips`, `TestServeReasonsDocsTableMatchesCatalogue`, `TestServeProtectedRejectsDirectPushWithoutProposal` |
+| FR-014 | Advancement request | `TestServeAdvanceFastForwardsAndVerifies`, `TestServeAdvanceNeedsMaintainer`, `TestServeAdvancePublicationRefusals`, `TestServeProtectedAdvanceNeedsMaintainer` |
+| FR-015 | Merge fact for a fast-forward | `TestServeAdvanceInterruptionTable`, `TestServeAdvanceSecondMaintainer`, `TestValidationSeamsFastForwardMergeFactValidatesLocallyAndThroughReplication` |
+| FR-016 | Client merge unchanged | `TestServeAdvanceKeepsLocalMerge`, `TestServeAdvanceRefusesOrdinaryRemote` |
+| FR-017 | Fact advertisement | `TestServeReplicationAdvertisesAcceptedFacts`, `TestServeWireRemoteIdentification` |
+| FR-018 | All-trusted selection | `TestServeReplicationRunnerDiscoversNewWork`, `TestReplicationAllTrustedRefusesUnmarkedRemote`, `TestReplicationAllTrustedMutualExclusionBeforeNetwork`, `TestReplicationAllTrustedForgedMarkerGrantsNoTrust` |
+| FR-019 | Existing selections unchanged | `TestServeReplicationSelectionsMatchOrdinaryRemote`, `TestReplicationAllTrustedExistingModesIgnoreMarker`, `TestReplicationAllTrustedSelectionFilesAndShowOutput` |
+| FR-020 | LFS transfer | `TestServeLFSRoundTrip`, `TestServeLFSObjectMismatch` (pending WP14) |
+| FR-021 | LFS quota | `TestServeLFSQuotaBoundary`, `TestServeLFSLockingUnsupported` (pending WP14) |
+| FR-022 | Protected-update serialization | `TestServeSessionPushWaitsForLockAndFetchDoesNot`, `TestServeProtectedNotFastForwardAndStaleTip`, `TestServeAdvanceConcurrentMaintainers` |
+| FR-023 | Documentation with tested examples | `TestServeQualityDocumentedExamplesAreExecuted`, `TestServeQualityTraceabilityTestsExist`, `TestServeReasonsDocsTableMatchesCatalogue` |
+| NFR-001 | Push verdict time | `TestServeQualityPushVerdictTimeNFR001` |
+| NFR-002 | Bounded incoming data | `TestServeFactsBudgetsAreInclusive`, `TestServeFactsBudgetPriorityWithSeveralExceeded`, `TestServePushOverRefUpdateBudgetRejectsEveryRef` |
+| NFR-003 | Fail-closed handling | `TestServeSessionUnknownKeyRefused`, `TestServeStateValidationRefusesEachLayoutDefect`, `TestServeSessionUnsafeAndUnhostedPathsRefused`, `TestServeFactsAlteredEventIsInvalid`, `TestServeFactsDependencyMissing`, `TestServeProtectedPolicyInvalid` |
+| NFR-004 | Least privilege | `TestServeQualityEnforcedWriteBoundary`, `TestServeQualityWrittenPathsAndModes`, `TestServeAdminRefusesRoot`, `TestServeStateRootRefusalPrecedesEveryStateAccess` |
+| NFR-005 | Race safety | `TestServeAdvanceRaceNFR005` |
+| NFR-006 | Client independence | `TestServeAdvanceFastForwardsAndVerifies`, `TestServeReplicationPhaseZeroFlow`, `TestReplicationAllTrustedForgedMarkerGrantsNoTrust` |
+| NFR-007 | Regression gate | The full gate above, plus the tests that pin earlier behavior: `TestValidationSeamsBaseEvaluationEquivalence`, `TestServeAdvanceKeepsLocalMerge`, `TestReplicationAllTrustedSelectionFilesAndShowOutput` |
+| NFR-008 | Private server state | `TestServeQualityWrittenPathsAndModes`, `TestServeAdminRefusesUnsafeState`, `TestServeStateValidationRefusesEachLayoutDefect`, `TestServeStateRegistryRefusesInvalidContent` |
+| SC-001 | Brief acceptance examples pass | The six tests in [Acceptance examples of the brief](#acceptance-examples-of-the-brief), checked by `TestServeQualityTraceabilityTestsExist` |
+| SC-002 | Rejected pushes change no ref | `TestServePushAllOrNothing`, `TestServeProtectedRejectsDirectPushWithoutProposal`, `TestServeReasonsParserRejectsMalformedLines` |
+| SC-003 | Protected tips carry CI and both acceptances | `TestServeProtectedAcceptsGovernedDirectPush`, `TestServeProtectedDestinationPolicy`, `TestServeProtectedNotReady` |
+| SC-004 | Phase 0 flow without selections or direct main pushes | `TestServeReplicationPhaseZeroFlow`, `TestServeReplicationCommandLogChecks` |
+| SC-005 | Fresh verifier reproduces the evidence | `TestServeAdvanceFastForwardsAndVerifies`, `TestServeReplicationPhaseZeroFlow` |
+| SC-006 | Requirements map to tests and the gate passes | `TestServeQualityTraceabilityTestsExist` |
+
+### User-story scenarios
+
+| ID | Scenario | Tests |
+|----|----|----|
+| US1-1 | Feature branch and own actor chain accepted | `TestServeFactsFeatureBranchAndProposal` |
+| US1-2 | Direct push to main rejected naming every missing evidence kind | `TestServeProtectedRejectsDirectPushWithoutProposal`, `TestServeProtectedDocumentedExample` |
+| US1-3 | Another actor's chain rejected | `TestServeFactsActorKeyMismatch`, `TestServeFactsDocumentedExample` |
+| US1-4 | Broken signature rejected with the full event ID | `TestServeFactsAlteredEventIsInvalid` |
+| US1-5 | Rewritten actor chain rejected | `TestServeFactsActorChainRewrite` |
+| US1-6 | Only the owner or a maintainer rewrites a branch | `TestServePushBranchOwnershipAndPushLog`, `TestServePushDocumentedExample` |
+| US2-1 | Managed entry uses restrict and the forced command, and the key clones | `TestServeAdminKeysMaintainAuthorizedKeys`, `TestServeSessionCloneAndFetchOverSSH`, `TestServeSSHDRoundTrip` |
+| US2-2 | Unregistered key refused before data moves | `TestServeSessionUnknownKeyRefused` |
+| US2-3 | Shells and other commands refused | `TestServeSessionUnsupportedCommandsRefusedWithoutChanges`, `TestServeSSHDRoundTrip` |
+| US2-4 | Unsafe or unhosted paths refused | `TestServeSessionUnsafeAndUnhostedPathsRefused` |
+| US2-5 | Removed key refused at its next connection | `TestServeSessionRemovedKeyRefused` |
+| US3-1 | Maintainer advances main to the proposal head | `TestServeAdvanceFastForwardsAndVerifies` |
+| US3-2 | Fresh clone reproduces the evidence | `TestServeAdvanceFastForwardsAndVerifies` |
+| US3-3 | Stale proposal head refused as not fast-forward | `TestServeAdvanceRefusesNotFastForward` |
+| US3-4 | Stricter destination policy refuses the advancement | `TestServeAdvanceRefusesDestinationPolicy`, `TestServeProtectedDestinationPolicy` |
+| US3-5 | Missing trusted CI result rejected | `TestServeProtectedNotReady` |
+| US3-6 | Two concurrent advancements, exactly one wins | `TestServeAdvanceConcurrentMaintainers` |
+| US4-1 | Runner imports a new proposal and run request | `TestServeReplicationRunnerDiscoversNewWork`, `TestReplicationAllTrustedDiscoversNewProposalAndRunRequest` |
+| US4-2 | Unpublished participant is not a failure | `TestServeReplicationUnpublishedActorIsNotAFailure`, `TestReplicationAllTrustedUnpublishedActorIsNotAFailure` |
+| US4-3 | Only exactly selected memory streams import | `TestReplicationAllTrustedImportsOnlyExactMemory` |
+| US4-4 | All-trusted selection refused for an ordinary remote | `TestReplicationAllTrustedRefusesUnmarkedRemote` |
+| US4-5 | Existing selections behave as against an ordinary remote | `TestServeReplicationSelectionsMatchOrdinaryRemote`, `TestReplicationAllTrustedExistingModesIgnoreMarker` |
+| US4-6 | Phase 0 flow without selections or direct main pushes | `TestServeReplicationPhaseZeroFlow` |
+| US5-1 | LFS file reaches a second clone byte for byte | `TestServeLFSRoundTrip` (pending WP14) |
+| US5-2 | Upload that does not match its object ID discarded | `TestServeLFSObjectMismatch` (pending WP14) |
+| US5-3 | Quota is inclusive at the limit | `TestServeLFSQuotaBoundary` (pending WP14) |
+| US5-4 | Locking answered as unsupported | `TestServeLFSLockingUnsupported` (pending WP14) |
+
+### Acceptance examples of the brief
+
+The mission brief lists six acceptance examples. Each one runs as a test
+through the public `git` and `hn` commands against a real temporary hosted
+repository.
+
+| ID | Example | Tests |
+|----|----|----|
+| Brief 1 | An agent pushes a feature branch and its actor chain, and the server accepts both | `TestServeFactsFeatureBranchAndProposal` |
+| Brief 2 | The same agent pushes main directly and is rejected with the missing proposal, review, CI and acceptance evidence named | `TestServeProtectedRejectsDirectPushWithoutProposal` |
+| Brief 3 | An agent pushes another actor's chain and is rejected | `TestServeFactsActorKeyMismatch` |
+| Brief 4 | A maintainer advances main, and a fresh clone with `hn sync` reproduces the evidence | `TestServeAdvanceFastForwardsAndVerifies` |
+| Brief 5 | A runner with the all-trusted selection discovers a new proposal and CI request | `TestServeReplicationRunnerDiscoversNewWork` |
+| Brief 6 | The Phase 0 flow runs with no `refs/hn` selection commands | `TestServeReplicationPhaseZeroFlow` |
+
+The real rust-pingpong project run is a manual dogfooding check, because it
+needs the project's Rust toolchain. `TestServeReplicationPhaseZeroFlow`
+reproduces its command flow in the automated gate with a portable shell
+pipeline in place of the cargo pipeline.
+
+### Evidence that depends on the host
+
+Three tests measure or enforce properties that depend on the test host, and
+each one logs what it saw:
+
+- `TestServeQualityPushVerdictTimeNFR001` builds a hosted repository with
+  1,000 events from four actors, restores it before each of 20 timed pushes
+  of 50 events and a protected `main` update, logs every duration and fails
+  when the 95th percentile is 5 seconds or more. The server-side `hn` binary
+  is built without the race detector. The test skips under `go test -short`.
+- `TestServeQualityEnforcedWriteBoundary` runs a full acceptance run with
+  every server-side process, administration commands included, inside a
+  bubblewrap sandbox in which only `$HOME/.hn-serve` and `$HOME/.ssh` are
+  writable, after checking that the sandbox refuses writes to `$HOME`, `/tmp`
+  and another absolute path. Without bubblewrap or unprivileged user
+  namespaces it skips with the reason, and `TestServeQualityWrittenPathsAndModes`
+  remains as snapshot evidence of the same rule.
+- `TestServeSSHDRoundTrip` starts an unprivileged OpenSSH server on
+  `127.0.0.1` with the generated `authorized_keys`, clones, pushes a feature
+  branch, has a direct `main` push rejected, and checks that `restrict` refuses
+  a terminal and local port forwarding. It skips with the reason when `sshd`,
+  `ssh` or `ssh-keygen` is missing, when it runs as uid 0, or when `sshd` does
+  not start, and it includes the `sshd` log in the skip message.
 
 ## Large files with Git LFS
 <!-- section owned by WP14 -->
