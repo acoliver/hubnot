@@ -76,6 +76,10 @@ type serveGovernedOptions struct {
 	// ProtectedPaths opts the policy in to protected checks for these
 	// paths, with the maintainer as the one protected-check reviewer.
 	ProtectedPaths []string
+
+	// AutomergePaths adds automerge rule "auto" for main, executed by the
+	// maintainer for proposals by the author that change only these paths.
+	AutomergePaths []string
 }
 
 // serveGovernedPolicy is an hn.policy/0 document by role. Every proposal
@@ -88,6 +92,9 @@ type serveGovernedPolicy struct {
 	Pipelines           map[string][]string // pipeline name to trusted runners
 	ProtectedPaths      []string            // protectedChecks paths; none leaves the section out
 	ProtectedReviewers  []string            // protectedChecks trusted reviewers
+	AutomergeActors     []string            // automerge rule "auto" executing actors
+	AutomergeAuthors    []string            // automerge rule "auto" authors
+	AutomergePaths      []string            // automerge rule "auto" paths; none leaves the section out
 }
 
 // JSON encodes the policy the way a repository stores it.
@@ -112,6 +119,12 @@ func (policy serveGovernedPolicy) JSON(t *testing.T) string {
 		document["protectedChecks"] = map[string]any{
 			"paths": policy.ProtectedPaths, "trustedReviewers": policy.ProtectedReviewers, "requiredApprovals": 1,
 		}
+	}
+	if len(policy.AutomergePaths) > 0 {
+		document["automerge"] = map[string]any{"rules": []map[string]any{{
+			"name": "auto", "targetBranch": "main", "actors": policy.AutomergeActors,
+			"authors": policy.AutomergeAuthors, "paths": policy.AutomergePaths,
+		}}}
 	}
 	encoded, err := json.MarshalIndent(document, "", "  ")
 	if err != nil {
@@ -183,6 +196,11 @@ func newServeGovernedFixture(t *testing.T, options serveGovernedOptions) *serveG
 	if len(options.ProtectedPaths) > 0 {
 		g.Policy.ProtectedPaths = options.ProtectedPaths
 		g.Policy.ProtectedReviewers = []string{f.actors[g.Maintainer]}
+	}
+	if len(options.AutomergePaths) > 0 {
+		g.Policy.AutomergePaths = options.AutomergePaths
+		g.Policy.AutomergeActors = []string{f.actors[g.Maintainer]}
+		g.Policy.AutomergeAuthors = []string{f.actors[g.Author]}
 	}
 
 	source := filepath.Join(t.TempDir(), "source")

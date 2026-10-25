@@ -14,7 +14,7 @@ import (
 	"time"
 )
 
-const automergeUsage = "usage: hn automerge PROPOSAL --rule NAME [--execute]"
+const automergeUsage = "usage: hn automerge PROPOSAL --rule NAME [--execute [--remote REMOTE]]"
 
 // Process seams permit deterministic race/recovery tests. They are never loaded
 // from repository configuration or exposed as policy authority.
@@ -45,10 +45,11 @@ func cmdAutomerge(args []string) error {
 	flags := quietFlags("automerge")
 	rule := flags.String("rule", "", "explicit automerge rule name")
 	execute := flags.Bool("execute", false, "execute a locally eligible native merge")
+	remote := flags.String("remote", "", "advance the rule's target branch on this hn serve remote")
 	if err := flags.Parse(args[1:]); err != nil {
 		return err
 	}
-	if flags.NArg() != 0 || *rule == "" {
+	if flags.NArg() != 0 || *rule == "" || (*remote != "" && !*execute) {
 		return usageError(automergeUsage)
 	}
 	inspection, err := inspectAutomerge(args[0], *rule)
@@ -68,6 +69,20 @@ func cmdAutomerge(args []string) error {
 	}
 	if !actorListed(identity.Actor, inspection.Rule.Actors) {
 		return fmt.Errorf("identity %s is not an executing actor for automerge rule %q", identity.Actor, *rule)
+	}
+	// An hn serve remote advances its protected branch only to the signed
+	// proposal head and never accepts a local merge commit. With --remote the
+	// rule's checks above gate the server's own advancement; without it, a
+	// target branch that tracks an hn serve remote is refused before any
+	// local merge commit or merge fact exists.
+	if *remote != "" {
+		return cmdMergeRemote(inspection.Proposal.ID, *remote, "refs/heads/"+inspection.Rule.TargetBranch)
+	}
+	if upstream, err := gitText("config", "--get", "branch."+inspection.Rule.TargetBranch+".remote"); err == nil && upstream != "" && upstream != "." {
+		if identified, _ := serveRemoteIdentifies(upstream); identified {
+			return fmt.Errorf("branch %s tracks hn serve remote %s, which advances only to the signed proposal head; run hn automerge %s --rule %s --execute --remote %s",
+				inspection.Rule.TargetBranch, upstream, inspection.Proposal.ID, *rule, upstream)
+		}
 	}
 	guard := &proposalMergeGuard{ExpectedActor: identity.Actor}
 	guard.Check = func(proposal *StoredEvent, evaluation *ProposalEvaluation, branch, current string) error {

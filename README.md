@@ -420,7 +420,8 @@ hn run execute REQUEST [--backend sandbox|host] [--allow-unsafe-host-execution] 
 hn runner once|watch --accept-pipeline NAME --accept-actor ACTOR
 hn decide PROPOSAL <--accept|--reject> [--body TEXT]
 hn merge PROPOSAL
-hn automerge PROPOSAL --rule NAME [--execute]
+hn merge PROPOSAL --remote REMOTE [--branch BRANCH]
+hn automerge PROPOSAL --rule NAME [--execute [--remote REMOTE]]
 hn memory record|handoff|supersede|retract|challenge|show|recall|index
 hn replication select|show [REMOTE] [--memory STREAM]...
 hn sync [REMOTE] [--recover-shallow]

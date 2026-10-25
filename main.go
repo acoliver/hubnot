@@ -125,7 +125,7 @@ Usage:
   hn decide PROPOSAL <--accept|--reject> [--body TEXT]
   hn merge PROPOSAL --remote REMOTE [--branch BRANCH]
   hn merge PROPOSAL
-  hn automerge PROPOSAL --rule NAME [--execute]
+  hn automerge PROPOSAL --rule NAME [--execute [--remote REMOTE]]
   hn serve repo create|list|show|set|lock-exec ...
   hn serve key add|remove|list ...
   hn serve git --key FINGERPRINT

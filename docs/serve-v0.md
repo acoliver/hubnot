@@ -1406,6 +1406,24 @@ facts for one candidate from different maintainers are valid. A lineage has
 a merge conflict only when two different candidates in it are merged, so
 `hn proposal status` still reports the candidate as `merged`.
 
+### Automerge rules
+
+A repository whose policy has [automerge rules](governance-v0.md) can let a
+rule's executing actor advance the branch through the server:
+
+```sh
+hn automerge PROPOSAL --rule NAME --execute --remote origin
+```
+
+`hn automerge` checks the rule first, as it does locally: the checked-out
+branch must be the rule's target branch, and the proposal's author and changed
+paths must match the rule. It then runs the same advancement as
+`hn merge PROPOSAL --remote origin`, so the server applies every check above.
+Without `--remote`, `hn automerge --execute` refuses a target branch that
+tracks an `hn serve` remote before it creates a local merge commit or merge
+fact, because the server never accepts a local merge commit on a protected
+branch.
+
 ### Two advancements at the same time
 
 When two maintainers advance different proposals of one branch at the same
