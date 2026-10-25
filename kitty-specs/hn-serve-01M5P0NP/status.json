@@ -1,19 +1,19 @@
 {
-  "event_count": 123,
-  "last_event_id": "01M5STXPQXTWXETFWFKM3NCKXY",
-  "materialized_at": "2026-10-25T15:30:01.597706+00:00",
+  "event_count": 124,
+  "last_event_id": "01M5SVNK002SP98X25311NMCPX",
+  "materialized_at": "2026-10-25T15:43:04.192233+00:00",
   "mission_number": "",
   "mission_slug": "hn-serve-01M5P0NP",
   "mission_type": "",
   "summary": {
-    "approved": 12,
+    "approved": 13,
     "blocked": 0,
     "canceled": 0,
     "claimed": 0,
     "done": 0,
     "for_review": 0,
     "in_progress": 0,
-    "in_review": 1,
+    "in_review": 0,
     "planned": 1
   },
   "work_packages": {
@@ -436,19 +436,25 @@
       }
     },
     "WP13": {
-      "actor": "llxprt",
+      "actor": "user",
       "agent": "llxprt",
       "agent_profile": "__resolved_profile_absent__",
       "agent_profile_version": "__resolved_profile_version_absent__",
       "force_count": 0,
-      "lane": "in_review",
-      "last_event_id": "01M5STXPQXTWXETFWFKM3NCKXY",
-      "last_transition_at": "2026-10-25T15:30:01.597706+00:00",
+      "lane": "approved",
+      "last_event_id": "01M5SVNK002SP98X25311NMCPX",
+      "last_transition_at": "2026-10-25T15:43:04.192233+00:00",
       "model": "__resolved_model_absent__",
       "notes": [
         "WP13 ready for review (commit aeeaefd). Added serve_quality_test.go (FR-023 example guard; NFR-001 timing p95 706ms over 20 restored 1,000-event runs; NFR-004 snapshot audit with sentinel TMPDIR plus enforced bwrap write boundary with probes, NFR-008 mode audit; traceability check) and serve_sshd_test.go (real OpenSSH 10.2 round trip, restrict refuses PTY and -L forwarding). Harness gains optional Wrap/Env for WP14; two mission-added extractors pass full marker literals. docs/serve-v0.md verification and traceability section (70 rows, LFS rows pending WP14); docs/threat-model.md consolidated. Gate: gofmt clean, go vet ok, go build ok, race suite ok (689s, perf test skipped), perf test without race ok (10.8s), git diff --check clean, no pre-existing test modified since 6ecca57, C-001/C-009/C-011 checks recorded."
       ],
       "provider": "__resolved_provider_absent__",
+      "review_result": {
+        "feedback_path": "/home/acoliver/projects/appaday/gitium/hubnot/kitty-specs/hn-serve-01M5P0NP/tasks/WP13-quality-evidence-and-threat-model/review-cycle-1.md",
+        "reference": "review-cycle://hn-serve-01M5P0NP/WP13-quality-evidence-and-threat-model/review-cycle-1.md",
+        "reviewer": "user",
+        "verdict": "approved"
+      },
       "role": "reviewer",
       "shell_pid": 1707278,
       "shell_pid_created_at": "1792942199.49",
