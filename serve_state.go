@@ -242,6 +242,11 @@ func validateServeLayoutFor(layout serveLayout, mode serveValidationMode, hnPath
 // layout, and the read-only open keeps session validation write-free. The
 // lock covers hook regeneration and whole-layout validation only; commands
 // release it before doing their own work.
+//
+// Any later writer that stages a temporary file inside the layout (for
+// example replacePrivateFileAtomic's .hn-private-* file in state/) must hold
+// this lock exclusively from staging to rename, or a concurrent validator
+// will report the staging file as an unexpected entry.
 func lockServeLayout(layout serveLayout, kind serveLockKind) (func() error, error) {
 	if err := requireServeDirectory(layout.Root); err != nil {
 		return nil, err
