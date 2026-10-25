@@ -681,7 +681,169 @@ administrator fixes it as described in
 [What makes the server refuse to run](#what-makes-the-server-refuse-to-run).
 
 ## Push verdicts and ref classes
-<!-- section owned by WP07 -->
+
+Every push runs the server's `pre-receive` hook, `hn serve hook pre-receive`,
+inside `git receive-pack`. The hook decides the push verdict while
+`hn serve git` holds the repository lock, so no other push can move a ref in
+between. The hook itself never takes the lock.
+
+### One verdict for the whole push
+
+The hook accepts a push only when every ref update in it passes. When any ref
+update fails, the hook prints one rejection line pair for each failing ref
+update and exits with status 1. Git then rejects every ref update in the push,
+including the ones that passed, and nothing in the hosted repository changes.
+
+Git keeps the objects of a push in a quarantine directory until the
+`pre-receive` hook accepts it (Git 2.11 or later). The hook can read every pushed
+object there, while fetches and other pushes cannot see them. When the hook
+rejects the push, Git deletes the quarantine directory, so the rejected commits
+never enter the hosted object database.
+
+Use `git push --atomic` when you push several refs. The server treats a push
+with or without `--atomic` the same way, but with `--atomic` Git's own summary
+also reports every ref as rejected together.
+
+### Ref classes
+
+The hook puts each ref update into exactly one class, checking the classes in
+this order:
+
+| Class | Ref pattern |
+|----|----|
+| `protected` | a branch listed as protected in the repository configuration |
+| `actor` | `refs/hn/actors/` followed by 64 lowercase hex digits |
+| `proposal` | `refs/hn/proposals/` followed by 64 lowercase hex digits |
+| `memory` | `refs/hn/memory/ACTOR/STREAM`, each part 64 lowercase hex digits |
+| `tag` | `refs/tags/NAME` |
+| `branch` | any other `refs/heads/NAME` |
+| `reserved` | everything else |
+
+The rules for the `actor`, `proposal` and `memory` classes are in
+[Hubnot fact refs and budgets](#hubnot-fact-refs-and-budgets). The rules for
+protected branches are in [Protected branches](#protected-branches).
+
+The hook checks the classes in a fixed order: actor refs first, then memory
+refs, then proposal refs, then tags, ordinary branches and reserved refs, and
+protected branches last. A later class may rely on facts that an earlier class
+of the same push brought along. For example, one push can carry a new proposal
+event in an actor ref together with the proposal's code ref.
+
+### Ordinary branches and their owners
+
+Any mapped actor may create an ordinary branch and may fast-forward it. A
+forced update, where the old tip is not an ancestor of the new one, and a
+deletion are accepted only from the branch's owner or from a maintainer of the
+repository. Anyone else gets `branch-not-owner`.
+
+The owner of a branch is the actor whose push created it. The `post-receive`
+hook records the owner in `state/repos/NAME/branches.json` after the push
+succeeds and removes the record when the branch is deleted. A forced update
+keeps the record unchanged. Protected branches never get owner records.
+
+A branch without a record has no owner. That covers the branches imported by
+`hn serve repo create` and any branch whose record could not be written. Only
+a maintainer may force-update or delete such a branch.
+
+A maintainer of the repository is an actor listed in `maintainers` of the
+`.hn/policy.json` file at the tip of the default protected branch, which is
+the first protected branch in the configuration. The hook reads that policy
+for each push. When the tip has no policy file, or the file is not valid
+`hn.policy/0`, no actor counts as a maintainer.
+
+### Tags
+
+Any mapped actor may create a tag. A push that moves or deletes an existing
+tag is rejected with `tag-immutable`. Create a new tag instead.
+
+### Reserved refs
+
+A ref outside every class above is rejected with `reserved-ref`. That includes
+the server marker `refs/hn/serve/v1`, every other `refs/hn/serve/` ref, notes
+in `refs/notes/`, remote-tracking refs, branch names the server does not
+accept, and `refs/hn/` names that do not match the patterns in the class
+table, such as `refs/hn/actors/` followed by anything other than a full actor
+fingerprint.
+
+### Push options
+
+The server accepts two push options, each at most once:
+
+| Option | Value |
+|----|----|
+| `hn-advance` | a full candidate event ID, `sha256:` followed by 64 lowercase hex digits |
+| `hn-expected-tip` | a full commit ID |
+
+A push with any other option, a repeated option or a malformed value is
+rejected: every ref update in it gets `unsupported-command` with the sentence
+`push options other than hn-advance and hn-expected-tip are not supported.`.
+A push with `hn-advance` must contain exactly one ref update, to a protected
+branch; otherwise every ref update gets `unsupported-command` as well.
+[Advancing a protected branch](#advancing-a-protected-branch) describes what
+the two options do.
+
+The hook reads at most 10,000 ref updates and 4 MiB of ref update lines per
+push. A larger push is rejected with one `over-budget` line with `ref=-` and
+`budget=ref-updates` (counted in ref updates) or `budget=ref-update-bytes`
+(counted in bytes). Split it into several pushes.
+
+### Rejection lines
+
+Each rejected ref update produces one `hn-serve/1` rejection line and one
+sentence. The line names the ref, the mapped actor that pushed, a reason code,
+the IDs involved and the next action. Git relays both lines with a `remote: `
+prefix, in byte order of the ref names, before its own summary. The line
+format and the full table of reason codes are in
+[protocol-v0.md](protocol-v0.md#rejection-lines).
+
+<!-- example: reject-branch-not-owner -->
+Actor `4f1c9a6d` force-pushes `feature/b`, which actor `8a4b76e4` created (US1-6):
+
+```text
+remote: hn-serve/1 reject ref=refs/heads/feature/b actor=4f1c9a6d0d2b7e3a8c5f6e1b9d0a7c3e2f4b6d8a0c1e3f5a7b9d1c3e5f7a9b1c code=branch-not-owner ids=8a4b76e4bcacb0871f481b895d3be3de30d633f0fec3117a1d76485bc46d4e23 next="ask the owner or a maintainer"
+remote: hn-serve: refs/heads/feature/b belongs to 8a4b76e4bcacb0871f481b895d3be3de30d633f0fec3117a1d76485bc46d4e23; only its owner or a maintainer can force-update or delete it.
+```
+
+For an ordinary branch without an owner record the line has no `ids` field
+and the sentence says the branch has no recorded owner. A moved tag lists its
+old and new commit IDs in `ids`, and a deleted tag lists its old commit ID.
+
+When the hook cannot trust the session it refuses before it reads any ref
+update and prints one line of the form `hn: hn serve hook: REASON`. That
+happens when the hook runs outside `hn serve git`, when `GIT_DIR` is not the
+hosted repository, or when the pushing key was removed or bound to another
+actor while the push was running. Git rejects the whole push.
+
+### The push log
+
+The server appends one JSON line per push to `state/repos/NAME/push.log`. The
+`pre-receive` hook writes the entry for a rejected push and the
+`post-receive` hook writes the entry for an accepted push. Each entry has
+these fields:
+
+| Field | Content |
+|----|----|
+| `time` | RFC 3339 UTC time of the verdict |
+| `actor` | the mapped actor that pushed |
+| `key` | the fingerprint of the key that authenticated |
+| `verdict` | `accepted` or `rejected` |
+| `updates` | each ref update as `ref`, `old` and `new` commit IDs, with all zeros for a creation or a deletion |
+| `codes` | the reason codes in the order of the rejection lines; empty for an accepted push |
+
+The server never reads the log back, and the verdict never depends on it. A
+log that reaches 64 MiB stops every session with a state defect, so the
+server refuses an append that would cross that size and reports it instead.
+Rotate the log before it gets there by moving it out of the state directory
+under the repository lock, for example with
+`hn serve repo lock-exec NAME -- mv /home/hn/.hn-serve/state/repos/NAME/push.log /var/log/hn-serve/NAME-push.log`,
+where `/home/hn` is the server account's home directory. The next push starts
+a new log.
+
+The `post-receive` hook never changes the verdict. If it cannot record an
+owner or append to the log, it prints a line starting with
+`hn-serve: post-receive bookkeeping failed:` and Git still reports the push as
+successful. A branch whose owner record is missing then behaves as a branch
+without an owner.
 
 ## Hubnot fact refs and budgets
 <!-- section owned by WP08 -->

@@ -1116,6 +1116,213 @@ func decodeServeBranchOwners(contents []byte) (serveBranchOwners, error) {
 	return owners, nil
 }
 
+func emptyServeBranchOwners() serveBranchOwners {
+	return serveBranchOwners{Version: serveBranchOwnersVersion, Branches: []serveBranchOwner{}}
+}
+
+// loadServeBranchOwners treats a missing branches.json as an empty record
+// set: the file is absent until the first owned branch. Any other read or
+// decoding problem is fatal, so a damaged file never reads as "no owners".
+func loadServeBranchOwners(layout serveLayout, name string) (serveBranchOwners, error) {
+	if !validServeRepositoryName(name) {
+		return serveBranchOwners{}, fmt.Errorf("invalid repository name %q", name)
+	}
+	path := layout.RepoBranches(name)
+	contents, err := readPrivateFileBounded(path, serveStateFileLimit)
+	if errors.Is(err, os.ErrNotExist) {
+		return emptyServeBranchOwners(), nil
+	}
+	if err != nil {
+		return serveBranchOwners{}, serveStateError(path, err)
+	}
+	owners, err := decodeServeBranchOwners(contents)
+	if err != nil {
+		return serveBranchOwners{}, serveStateError(path, err)
+	}
+	return owners, nil
+}
+
+// lookupServeBranchOwner returns the record for ref in validated owners,
+// which are sorted and unique.
+func lookupServeBranchOwner(owners serveBranchOwners, ref string) (serveBranchOwner, bool) {
+	index, found := slices.BinarySearchFunc(owners.Branches, ref, func(branch serveBranchOwner, target string) int {
+		return strings.Compare(branch.Ref, target)
+	})
+	if !found {
+		return serveBranchOwner{}, false
+	}
+	return owners.Branches[index], true
+}
+
+// saveServeBranchOwners sorts the records by ref, validates them and
+// replaces branches.json atomically. The empty-save policy is to write an
+// empty list: once the file exists it is never removed, so a removal that
+// fails halfway can never leave a stale record set behind. Only post-receive
+// calls it, while hn serve git holds the repository lock.
+func saveServeBranchOwners(layout serveLayout, name string, owners serveBranchOwners) error {
+	if !validServeRepositoryName(name) {
+		return fmt.Errorf("invalid repository name %q", name)
+	}
+	branches := slices.Clone(owners.Branches)
+	if branches == nil {
+		branches = []serveBranchOwner{}
+	}
+	sort.Slice(branches, func(i, j int) bool { return branches[i].Ref < branches[j].Ref })
+	owners.Branches = branches
+	if err := validateServeBranchOwners(owners); err != nil {
+		return err
+	}
+	contents, err := encodeServeStateJSON(owners)
+	if err != nil {
+		return err
+	}
+	return writeServeStateFile(layout, layout.RepoBranches(name), contents)
+}
+
+// Push log (state/repos/NAME/push.log).
+
+const (
+	servePushVerdictAccepted = "accepted"
+	servePushVerdictRejected = "rejected"
+)
+
+// servePushLogEntry is one line of push.log. Field order is the contract's.
+type servePushLogEntry struct {
+	Time    string               `json:"time"`
+	Actor   string               `json:"actor"`
+	Key     string               `json:"key"`
+	Verdict string               `json:"verdict"`
+	Updates []servePushLogUpdate `json:"updates"`
+	Codes   []string             `json:"codes"`
+}
+
+type servePushLogUpdate struct {
+	Ref string `json:"ref"`
+	Old string `json:"old"`
+	New string `json:"new"`
+}
+
+func validateServePushLogEntry(entry servePushLogEntry) error {
+	if !validServeTimestamp(entry.Time) {
+		return fmt.Errorf("push log time %q is not RFC 3339 UTC", entry.Time)
+	}
+	if !validActorFingerprint(entry.Actor) {
+		return fmt.Errorf("push log actor %q is not a full 64-hex actor fingerprint", entry.Actor)
+	}
+	if !validServeFingerprint(entry.Key) {
+		return fmt.Errorf("push log key %q is not a SHA256 key fingerprint", entry.Key)
+	}
+	switch entry.Verdict {
+	case servePushVerdictAccepted:
+		if len(entry.Codes) != 0 {
+			return errors.New("an accepted push log entry carries no reason codes")
+		}
+	case servePushVerdictRejected:
+		if len(entry.Codes) == 0 {
+			return errors.New("a rejected push log entry needs at least one reason code")
+		}
+	default:
+		return fmt.Errorf("push log verdict %q is not accepted or rejected", entry.Verdict)
+	}
+	for _, code := range entry.Codes {
+		if !serveReasonKnown(code) {
+			return fmt.Errorf("push log reason code %q is not in the catalogue", code)
+		}
+	}
+	for _, update := range entry.Updates {
+		if update.Ref == "" || !validGitOID(update.Old) || !validGitOID(update.New) {
+			return fmt.Errorf("push log update %+v is malformed", update)
+		}
+	}
+	return nil
+}
+
+// appendServePushLog appends one JSON line to push.log with O_APPEND and
+// syncs it. It never stages a file, so it needs no layout lock; callers are
+// the hooks, which run while hn serve git holds the repository lock, so
+// appends to one log never interleave. An append that would grow the log
+// past servePushLogLimit is refused, because layout validation treats a
+// larger log as a defect that stops every session.
+func appendServePushLog(layout serveLayout, name string, entry servePushLogEntry) error {
+	if !validServeRepositoryName(name) {
+		return fmt.Errorf("invalid repository name %q", name)
+	}
+	if entry.Updates == nil {
+		entry.Updates = []servePushLogUpdate{}
+	}
+	if entry.Codes == nil {
+		entry.Codes = []string{}
+	}
+	if err := validateServePushLogEntry(entry); err != nil {
+		return err
+	}
+	line, err := json.Marshal(entry)
+	if err != nil {
+		return err
+	}
+	line = append(line, '\n')
+	path := layout.RepoPushLog(name)
+	file, err := openServePushLog(path)
+	if err != nil {
+		return err
+	}
+	info, err := file.Stat()
+	if err == nil && info.Size()+int64(len(line)) > servePushLogLimit {
+		err = fmt.Errorf("push log would exceed %d bytes; rotate %s", int64(servePushLogLimit), path)
+	}
+	if err == nil {
+		_, err = file.Write(line)
+	}
+	if err == nil {
+		err = file.Sync()
+	}
+	if closeErr := file.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		return serveStateError(path, err)
+	}
+	return nil
+}
+
+// openServePushLog opens push.log for appending without following a
+// symlink at the final component, the same way openServeLockFile does.
+func openServePushLog(path string) (*os.File, error) {
+	const flag = os.O_WRONLY | os.O_APPEND
+	before, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		file, err := os.OpenFile(path, flag|os.O_CREATE|os.O_EXCL, 0o600)
+		if err != nil {
+			return nil, serveStateError(path, err)
+		}
+		if err := file.Chmod(0o600); err != nil {
+			_ = file.Close()
+			return nil, serveStateError(path, err)
+		}
+		return file, nil
+	}
+	if err != nil {
+		return nil, serveStateError(path, err)
+	}
+	if err := checkServeRegularInfo(path, before, 0o600, servePushLogLimit); err != nil {
+		return nil, err
+	}
+	file, err := os.OpenFile(path, flag, 0)
+	if err != nil {
+		return nil, serveStateError(path, err)
+	}
+	after, err := file.Stat()
+	if err != nil {
+		_ = file.Close()
+		return nil, serveStateError(path, err)
+	}
+	if !os.SameFile(before, after) {
+		_ = file.Close()
+		return nil, serveDefect(path, "changed while it was being opened")
+	}
+	return file, nil
+}
+
 // Repository locks (state/repos/NAME/lock and lfs.lock).
 
 // openServeLockFile opens or creates a 0600 regular lock file without
