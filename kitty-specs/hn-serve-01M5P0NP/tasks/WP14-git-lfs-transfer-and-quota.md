@@ -92,7 +92,7 @@ Serve Git LFS objects for hosted repositories over the `git-lfs-transfer` SSH pr
 | File | Change |
 |----|----|
 | `serve_lfs.go` | NEW. pkt-line framing, protocol, storage, quota. |
-| `serve_session.go` | CHANGE. Replace only the `git-lfs-transfer` refusal arm with a call into `serve_lfs.go`. |
+| `serve_session.go` | CHANGE. Replace only the `git-lfs-transfer` refusal arm with a call into `serve_lfs.go`, and set `serveLFSEnabled = true`. |
 | `serve_lfs_test.go` | NEW. |
 | `docs/serve-v0.md` | CHANGE. "Large files with Git LFS" section only. |
 | `docs/threat-model.md` | CHANGE. Fill the "Git LFS storage" placeholder WP13 left. |
@@ -113,7 +113,7 @@ Serve Git LFS objects for hosted repositories over the `git-lfs-transfer` SSH pr
 
 **Steps**:
 
-1. In `serve_session.go`, replace the refusal arm so a validated `git-lfs-transfer` request calls `runServeLFSSession(layout, binding, repo, op, os.Stdin, os.Stdout)`. Change nothing else in that file.
+1. In `serve_session.go`, replace the refusal arm so a validated `git-lfs-transfer` request calls `runServeLFSSession(layout, binding, repo, op, os.Stdin, os.Stdout)`, and set `serveLFSEnabled = true` so WP06's seam test skips with its documented reason. Change nothing else in that file and do not edit `serve_session_test.go`.
 2. Session (contract table): send `version=1` then flush (never advertise `locking`). Then loop over commands:
    - `version 1` gets `status 200` and flush; any other version `status 400`.
    - `batch` with arguments `transfer`, `refname` and `hash-algo` (ignore other arguments, as the proposal requires; `hash-algo` must be absent or `sha256`, otherwise `status 400`), followed by `oid size` lines until flush. Each OID is 64 lowercase hex and each size decimal. For `upload`: a stored object gets action `noop`, a missing one `upload`. For `download`: every object gets `download`. No `id` or `token` values.
@@ -162,7 +162,7 @@ Serve Git LFS objects for hosted repositories over the `git-lfs-transfer` SSH pr
 4. **US5-4**: `lock` and `list-lock` commands answer `status 501` with the unsupported message; the capability advertisement does not include `locking`.
 5. **Interruption**: close stdin mid `put-object`; the next session removes staged files older than one hour (use an `HN_INTERNAL_TESTING` override for the age threshold, gated like other test hooks, or set the staged file's mtime back with `os.Chtimes`); the object is never downloadable and `lfs-stored:` is unchanged.
 6. **Framing**: a length header of `ffff` is refused without a large allocation; unknown commands end the session with `status 400`.
-7. **NFR-004 extension**: the WP13 path audit pattern applied to an LFS round trip: new paths only under `state/repos/NAME/lfs/` and `lfs.lock`, with modes 0700 and 0600.
+7. **NFR-004 extension**: run the LFS round trip inside WP13's enforced write boundary (same shim wrapper, same skip rule) and require it to succeed; also apply the snapshot audit: new paths only under `state/repos/NAME/lfs/` and `lfs.lock`, with modes 0700 and 0600.
 8. **Documented example**: extract the `<!-- example: lfs-quota -->` block from the guide (T091) and compare with real output; this also satisfies WP13's example guard.
 
 **Files**: `serve_lfs_test.go`.
@@ -173,7 +173,7 @@ Serve Git LFS objects for hosted repositories over the `git-lfs-transfer` SSH pr
 
 1. "Large files with Git LFS" in `docs/serve-v0.md`: client requirements (Git LFS 3.x with SSH transfer; set `lfs.ssh.automultiplex=false` if multiplexing causes problems), what the server stores and where, verification before download, the inclusive quota and how to raise it, `lfs-stored:` in `repo show`, staged-file cleanup, locking unsupported, and that `git-lfs-authenticate` and HTTP transfer are not offered. Include a marked example `<!-- example: lfs-quota -->` showing the `lfs-quota` rejection line.
 2. `docs/threat-model.md`, under WP13's "Git LFS storage" heading: content addressing and verification, quota as the bound on storage, staging isolation, no locking, LFS sessions use the same key attribution and repository checks as Git sessions, and residual risk (a mapped actor can fill the quota).
-3. Update the traceability rows for US5 in `docs/serve-v0.md` only if WP13 left them pointing at different test names.
+3. Complete the LFS traceability rows (FR-020, FR-021, US5-1 to US5-4) in `docs/serve-v0.md`: remove every `pending WP14` marker and name the real `TestServeLFS...` functions. With `serve_lfs_test.go` present, WP13's `TestServeQualityTraceabilityTestsExist` then requires every named test to exist and rejects any remaining marker.
 4. Writing style: plain direct sentences, descriptive headings, no em dashes.
 
 **Files**: `docs/serve-v0.md`, `docs/threat-model.md`.
@@ -190,7 +190,7 @@ Real Git LFS client through the shim for round trips, plus direct pkt-line sessi
 - [ ] **C-003**: no new dependency.
 - [ ] **C-010**: the only change outside `serve_lfs*.go` and the docs is the one arm in `serve_session.go`.
 - [ ] Interrupted uploads are never downloadable or counted.
-- [ ] Guide section, threat-model paragraph and executed example in place; WP13's example guard and traceability check stay green.
+- [ ] Guide section, threat-model paragraph and executed example in place; WP13's example guard and traceability check stay green with no `pending WP14` marker left.
 
 ## Risks
 
