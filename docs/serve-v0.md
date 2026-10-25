@@ -137,7 +137,10 @@ on the `.hn-serve` directory itself, so the layout gains no extra file.
 An administration command holds the lock exclusively while it rewrites the hooks
 and validates the layout. A session command holds it shared while it validates,
 so sessions run side by side and never see a hook script half written. Each
-command releases the lock after validation, before it does its own work. A
+command releases the lock after validation, before it does its own work.
+Administration commands take it exclusively again only while they replace a
+state file, and `hn serve repo create` holds it for its whole import, as
+described in [Administering hosted repositories](#administering-hosted-repositories). A
 command that cannot get the lock within 120 seconds stops with
 `hn: hn serve layout is busy: ...`; run it again when the other command
 finishes.
@@ -305,7 +308,234 @@ with a safe mode such as 0755 is kept as it is. The rewritten
 `authorized_keys` always has mode 0600.
 
 ## Administering hosted repositories
-<!-- section owned by WP05 -->
+
+Every command in this section runs as the server account. The examples use
+`sudo -u hn-serve` from an administrator's shell; logging in as the server
+account works the same way.
+
+### Preparing the server account
+
+Create one unprivileged account for the server and install `hn` at a path the
+hook scripts and `authorized_keys` can name, as root, once:
+
+```sh
+useradd --create-home --shell /bin/sh hn-serve
+install -m 0755 ./hn /usr/local/bin/hn
+```
+
+The server needs Git 2.29 or later, because `hn serve repo create` creates
+each repository in the object format of its source. Participants who use large
+files need the Git LFS client on their own machines. `sshd` must allow
+public-key login for `hn-serve`. With the default `StrictModes yes`, the
+account's home directory and `~/.ssh` must not be writable by group or others.
+
+Run `sudo -u hn-serve hn serve repo list` once to create the layout described
+in [Server account and state layout](#server-account-and-state-layout). It
+prints nothing on a new account.
+
+### Creating a hosted repository
+
+A hosted repository exists only after an administrator creates it. A push
+never creates one, whatever repository name the client asks for. Seed it from
+an existing repository whose default branch already carries
+`.hn/policy.json`:
+
+<!-- example: repo-create -->
+```sh
+sudo -u hn-serve hn serve repo create pingpong --from /srv/import/rust-pingpong.git
+```
+
+```text
+Created hosted repository pingpong
+Protected: refs/heads/main
+LFS quota: 1073741824 bytes
+Clone URL: ssh://hn-serve@git.example.internal/pingpong.git
+```
+
+`--from` takes a local path or any URL that `git fetch` accepts. The clone URL
+is built from the server account's login name and the host name of the
+machine.
+
+`hn serve repo create` imports only branches (`refs/heads/*`) and tags
+(`refs/tags/*`). It leaves behind every other ref of the source, including
+Hubnot actor chains, proposals and other `refs/hn/*` refs, and `refs/notes/*`.
+Hubnot facts reach a hosted repository only through governed pushes, which
+validate each one, so a fact on the server has always passed the server's
+checks. Objects are checked with `fetch.fsckObjects` during the import, and a
+source with a malformed object is refused.
+
+The new repository protects `refs/heads/main` unless you name other branches.
+Give `--protect` once per branch, as a short name such as `release` or a full
+ref such as `refs/heads/release`. The first one is the default protected
+branch, and the repository's `HEAD` points to it. `--lfs-quota BYTES` sets the
+Git LFS quota, which defaults to 1073741824 bytes (1 GiB). Push budgets start
+at the defaults of `hn replication select`.
+
+Each protected branch must exist in the source, and its tip must hold a
+`.hn/policy.json` that `hn` can parse. A protected branch without valid policy
+could never move, because every update to it is checked against that policy.
+Creation is refused, with a message that names the branch and the reason, in
+any of these cases:
+
+- the name is not a valid repository name, or a repository with that name
+  exists;
+- a protected branch is missing from the source;
+- a protected branch's tip has no `.hn/policy.json`, or one that does not
+  parse;
+- the source cannot be read, has no refs, or holds objects that fail the
+  object checks.
+
+The command builds the repository in a staging directory below `state/tmp/`
+and moves it into `repositories/` and `state/repos/` only after every check
+has passed. A refused creation therefore leaves nothing in either directory.
+While it runs, it holds the layout lock, so other `hn serve` commands, pushes
+included, wait for it for up to 120 seconds. If the command is interrupted,
+for example with Ctrl-C during a long import, the staging directory stays
+behind and every `hn serve` command refuses to run until the next
+administration command removes it. Run `hn serve repo list` to clean up.
+
+`hn serve repo create` writes no hooks and no `core.hooksPath` into the
+repository. The wrapper passes the server's hooks to Git on the command line
+for every push.
+
+### Binding and removing keys
+
+Every participant who connects needs a key binding, and that includes CI
+runners and verifiers, because they publish results with `hn sync`. Each
+participant sends their SSH public key file and their full actor fingerprint,
+which `hn identity show` prints. Bind the key to the actor:
+
+<!-- example: key-add -->
+```sh
+sudo -u hn-serve hn serve key add --actor 4f1c9a6d0d2b7e3a8c5f6e1b9d0a7c3e2f4b6d8a0c1e3f5a7b9d1c3e5f7a9b1c alice.pub
+```
+
+```text
+Bound SHA256:Jd8bC8QWw0m0Y4l6m6yZ1gq5q3o9s0Kc2b2f4QwA9eU to actor 4f1c9a6d0d2b7e3a8c5f6e1b9d0a7c3e2f4b6d8a0c1e3f5a7b9d1c3e5f7a9b1c
+```
+
+Give `-` in place of the file name to read the key from standard input. The
+input must hold exactly one non-empty line, up to 16 KiB, in the formats
+described in [Supported key types](#supported-key-types); a line may end with
+LF or CRLF. `--actor` must be the full 64-character lowercase actor
+fingerprint. `hn serve key add` refuses a key that is already bound, to the
+same actor or to another one. To move a key to another actor, remove it first.
+One actor may hold several keys.
+
+List the bindings, one per line in fingerprint order:
+
+```sh
+sudo -u hn-serve hn serve key list
+```
+
+```text
+SHA256:Jd8bC8QWw0m0Y4l6m6yZ1gq5q3o9s0Kc2b2f4QwA9eU 4f1c9a6d0d2b7e3a8c5f6e1b9d0a7c3e2f4b6d8a0c1e3f5a7b9d1c3e5f7a9b1c ssh-ed25519
+```
+
+Remove a binding by its full fingerprint:
+
+```sh
+sudo -u hn-serve hn serve key remove SHA256:Jd8bC8QWw0m0Y4l6m6yZ1gq5q3o9s0Kc2b2f4QwA9eU
+```
+
+```text
+Removed SHA256:Jd8bC8QWw0m0Y4l6m6yZ1gq5q3o9s0Kc2b2f4QwA9eU from actor 4f1c9a6d0d2b7e3a8c5f6e1b9d0a7c3e2f4b6d8a0c1e3f5a7b9d1c3e5f7a9b1c
+```
+
+The removed key is refused on its next connection. Connections that are
+already open finish normally.
+
+Both commands save `state/registry.json` first and then rewrite the managed
+block in `authorized_keys`. If the second step fails, the command stops with:
+
+```text
+hn: registry updated but authorized_keys was not rewritten: CAUSE; rerun any hn serve key or repo command
+```
+
+The system stays safe in that state: a newly added key cannot connect yet, and
+a removed key that connects finds no binding and is refused. Fix the cause, for
+example the mode of `~/.ssh`, and run any `hn serve key` or `hn serve repo`
+command to write the block.
+
+### Listing and inspecting repositories
+
+`hn serve repo list` prints one repository name per line in byte order.
+`hn serve repo show NAME` prints its configuration:
+
+```sh
+sudo -u hn-serve hn serve repo show pingpong
+```
+
+```text
+name: pingpong
+path: /home/hn-serve/.hn-serve/repositories/pingpong.git
+protected: refs/heads/main
+lfs-quota: 1073741824
+lfs-stored: 0
+max-events: 10000
+max-objects: 100000
+max-object-bytes: 67108864
+max-attachment-bytes: 16777216
+max-total-bytes: 1073741824
+```
+
+There is one `protected:` line per protected branch, the default first.
+`lfs-stored` is the total size of the stored Git LFS objects. The `max-` lines
+are the push budgets, with the names and meaning they have in
+`hn replication show`.
+
+### Changing protected branches, quotas and budgets
+
+`hn serve repo set NAME` changes a repository's configuration and prints it in
+the `repo show` format:
+
+```sh
+sudo -u hn-serve hn serve repo set pingpong --protect release --lfs-quota 2147483648
+```
+
+- `--protect REF` protects another branch. As with `repo create`, the branch
+  must exist and its tip must hold a valid `.hn/policy.json`.
+- `--unprotect REF` stops protecting a branch. The last protected branch
+  cannot be unprotected, and one ref cannot appear in both flags. When you
+  unprotect the default branch, the next remaining protected branch becomes
+  the default, and `HEAD` follows it.
+- `--lfs-quota BYTES` sets the Git LFS quota.
+- `--max-events`, `--max-objects`, `--max-object-bytes`,
+  `--max-attachment-bytes` and `--max-total-bytes` set the push budgets. Each
+  must be a positive integer, as in `hn replication select`.
+
+Every check runs before anything is written, so a refused change leaves the
+configuration as it was. The command holds the repository lock while it checks
+and saves, so no push moves a branch between its policy check and the new
+configuration. Each run also points `HEAD` at the default protected branch;
+rerunning `hn serve repo set NAME` without flags repairs a `HEAD` that an
+interrupted change left behind.
+
+### How administration commands coordinate
+
+Administration commands take a lock on `state/tmp/admin.lock` before they
+validate the layout and hold it until they finish, so two administrators never
+interleave registry or repository changes. A command that waits 120 seconds
+for it stops with `hn: hn serve administration is busy: ...`.
+`hn serve repo lock-exec` releases this lock before it waits for the
+repository lock, so a long recovery does not block key changes.
+
+Every administration command rewrites the managed block in `authorized_keys`
+from the registry, in addition to the hook scripts. A command that changes
+state, such as `repo create`, `repo set`, `key add` or `key remove`, rewrites
+the block before its own change and stops when the block cannot be written,
+for example when `~/.ssh` is writable by group or others. The read-only
+commands `repo list`, `repo show` and `key list`, and `repo lock-exec`, print
+`hn serve: warning: authorized_keys was not rewritten: ...` and still run, so
+you can inspect a broken setup or recover a repository.
+
+### Running a command under the repository lock
+
+`hn serve repo lock-exec NAME -- COMMAND [ARG]...` runs one command in the bare
+repository while it holds the repository lock, for repairs outside the
+governed push path. The procedure for a protected branch whose tip has no
+valid policy is in
+[Recovering a protected branch](#recovering-a-protected-branch).
 
 ## Connecting over SSH
 <!-- section owned by WP06 -->

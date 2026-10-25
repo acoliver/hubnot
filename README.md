@@ -345,3 +345,4 @@ promise global erasure from every replica.
 - [CI and runner threat model](docs/ci-v0.md)
 - [Hosted Git compatibility](docs/host-compatibility.md)
 - [Operational self-hosting proof](docs/self-hosting-alpha.md)
+- [hn serve: governed local Git hosting](docs/serve-v0.md)

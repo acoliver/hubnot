@@ -13,11 +13,15 @@ import (
 
 const serveRootRefusal = "hn serve refuses to run as root; create an unprivileged user for the server"
 
-// serveRoute is one hn serve subcommand. run receives a layout that cmdServe
-// has already validated in mode, so no subcommand can skip validation.
+// serveRoute is one hn serve subcommand. cmdServe validates the layout in
+// mode before it calls the route, so no subcommand can skip validation.
+// Session routes set run, which receives the validated layout.
+// Administration routes set administer, which runs inside the
+// administration preamble (runServeAdministration).
 type serveRoute struct {
-	mode serveValidationMode
-	run  func(layout serveLayout, args []string) error
+	mode       serveValidationMode
+	run        func(layout serveLayout, args []string) error
+	administer func(admin *serveAdministration, args []string) error
 }
 
 // serveRouteFor maps a subcommand to its route. repo and key use
@@ -28,9 +32,9 @@ type serveRoute struct {
 func serveRouteFor(subcommand string) (serveRoute, bool) {
 	switch subcommand {
 	case "repo":
-		return serveRoute{mode: serveAdministrationValidation, run: cmdServeRepo}, true
+		return serveRoute{mode: serveAdministrationValidation, administer: cmdServeRepo}, true
 	case "key":
-		return serveRoute{mode: serveAdministrationValidation, run: cmdServeKey}, true
+		return serveRoute{mode: serveAdministrationValidation, administer: cmdServeKey}, true
 	}
 	return serveRoute{}, false
 }
@@ -50,6 +54,9 @@ func cmdServe(args []string) error {
 	if err != nil {
 		return err
 	}
+	if route.mode == serveAdministrationValidation {
+		return runServeAdministration(layout, route.administer, args[1:])
+	}
 	if err := prepareServeLayout(layout, route.mode); err != nil {
 		return err
 	}
@@ -58,6 +65,9 @@ func cmdServe(args []string) error {
 
 // prepareServeLayout creates the fixed directories for administration
 // commands, then validates the whole layout. Session commands only validate.
+// cmdServe sends administration routes through runServeAdministration
+// instead, which performs the same two steps with the administration lock
+// taken between them.
 func prepareServeLayout(layout serveLayout, mode serveValidationMode) error {
 	if mode == serveAdministrationValidation {
 		if err := ensureServeLayout(layout); err != nil {
@@ -107,32 +117,48 @@ func parseServeTestUID(value string) (int, error) {
 	return int(uid), nil
 }
 
-// Administration subcommands. WP05 adds repo create, repo set, key add and
-// key remove as further cases.
+// Administration subcommands. They run inside the administration preamble;
+// repo create, repo set, key add and key remove live in serve_admin.go.
 
-func cmdServeRepo(layout serveLayout, args []string) error {
+// The bare-subcommand usage texts predate the write commands and are kept
+// byte for byte because WP01's tests pin them; hn help lists every
+// subcommand.
+func cmdServeRepo(admin *serveAdministration, args []string) error {
 	if len(args) == 0 {
 		return usageError("usage: hn serve repo list|show|lock-exec ...")
 	}
+	layout := admin.layout
 	switch args[0] {
+	case "create":
+		return cmdServeRepoCreate(admin, args[1:])
 	case "list":
+		admin.repairAuthorizedKeys()
 		return cmdServeRepoList(layout, args[1:])
 	case "show":
+		admin.repairAuthorizedKeys()
 		return cmdServeRepoShow(layout, args[1:])
+	case "set":
+		return cmdServeRepoSet(admin, args[1:])
 	case "lock-exec":
-		return cmdServeRepoLockExec(layout, args[1:])
+		admin.repairAuthorizedKeys()
+		return cmdServeRepoLockExec(admin, args[1:])
 	default:
 		return fmt.Errorf("unknown hn serve repo subcommand %q; run 'hn help'", args[0])
 	}
 }
 
-func cmdServeKey(layout serveLayout, args []string) error {
+func cmdServeKey(admin *serveAdministration, args []string) error {
 	if len(args) == 0 {
 		return usageError("usage: hn serve key list")
 	}
 	switch args[0] {
+	case "add":
+		return cmdServeKeyAdd(admin, args[1:])
+	case "remove":
+		return cmdServeKeyRemove(admin, args[1:])
 	case "list":
-		return cmdServeKeyList(layout, args[1:])
+		admin.repairAuthorizedKeys()
+		return cmdServeKeyList(admin.layout, args[1:])
 	default:
 		return fmt.Errorf("unknown hn serve key subcommand %q; run 'hn help'", args[0])
 	}
@@ -167,6 +193,13 @@ func cmdServeRepoShow(layout serveLayout, args []string) error {
 	if err != nil {
 		return err
 	}
+	return printServeRepo(layout, config)
+}
+
+// printServeRepo prints the hn serve repo show format, which hn serve repo
+// set also prints after a change.
+func printServeRepo(layout serveLayout, config serveRepoConfig) error {
+	name := config.Name
 	stored, err := serveLFSStoredBytes(layout, name)
 	if err != nil {
 		return err
@@ -214,6 +247,17 @@ func serveLFSStoredBytes(layout serveLayout, name string) (int64, error) {
 	return total, nil
 }
 
+// acquireServeRepoLock takes the repository lock that pushes, lock-exec and
+// repo set share, and reports a lock that stays busy for the whole wait as
+// repository-busy.
+func acquireServeRepoLock(layout serveLayout, name string) (func() error, error) {
+	release, err := acquireServeLock(layout.RepoLock(name), serveLockWait())
+	if errors.Is(err, errServeLockBusy) {
+		return nil, fmt.Errorf("repository-busy: another push or lock-exec holds the lock for %s; try again when it finishes", name)
+	}
+	return release, err
+}
+
 // requireServeHostedRepository refuses a malformed or unregistered name.
 // Validation has already checked that a hosted name has both a real
 // repositories/NAME.git directory and its state directory.
@@ -231,19 +275,22 @@ func requireServeHostedRepository(layout serveLayout, name string) error {
 
 // cmdServeRepoLockExec runs one command under the repository lock, for the
 // documented recovery of a protected tip without valid policy. It does not
-// use a shell: COMMAND and its arguments go straight to exec.
-func cmdServeRepoLockExec(layout serveLayout, args []string) error {
+// use a shell: COMMAND and its arguments go straight to exec. It releases
+// the administration lock first, so a long recovery does not block key or
+// repository changes.
+func cmdServeRepoLockExec(admin *serveAdministration, args []string) error {
 	if len(args) < 3 || args[1] != "--" {
 		return usageError("usage: hn serve repo lock-exec NAME -- COMMAND [ARG]...")
 	}
+	layout := admin.layout
 	name := args[0]
 	if err := requireServeHostedRepository(layout, name); err != nil {
 		return err
 	}
-	release, err := acquireServeLock(layout.RepoLock(name), serveLockWait())
-	if errors.Is(err, errServeLockBusy) {
-		return fmt.Errorf("repository-busy: another push or lock-exec holds the lock for %s; try again when it finishes", name)
+	if err := admin.finish(); err != nil {
+		return err
 	}
+	release, err := acquireServeRepoLock(layout, name)
 	if err != nil {
 		return err
 	}

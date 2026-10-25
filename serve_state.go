@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -35,6 +36,8 @@ const (
 	serveFingerprintPrefix     = "SHA256:"
 	serveBranchRefPrefix       = "refs/heads/"
 	serveHookStagingPrefix     = ".hn-hook-"
+	serveDefaultProtectedRef   = "refs/heads/main"
+	serveDefaultLFSQuotaBytes  = 1 << 30
 )
 
 // serveHookNames lists the generated hook scripts in byte order, which is
@@ -795,6 +798,61 @@ func loadServeRegistry(layout serveLayout) (serveRegistry, error) {
 	return registry, nil
 }
 
+// encodeServeRegistry sorts the bindings by fingerprint, validates the
+// result and returns the bytes saveServeRegistry stores. Encoding the
+// decoded form of these bytes yields them again.
+func encodeServeRegistry(registry serveRegistry) ([]byte, error) {
+	keys := slices.Clone(registry.Keys)
+	if keys == nil {
+		keys = []serveKeyBinding{}
+	}
+	sort.Slice(keys, func(i, j int) bool { return keys[i].Fingerprint < keys[j].Fingerprint })
+	registry.Keys = keys
+	if err := validateServeRegistry(registry); err != nil {
+		return nil, err
+	}
+	return encodeServeStateJSON(registry)
+}
+
+// saveServeRegistry replaces state/registry.json atomically.
+func saveServeRegistry(layout serveLayout, registry serveRegistry) error {
+	contents, err := encodeServeRegistry(registry)
+	if err != nil {
+		return err
+	}
+	return writeServeStateFile(layout, layout.Registry, contents)
+}
+
+// encodeServeStateJSON is the one serialization for server state files:
+// two-space indentation and a final newline.
+func encodeServeStateJSON(value any) ([]byte, error) {
+	contents, err := json.MarshalIndent(value, "", "  ")
+	if err != nil {
+		return nil, err
+	}
+	return append(contents, '\n'), nil
+}
+
+// writeServeStateFile replaces a 0600 state file inside the live layout.
+// writePrivateFileAtomic stages a .hn-private-* file next to path, which a
+// concurrent validator would report as an unexpected entry, so the layout
+// lock is held exclusively from staging to rename (see lockServeLayout).
+// Callers must not already hold the layout lock.
+func writeServeStateFile(layout serveLayout, path string, contents []byte) error {
+	release, err := lockServeLayout(layout, serveLockExclusive)
+	if err != nil {
+		return err
+	}
+	err = writePrivateFileAtomic(path, contents)
+	if err != nil {
+		err = serveStateError(path, err)
+	}
+	if releaseErr := release(); releaseErr != nil && err == nil {
+		err = serveStateError(layout.Root, releaseErr)
+	}
+	return err
+}
+
 // serveKeyType is the key type field of a stored public key line, which
 // validServePublicKeyLine has already checked.
 func serveKeyType(binding serveKeyBinding) string {
@@ -934,6 +992,58 @@ func loadServeRepoConfig(layout serveLayout, name string) (serveRepoConfig, erro
 		return serveRepoConfig{}, serveStateError(path, err)
 	}
 	return config, nil
+}
+
+// newServeRepoConfig returns the contract defaults for name: the given
+// protected refs (refs/heads/main when none are given) ordered by
+// orderServeProtected, a 1 GiB LFS quota and the default replication budgets.
+func newServeRepoConfig(name string, protected []string) (serveRepoConfig, error) {
+	if len(protected) == 0 {
+		protected = []string{serveDefaultProtectedRef}
+	}
+	config := serveRepoConfig{
+		Version:       serveRepoConfigVersion,
+		Name:          name,
+		Protected:     orderServeProtected(protected[0], protected[1:]),
+		LFSQuotaBytes: serveDefaultLFSQuotaBytes,
+		Budgets:       defaultReplicationBudgets(),
+	}
+	if err := validateServeRepoConfig(config, name); err != nil {
+		return serveRepoConfig{}, err
+	}
+	return config, nil
+}
+
+// orderServeProtected puts defaultRef first and the other refs after it in
+// byte order without duplicates, the order validateServeRepoConfig requires.
+func orderServeProtected(defaultRef string, others []string) []string {
+	rest := make([]string, 0, len(others))
+	for _, ref := range others {
+		if ref != defaultRef {
+			rest = append(rest, ref)
+		}
+	}
+	sort.Strings(rest)
+	return append([]string{defaultRef}, slices.Compact(rest)...)
+}
+
+// encodeServeRepoConfig validates config and returns the bytes
+// saveServeRepoConfig stores.
+func encodeServeRepoConfig(config serveRepoConfig) ([]byte, error) {
+	if err := validateServeRepoConfig(config, config.Name); err != nil {
+		return nil, err
+	}
+	return encodeServeStateJSON(config)
+}
+
+// saveServeRepoConfig replaces state/repos/NAME/config.json atomically for a
+// repository that is already hosted.
+func saveServeRepoConfig(layout serveLayout, config serveRepoConfig) error {
+	contents, err := encodeServeRepoConfig(config)
+	if err != nil {
+		return err
+	}
+	return writeServeStateFile(layout, layout.RepoConfig(config.Name), contents)
 }
 
 // Branch owners (state/repos/NAME/branches.json).
