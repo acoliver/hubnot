@@ -1,0 +1,19 @@
+{
+  "wp_id": "WP03",
+  "captured_at": "2026-10-25T01:56:41Z",
+  "base_branch": "mission/hn-serve",
+  "base_commit": "0983838156a5949d43d5bc19dbb0291b3c619c94",
+  "test_runner": "pytest",
+  "total": 1,
+  "passed": 0,
+  "failed": 1,
+  "skipped": 0,
+  "failures": [
+    {
+      "test": "<gate-coverage-junit>",
+      "error": "no JUnit XML artifact produced by the scoped run",
+      "file": "unknown"
+    }
+  ],
+  "source_identity": "GateCoverageScopeSource/junit_xml"
+}

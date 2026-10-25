@@ -136,8 +136,8 @@ func publishLocalFacts(remote string, verifiedActorHeads map[string]string) erro
 		if actorPublicationCovered(ref, verifiedActorHeads[ref]) {
 			continue
 		}
-		if _, err := gitOutput("push", remote, ref+":"+ref); err != nil {
-			return replicationPhaseError(remote, "actor publication")
+		if err := servePushRef(remote, ref, replicationPhaseError(remote, "actor publication")); err != nil {
+			return err
 		}
 	}
 	proposalRefs, err := gitText("for-each-ref", "--format=%(refname)", "refs/hn/proposals")
@@ -145,8 +145,8 @@ func publishLocalFacts(remote string, verifiedActorHeads map[string]string) erro
 		return replicationPhaseError(remote, "proposal publication inspection")
 	}
 	for _, ref := range strings.Fields(proposalRefs) {
-		if _, err := gitOutput("push", remote, ref+":"+ref); err != nil {
-			return replicationPhaseError(remote, "proposal publication")
+		if err := servePushRef(remote, ref, replicationPhaseError(remote, "proposal publication")); err != nil {
+			return err
 		}
 	}
 	memoryRefs, err := gitText("for-each-ref", "--format=%(refname)", memoryRefPrefix)
@@ -157,8 +157,8 @@ func publishLocalFacts(remote string, verifiedActorHeads map[string]string) erro
 		if _, _, ok := parseMemoryRef(ref); !ok {
 			return replicationPhaseError(remote, "memory publication inspection")
 		}
-		if _, err := gitOutput("push", remote, ref+":"+ref); err != nil {
-			return replicationPhaseError(remote, "memory publication")
+		if err := servePushRef(remote, ref, replicationPhaseError(remote, "memory publication")); err != nil {
+			return err
 		}
 	}
 	return nil
