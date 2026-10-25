@@ -52,6 +52,8 @@ func run(args []string) error {
 		return cmdDecide(args[1:])
 	case "merge":
 		return cmdMerge(args[1:])
+	case "serve":
+		return cmdServe(args[1:])
 	case "sync":
 		return cmdSync(args[1:])
 	case "log":
@@ -103,6 +105,9 @@ Usage:
   hn runner watch --accept-pipeline NAME --accept-actor ACTOR
   hn decide PROPOSAL <--accept|--reject> [--body TEXT]
   hn merge PROPOSAL
+  hn serve repo create|list|show|set|lock-exec ...
+  hn serve key add|remove|list ...
+  hn serve git --key FINGERPRINT
   hn replication select|show [REMOTE] [full actor fingerprints and event IDs] [budgets]
   hn sync [REMOTE] [--recover-shallow]
   hn log
