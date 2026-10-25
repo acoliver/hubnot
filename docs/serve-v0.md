@@ -1084,10 +1084,166 @@ remote: hn-serve: refs/hn/actors/8a4b76e4bcacb0871f481b895d3be3de30d633f0fec3117
 ```
 
 ## Protected branches
-<!-- section owned by WP09 -->
+
+A protected branch moves only when the commit it moves to is the signed head
+of a proposal that the repository's governance has accepted and tested.
+
+### What protects a branch
+
+The server configuration decides which branches are protected. The list lives
+in `state/repos/NAME/config.json`, defaults to `refs/heads/main`, and changes
+only through `hn serve repo create --protect` and `hn serve repo set`, as
+described in
+[Changing protected branches, quotas and budgets](#changing-protected-branches-quotas-and-budgets).
+The server never reads this list from pushed content, so a push cannot
+unprotect a branch.
+
+### The protected branch invariant
+
+After every successful push, the tip of each protected branch is the signed
+head of a candidate that is ready and accepted under two policies: its signed
+base policy, and the destination policy, which is the `.hn/policy.json` at the
+tip the push replaced. That head carries the trusted CI results both policies
+require. The server checks this with the same signed facts every client can
+verify. It never creates a commit and never signs anything, and its
+acceptance is not evidence: a client trusts the branch only through the facts.
+
+### The checks for a protected update
+
+For each update of a protected branch from the current tip `T` to the pushed
+commit `H`, the server runs these checks in order and reports the first one
+that fails:
+
+1. A deletion is `protected-deletion`.
+2. A creation is `protected-policy-invalid`. Only the administrator creates a
+   protected branch, with `hn serve repo create` or `hn serve repo set`.
+3. With `hn-expected-tip`, a tip other than `T` is `protected-stale-tip`. This
+   check comes before every policy and candidate check, so the loser of a
+   race always gets this code.
+4. A tip `T` without a valid `.hn/policy.json` is `protected-policy-invalid`.
+   Every update of the branch is refused until the administrator repairs it,
+   as described in [Recovering a protected branch](#recovering-a-protected-branch).
+5. A head `H` that does not descend from `T` is `protected-not-fast-forward`,
+   naming `T` and `H`.
+6. When no candidate in the hosted facts or the push has `H` as its signed
+   head, the update is `protected-no-proposal` with
+   `missing=proposal,review,ci,acceptance`. With `hn-advance`, the named
+   candidate is the only one considered, and it must have head `H`.
+7. A candidate whose base commit has no valid `.hn/policy.json` is
+   `protected-policy-invalid`.
+8. The candidate's code ref `refs/hn/proposals/ID` must be hosted or arrive in
+   the same push and point at `H`; otherwise the update is
+   `proposal-ref-mismatch` with `missing=proposal`.
+9. A candidate that a revision superseded, whose lineage another merged
+   candidate closed, whose lineage has competing merges, that is already
+   recorded as merged, or that a maintainer currently rejects under its base
+   policy is `protected-blocked`. The line names the blocking events.
+10. A candidate that is not ready or not accepted under its base policy is
+    `protected-not-ready`, with `missing` naming each unmet kind: `review`,
+    `ci` or `acceptance`.
+11. A candidate that is not ready or not accepted under the destination
+    policy is `protected-destination-policy`, with the unmet kinds and a
+    sentence naming each unmet threshold.
+12. With `hn-advance`, a pushing actor who is not a maintainer under both the
+    base and the destination policy gets `advance-not-maintainer`.
+
+Facts in the same push count once their actor refs have passed. A maintainer
+can push an acceptance in `refs/hn/actors/ACTOR` together with the protected
+update, and the update is checked with that acceptance. Code counts when its
+proposal ref is hosted or arrives in the same push, so the code-ref exception
+for actor chains described in
+[Proposal code refs and the code-ref exception](#proposal-code-refs-and-the-code-ref-exception)
+never lets a branch move to code the server does not hold.
+
+### Base policy and destination policy
+
+Steps 10 and 11 evaluate the same signed reviews, CI results and decisions
+twice. Step 10 uses the policy at the candidate's base commit, the policy the
+maintainers signed their decisions against. Step 11 uses the destination
+policy's maintainers, trusted reviewers, trusted runners, pipelines and
+thresholds, while it still matches decisions by the base policy digest. A
+reviewer that the destination policy no longer trusts adds nothing to step 11,
+and a pipeline that only the destination policy requires must have a valid
+definition at `H`, or step 11 fails with `missing=ci`. The rules are in
+[Destination policy on a protected branch](governance-v0.md#destination-policy-on-a-protected-branch).
+
+For example, when the base policy requires one approval and the destination
+policy requires two, a candidate with one approval passes step 10 and fails
+step 11 with the sentence part
+`destination policy requires 2 approvals; 1 trusted approval found`.
+
+### Fast-forward only, and how to revise a stale proposal
+
+The server never merges, rebases or creates a commit, because the commit that
+reaches a protected branch must be the exact commit that CI tested. When the
+branch moved after a proposal was opened, so that its head no longer descends
+from the tip, the update is `protected-not-fast-forward` and the next action
+is `revise the proposal onto T with hn proposal revise`. A revision is a new
+candidate with a new head on the current tip, and it needs fresh review, CI
+and acceptance.
+
+### Several candidates with the same head
+
+Several candidates may sign the same head, for example a rejected proposal
+and a later proposal for the same commit. Without `hn-advance`, the update is
+accepted when any of them passes steps 7 to 11. When none passes, the line
+reports the candidate whose first failing check comes latest in the list,
+choosing the lowest event ID when two fail at the same check, and `ids` lists
+every candidate with head `H` before any other ID.
+
+### Who may push a protected branch
+
+Any mapped actor may push a protected branch directly with `git push`, and the
+push passes under the same checks. Such a push does not need to come from a
+maintainer, because the signed facts already carry the maintainers'
+acceptance. An advancement request with the `hn-advance` push option, which
+`hn merge --remote` sends, additionally requires the pushing actor to be a
+maintainer under both policies (step 12). See
+[Advancing a protected branch](#advancing-a-protected-branch).
+
+### Rejection examples for protected branches
+
+<!-- example: reject-direct-main -->
+A mapped actor pushes `main` one commit ahead with no proposal (US1-2):
+
+```text
+remote: hn-serve/1 reject ref=refs/heads/main actor=4f1c9a6d0d2b7e3a8c5f6e1b9d0a7c3e2f4b6d8a0c1e3f5a7b9d1c3e5f7a9b1c code=protected-no-proposal ids=9b2e4c6a8d0f1e3c5a7b9d1f3e5c7a9b2d4f6e8a missing=proposal,review,ci,acceptance next="open a proposal for 9b2e4c6a8d0f1e3c5a7b9d1f3e5c7a9b2d4f6e8a"
+remote: hn-serve: refs/heads/main is protected and 9b2e4c6a has no accepted, CI-tested proposal.
+```
+
+A candidate with an approval and no CI result or acceptance gets
+`code=protected-not-ready`, `ids` naming the candidate,
+`missing=ci,acceptance` and `next="run hn proposal status ID"`. Run that
+command to see which evidence is missing.
 
 ## Recovering a protected branch
-<!-- section owned by WP09 -->
+
+When the tip of a protected branch has no valid `.hn/policy.json`, every
+update of that branch is refused with `protected-policy-invalid`, because
+there is no destination policy to check it against. Governed pushes cannot
+repair the branch. The administrator repairs it outside the governed push
+path:
+
+1. Prepare a repaired commit that descends from the current tip and restores
+   a valid `.hn/policy.json`. Review it with the maintainers out of band, for
+   example with `hn policy check`, since no hosted governance can approve it.
+2. Push the repaired commit to an ordinary branch of the hosted repository,
+   or fetch it into the bare repository, so the server holds its objects.
+3. Move the branch under the repository lock, naming both the repaired
+   commit and the current tip:
+
+   ```sh
+   sudo -u hn-serve hn serve repo lock-exec pingpong -- git update-ref refs/heads/main REPAIRED CURRENT
+   ```
+
+`git update-ref` with an old value moves the branch only when it still points
+at `CURRENT`. If a push or another administrator moved it in the meantime,
+the command fails and changes nothing, so check the new tip and start again.
+
+This procedure bypasses governance by design. The server signs nothing and
+keeps no record of it apart from its effect on the branch, so record the
+repair, the commit and the reason in the administrator's own records. After
+the repair, protected updates are checked against the restored policy again.
 
 ## Advancing a protected branch
 <!-- section owned by WP10 -->

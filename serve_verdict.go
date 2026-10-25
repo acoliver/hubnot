@@ -325,18 +325,12 @@ func checkServeRefUpdate(ctx *serveVerdictContext, update serveRefUpdate, option
 
 // The actor, proposal and memory rules are in serve_verdict_facts.go.
 
-// Placeholder arm. It refuses protected updates until WP09 replaces
-// exactly this function and must stay fail-closed until then.
-
-func serveClassNotEnabled(class serveRefClass) *serveRejection {
-	return &serveRejection{
-		Code:     serveReasonReservedRef,
-		Sentence: string(class) + " updates are not enabled in this build.",
-	}
-}
-
+// checkServeProtectedUpdate applies the protected branch rule in
+// serve_protected.go. Protected updates are checked last, so the facts
+// accepted from actor refs earlier in the push, and the push's proposal
+// refs, are visible to it.
 func checkServeProtectedUpdate(ctx *serveVerdictContext, update serveRefUpdate, options servePushOptions) *serveRejection {
-	return serveClassNotEnabled(serveRefProtected)
+	return evaluateServeProtectedUpdate(ctx, update, options).Rejection
 }
 
 // checkServeTagUpdate: tags are create-only (FR-010).
