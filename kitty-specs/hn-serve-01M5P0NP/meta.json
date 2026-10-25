@@ -26,6 +26,7 @@
   "purpose_tldr": "Add an optional hn serve command that hosts repositories over SSH and refuses protected-branch updates that lack Hubnot governance evidence.",
   "slug": "hn-serve-01M5P0NP",
   "source_description": "Mission brief ../notes/mission-1-hn-serve-brief.md ingested by spec-kitty intake (brief_hash 751c75f89dd92dcfd3e56dcfba6c5c42eafb17479cb5916c116304b10a01bada); specified non-interactively with brief design decisions as maintainer answers.",
+  "status_phase": "1",
   "target_branch": "mission/hn-serve",
   "topology": "coord",
   "vcs": "git"
