@@ -861,7 +861,177 @@ successful. A branch whose owner record is missing then behaves as a branch
 without an owner.
 
 ## Hubnot fact refs and budgets
-<!-- section owned by WP08 -->
+
+Three ref classes carry Hubnot facts: actor chains in `refs/hn/actors/ACTOR`,
+proposal code refs in `refs/hn/proposals/ID` and memory streams in
+`refs/hn/memory/ACTOR/STREAM`. The `pre-receive` hook checks them with the same
+validation code `hn sync` uses when it imports facts from a remote, so the
+server accepts a fact ref exactly when a client would import it. `hn sync`
+publishes each of these refs in its own `git push`, so one sync can produce
+several push log entries.
+
+### Who may push each fact ref
+
+| Ref | Who may push it | What the push may do |
+|----|----|----|
+| `refs/hn/actors/ACTOR` | only the actor bound to the pushing key | create the chain, then append events |
+| `refs/hn/proposals/ID` | any mapped actor | create the ref once, at the candidate's signed head |
+| `refs/hn/memory/ACTOR/STREAM` | only the actor bound to the pushing key | create the stream, then append memories |
+
+The actor comes from the key binding that `hn serve key add` made. Nothing in
+the pushed data can change it. `hn sync` publishes the refs under
+`refs/hn/actors/`, `refs/hn/proposals/` and `refs/hn/memory/`. The chains it
+imports from a remote live under `refs/hn/remotes/`, which it never publishes,
+so an ordinary sync pushes only the clone's own chain.
+
+### Actor chains are append-only
+
+Signed history is immutable: a correction is a new signed event that refers
+to the earlier one. The server therefore refuses a push that deletes an
+actor chain or moves it to a commit that does not descend from the hosted
+value, with `actor-chain-rewrite`. That includes a forced push of an earlier
+commit and a diverging chain whose new event reuses a sequence number the
+hosted chain already has. Append new events instead.
+
+The checks for an actor chain run in this order, and the first failure is
+reported:
+
+1. A deletion or a non-descending update is `actor-chain-rewrite`.
+2. A chain of another actor is `actor-key-mismatch`.
+3. The push must fit the repository budgets, otherwise `over-budget`.
+4. Each appended event must carry a valid signature by the chain's actor,
+   continue the sequence and the previous event ID, have the previous
+   event's commit as its only parent, and hold exactly `event.json`,
+   `signature` and, for a run result, `log.txt`. A failure is
+   `actor-chain-invalid` and names the full event ID of the first failing
+   event, computed from its `event.json` even when the signature is broken,
+   or its commit when `event.json` cannot be read.
+5. Every fact an appended event refers to, such as the issue a comment
+   answers, the proposal a review or run request names, decision evidence or
+   an identity authorization, must be hosted or arrive earlier in the same
+   push. A missing one is `dependency-missing` and names its full ID. A
+   reference to the wrong kind of event, or a decision or merge that does not
+   match its proposal, is `actor-chain-invalid`.
+6. The hosted facts plus the push must still form a valid projection: exact
+   event references, issue relationships and identity continuity. A failure
+   is `actor-chain-invalid`.
+
+The server reads the hosted facts once per push and validates only the
+events the push appends, so the cost of a push grows with what it adds.
+
+The server's acceptance is never evidence. A client that fetches from this
+server validates every fact again before it uses it, and a signed fact is
+trusted only through the policy at the relevant commit. A server that
+accepted a forged fact would still not make clients trust it.
+
+### Proposal code refs and the code-ref exception
+
+A proposal code ref names the commit a proposal event signs as its head.
+`hn proposal open` and `hn proposal revise` create it beside the event.
+The server accepts a new `refs/hn/proposals/ID` when:
+
+1. it does not exist yet; moving or deleting a hosted proposal ref is
+   `proposal-ref-immutable`,
+2. the candidate event `sha256:ID` is hosted or arrives in an actor ref of
+   the same push, otherwise `dependency-missing`,
+3. the candidate is a proposal event whose signed head is the pushed
+   commit, otherwise `proposal-ref-mismatch` naming the candidate, its signed
+   head and the pushed commit,
+4. the pushed commit descends from the candidate's signed base, otherwise
+   `proposal-ref-mismatch`,
+5. the candidate's code fits the repository budgets, otherwise
+   `over-budget`.
+
+To change the code of a proposal, create a revision with
+`hn proposal revise`. The revision is a new candidate with its own code ref,
+and both histories stay available.
+
+Candidate code may arrive after the candidate. An actor chain whose
+`proposal.open` or `proposal.revise` event has no hosted code ref, and no
+code ref in the same push, is accepted when the proposal's base commit is
+hosted or in the push and, whenever the head commit is present, the head
+descends from the base. This lets `hn sync` push the actor chain and then the
+code ref in separate pushes, and lets one push carry both. The exception
+cannot advance a protected branch: an advancement requires the candidate's
+hosted code ref to equal the commit being pushed, as described in
+[Protected branches](#protected-branches).
+
+### Memory streams
+
+A memory stream holds one actor's `hn-memory/0` memories. The server accepts
+an update of `refs/hn/memory/ACTOR/STREAM` when it creates the stream or
+appends to it, the actor is the one bound to the pushing key, the push fits
+the budgets, and the whole stream at the pushed commit passes the same
+`hn-memory/0` validation `hn sync` applies on import: every memory is signed
+by the stream's owner and continues the stream's sequence and previous
+memory ID. A deletion, a rewrite or a validation failure is `memory-invalid`,
+and a stream of another actor is `memory-key-mismatch`.
+
+### Budgets
+
+Each repository has five push budgets. `hn serve repo create` sets the same
+defaults `hn replication select` uses, `hn serve repo show NAME` prints them,
+and `hn serve repo set NAME` changes them (see
+[Changing protected branches, quotas and budgets](#changing-protected-branches-quotas-and-budgets)):
+
+| Budget | Default | What is measured for one pushed ref |
+|----|----|----|
+| `max-events` | 10000 | events in the whole actor chain or memory stream after the push, hosted ones included |
+| `max-objects` | 100000 | Git objects the push makes reachable from the ref that the hosted value did not already reach |
+| `max-object-bytes` | 67108864 (64 MiB) | the largest of those objects |
+| `max-attachment-bytes` | 16777216 (16 MiB) | the largest event attachment in the chain, such as a run log |
+| `max-total-bytes` | 1073741824 (1 GiB) | the total size of those objects |
+
+Limits are inclusive: a measurement equal to its limit passes, and one above
+it is rejected with `over-budget`. The rejection line names the first budget
+the push exceeds, in the order of the table, with its limit and the
+measurement, for example
+`budget=max-events limit=11 measured=12`. The hosted refs stay unchanged.
+
+A proposal code ref is new when it is pushed, so its measurement covers every
+object reachable from the proposal's head, including the history it shares
+with hosted branches, the way client replication measures a new proposal
+selection. Repositories with long histories may need a higher
+`max-objects` or `max-total-bytes` before their proposal refs fit.
+
+### Identity rotation
+
+The server binds each key to one actor. After `hn identity rotate`, a clone
+still holds the predecessor's chain under `refs/hn/actors/`, and `hn sync`
+from that clone with the successor's key gets `actor-key-mismatch` for the
+predecessor's chain. `hn sync` stops publishing at the first rejected push,
+so the refs it would have pushed after that chain stay unpublished too. Bind
+a key for each actor with `hn serve key add` and push each chain with its own
+actor's key.
+
+### Rejection codes for fact refs
+
+| Code | Cause |
+|----|----|
+| `actor-chain-rewrite` | the push deletes or rewrites a hosted actor chain |
+| `actor-key-mismatch` | the actor chain belongs to another actor |
+| `actor-chain-invalid` | an appended event fails signature, sequence, shape or relationship validation, or the hosted facts could not be read |
+| `dependency-missing` | a referenced event, candidate or commit is not hosted and not in the push |
+| `proposal-ref-immutable` | the push moves or deletes a hosted proposal code ref |
+| `proposal-ref-mismatch` | a new proposal code ref is not the candidate's signed head or does not descend from its base |
+| `memory-key-mismatch` | the memory stream belongs to another actor |
+| `memory-invalid` | the push deletes or rewrites a memory stream, or the stream fails `hn-memory/0` validation |
+| `over-budget` | the pushed ref exceeds one of the budgets |
+
+When the server cannot read its hosted facts, every fact ref and every
+protected branch update in the push is rejected with `actor-chain-invalid`
+and the sentence `hn-serve: hosted facts could not be verified; ask the administrator.`.
+The other refs of the push are still checked. The next action for each code
+is in [protocol-v0.md](protocol-v0.md#rejection-lines).
+
+<!-- example: reject-actor-key-mismatch -->
+Actor `4f1c9a6d` fetches actor `8a4b76e4`'s chain from that actor's clone and
+pushes it (US1-3):
+
+```text
+remote: hn-serve/1 reject ref=refs/hn/actors/8a4b76e4bcacb0871f481b895d3be3de30d633f0fec3117a1d76485bc46d4e23 actor=4f1c9a6d0d2b7e3a8c5f6e1b9d0a7c3e2f4b6d8a0c1e3f5a7b9d1c3e5f7a9b1c code=actor-key-mismatch next="push only refs/hn/actors/4f1c9a6d0d2b7e3a8c5f6e1b9d0a7c3e2f4b6d8a0c1e3f5a7b9d1c3e5f7a9b1c"
+remote: hn-serve: refs/hn/actors/8a4b76e4bcacb0871f481b895d3be3de30d633f0fec3117a1d76485bc46d4e23 belongs to actor 8a4b76e4bcacb0871f481b895d3be3de30d633f0fec3117a1d76485bc46d4e23 and this key is bound to actor 4f1c9a6d0d2b7e3a8c5f6e1b9d0a7c3e2f4b6d8a0c1e3f5a7b9d1c3e5f7a9b1c.
+```
 
 ## Protected branches
 <!-- section owned by WP09 -->

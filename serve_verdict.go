@@ -126,14 +126,21 @@ type serveVerdictContext struct {
 	Owners serveBranchOwners
 
 	// PushFacts holds facts accepted from earlier classes of this push.
-	// WP08's actor-ref rule fills it; proposal and protected checks read it
-	// next to HostedEvents.
+	// The actor-ref rule appends the events of each accepted actor update;
+	// proposal and protected checks read it next to HostedEvents. Events
+	// of a rejected actor update never enter it.
 	PushFacts []StoredEvent
+
+	// PushUpdates is every ref update of the push, set by
+	// evaluateServePush. The actor-ref rule reads the proposal refs created
+	// in the same push.
+	PushUpdates []serveRefUpdate
 
 	loadHostedEvents  func() ([]StoredEvent, error)
 	hostedLoaded      bool
 	hostedEvents      []StoredEvent
 	hostedErr         error
+	hostedByID        map[string]StoredEvent
 	maintainersLoaded bool
 	maintainers       []string
 }
@@ -155,9 +162,9 @@ func newServeVerdictContext(gitDir, actor, key string, config serveRepoConfig, o
 }
 
 // HostedEvents returns every verified event reachable from the hosted
-// refs/hn/actors/* refs, loading them at most once per hook run. WP08's
-// actor, proposal and memory rules and WP09's protected rule are its
-// callers; ordinary branches, tags and reserved refs never need it.
+// refs/hn/actors/* refs, loading them at most once per hook run. The actor,
+// proposal and memory rules and WP09's protected rule are its callers;
+// ordinary branches, tags and reserved refs never need it.
 func (ctx *serveVerdictContext) HostedEvents() ([]StoredEvent, error) {
 	if !ctx.hostedLoaded {
 		ctx.hostedLoaded = true
@@ -202,13 +209,20 @@ func evaluateServePush(ctx *serveVerdictContext, updates []serveRefUpdate, optio
 	}
 	ordered := slices.Clone(updates)
 	sort.SliceStable(ordered, func(i, j int) bool { return ordered[i].Ref < ordered[j].Ref })
+	ctx.PushUpdates = ordered
+	hostedFailed := serveHostedFactsUnavailable(ctx, ordered)
 	var rejections []serveRejection
 	for _, class := range serveEvaluationOrder {
 		for _, update := range ordered {
 			if update.Class != class {
 				continue
 			}
-			rejection := checkServeRefUpdate(ctx, update, options)
+			var rejection *serveRejection
+			if hostedFailed && serveClassReadsFacts(class) {
+				rejection = serveHostedFactsRejection()
+			} else {
+				rejection = checkServeRefUpdate(ctx, update, options)
+			}
 			if rejection == nil {
 				continue
 			}
@@ -222,6 +236,30 @@ func evaluateServePush(ctx *serveVerdictContext, updates []serveRefUpdate, optio
 	}
 	sortServeRejections(rejections)
 	return rejections
+}
+
+// serveClassReadsFacts reports whether a class's rule depends on the hosted
+// facts: the three Hubnot fact classes and protected branches.
+func serveClassReadsFacts(class serveRefClass) bool {
+	switch class {
+	case serveRefActor, serveRefProposal, serveRefMemory, serveRefProtected:
+		return true
+	}
+	return false
+}
+
+// serveHostedFactsUnavailable loads the hosted facts when the push has an
+// update that needs them and reports whether that load failed. A failure
+// fails every such update closed with actor-chain-invalid; tags, ordinary
+// branches and reserved refs are still checked and never load the facts.
+func serveHostedFactsUnavailable(ctx *serveVerdictContext, updates []serveRefUpdate) bool {
+	for _, update := range updates {
+		if serveClassReadsFacts(update.Class) {
+			_, err := ctx.HostedEvents()
+			return err != nil
+		}
+	}
+	return false
 }
 
 // rejectServeEveryUpdate rejects each ref update with the same code and
@@ -274,27 +312,16 @@ func checkServeRefUpdate(ctx *serveVerdictContext, update serveRefUpdate, option
 	}
 }
 
-// Placeholder arms. Each refuses its class until the named work package
-// replaces exactly that function: WP08 the actor, proposal and memory arms,
-// WP09 the protected arm. They must stay fail-closed until then.
+// The actor, proposal and memory rules are in serve_verdict_facts.go.
+
+// Placeholder arm. It refuses protected updates until WP09 replaces
+// exactly this function and must stay fail-closed until then.
 
 func serveClassNotEnabled(class serveRefClass) *serveRejection {
 	return &serveRejection{
 		Code:     serveReasonReservedRef,
 		Sentence: string(class) + " updates are not enabled in this build.",
 	}
-}
-
-func checkServeActorUpdate(ctx *serveVerdictContext, update serveRefUpdate) *serveRejection {
-	return serveClassNotEnabled(serveRefActor)
-}
-
-func checkServeProposalUpdate(ctx *serveVerdictContext, update serveRefUpdate) *serveRejection {
-	return serveClassNotEnabled(serveRefProposal)
-}
-
-func checkServeMemoryUpdate(ctx *serveVerdictContext, update serveRefUpdate) *serveRejection {
-	return serveClassNotEnabled(serveRefMemory)
 }
 
 func checkServeProtectedUpdate(ctx *serveVerdictContext, update serveRefUpdate, options servePushOptions) *serveRejection {
