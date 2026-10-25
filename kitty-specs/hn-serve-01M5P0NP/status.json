@@ -1,7 +1,7 @@
 {
-  "event_count": 69,
-  "last_event_id": "01M5S1SDRYMCHJFPNYJHXVYR2Q",
-  "materialized_at": "2026-10-25T08:10:46.943138+00:00",
+  "event_count": 70,
+  "last_event_id": "01M5S1YQ9K6WCZ8ZW1VYHTD2K0",
+  "materialized_at": "2026-10-25T08:13:40.531743+00:00",
   "mission_number": "",
   "mission_slug": "hn-serve-01M5P0NP",
   "mission_type": "",
@@ -11,9 +11,9 @@
     "canceled": 0,
     "claimed": 0,
     "done": 0,
-    "for_review": 1,
+    "for_review": 0,
     "in_progress": 1,
-    "in_review": 0,
+    "in_review": 1,
     "planned": 8
   },
   "work_packages": {
@@ -160,14 +160,14 @@
       }
     },
     "WP05": {
-      "actor": "user",
-      "agent": null,
+      "actor": "llxprt",
+      "agent": "llxprt",
       "agent_profile": "__resolved_profile_absent__",
       "agent_profile_version": "__resolved_profile_version_absent__",
       "force_count": 1,
-      "lane": "for_review",
-      "last_event_id": "01M5S1SDRYMCHJFPNYJHXVYR2Q",
-      "last_transition_at": "2026-10-25T08:10:46.943138+00:00",
+      "lane": "in_review",
+      "last_event_id": "01M5S1YQ9K6WCZ8ZW1VYHTD2K0",
+      "last_transition_at": "2026-10-25T08:13:40.531743+00:00",
       "model": "__resolved_model_absent__",
       "notes": [
         "Implemented T027-T033 in commit 4d66428 (lane-a), followed by the authorized planning-artifact cleanup commit 1db34e7. New serve_admin.go: an administration preamble (state/tmp/admin.lock, abandoned create-staging cleanup, validation with hook regeneration, authorized_keys rewrite), repo create (staged under state/tmp with the layout lock held exclusively, refs/heads+refs/tags only, fetch.fsckObjects, marker, HEAD, protected-tip policy check, rename only after every check passes), repo set (protected-tip rule under the repo lock, default promotion, HEAD follows), key add/remove (render, save registry, rewrite block, lag message). WP01 list/show/lock-exec/key list reused; lock-exec now releases the admin lock before the repo lock. serve_state.go: atomic saveServeRegistry/saveServeRepoConfig/newServeRepoConfig that hold the layout lock while staging. New serve_harness_test.go and serve_admin_test.go (13 TestServeAdmin tests: import scope, sha256, refusals leave nothing incl. fsck-hostile source, CRLF/no-final-newline preservation, two keys per actor, concurrent admins, set, lock-exec passthrough and busy, NFR-008, uid 0, staging cleanup, byte-stable writers, documented examples). Mutation checks (import refs/hn, fsck off, no admin lock) are all caught. Guide admin section and README link added. All code is reached from hn serve. Gate: (1) gofmt -l clean on all changed .go files; (2) go vet and go build pass; (3) go test -race -count=1 -timeout 60m -skip ^TestMemoryIndexTenThousandRecordsPerformanceAndRecovery$ ./... ok (353.6s); (4) the perf test without -race passes (32.3s). No pre-existing test modified. Reviewer notes: bare hn serve repo/key usage strings kept as WP01 tests pin them; read-only commands warn instead of failing on authorized_keys errors because TestServeStateKeyListPrintsBindings uses fake key blobs; one sentence in the WP01 Concurrent commands section was amended so the lock description stays accurate; WP02 guide lines 273-276 have a pre-existing broken CRLF code span (not touched). Lane-c merge into lane-a was resolved by taking the lane-c status.json (planning bookkeeping only).",
@@ -182,9 +182,9 @@
         "reviewer": "user",
         "verdict": "changes_requested"
       },
-      "role": "implementer",
-      "shell_pid": null,
-      "shell_pid_created_at": null,
+      "role": "reviewer",
+      "shell_pid": 4020347,
+      "shell_pid_created_at": "1792916014.02",
       "subtasks": {
         "T027": "done",
         "T028": "done",
