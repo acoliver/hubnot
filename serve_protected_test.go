@@ -72,6 +72,10 @@ type serveGovernedOptions struct {
 	// methods still publish after acting; drive M's commands directly when
 	// facts must stay local.
 	Solo bool
+
+	// ProtectedPaths opts the policy in to protected checks for these
+	// paths, with the maintainer as the one protected-check reviewer.
+	ProtectedPaths []string
 }
 
 // serveGovernedPolicy is an hn.policy/0 document by role. Every proposal
@@ -82,6 +86,8 @@ type serveGovernedPolicy struct {
 	RequiredApprovals   int
 	AllowAuthorApproval bool
 	Pipelines           map[string][]string // pipeline name to trusted runners
+	ProtectedPaths      []string            // protectedChecks paths; none leaves the section out
+	ProtectedReviewers  []string            // protectedChecks trusted reviewers
 }
 
 // JSON encodes the policy the way a repository stores it.
@@ -91,7 +97,7 @@ func (policy serveGovernedPolicy) JSON(t *testing.T) string {
 	for name, runners := range policy.Pipelines {
 		pipelines[name] = map[string]any{"requiredResults": 1, "trustedRunners": runners}
 	}
-	encoded, err := json.MarshalIndent(map[string]any{
+	document := map[string]any{
 		"version":     policyVersion,
 		"maintainers": policy.Maintainers,
 		"proposals": map[string]any{
@@ -101,7 +107,13 @@ func (policy serveGovernedPolicy) JSON(t *testing.T) string {
 			"allowAuthorApproval": policy.AllowAuthorApproval,
 		},
 		"pipelines": pipelines,
-	}, "", "  ")
+	}
+	if len(policy.ProtectedPaths) > 0 {
+		document["protectedChecks"] = map[string]any{
+			"paths": policy.ProtectedPaths, "trustedReviewers": policy.ProtectedReviewers, "requiredApprovals": 1,
+		}
+	}
+	encoded, err := json.MarshalIndent(document, "", "  ")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -167,6 +179,10 @@ func newServeGovernedFixture(t *testing.T, options serveGovernedOptions) *serveG
 		RequiredApprovals:   1,
 		AllowAuthorApproval: options.Solo,
 		Pipelines:           map[string][]string{"test": {f.actors[g.Runner]}},
+	}
+	if len(options.ProtectedPaths) > 0 {
+		g.Policy.ProtectedPaths = options.ProtectedPaths
+		g.Policy.ProtectedReviewers = []string{f.actors[g.Maintainer]}
 	}
 
 	source := filepath.Join(t.TempDir(), "source")

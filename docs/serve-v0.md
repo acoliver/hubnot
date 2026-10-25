@@ -1145,7 +1145,15 @@ that fails:
 11. A candidate that is not ready or not accepted under the destination
     policy is `protected-destination-policy`, with the unmet kinds and a
     sentence naming each unmet threshold.
-12. With `hn-advance`, a pushing actor who is not a maintainer under both the
+12. When the destination opts in to
+    [protected checks](governance-v0.md), the candidate must have been
+    evaluated under that same policy, and no protected path may have changed
+    between the candidate's base and `T`. Otherwise the update is
+    `protected-destination-policy` with `missing=proposal` and next step
+    `revise ID against T`. This is the guard `hn merge` applies before a local
+    merge, so a stale candidate cannot carry its approvals past a newer
+    protected baseline.
+13. With `hn-advance`, a pushing actor who is not a maintainer under both the
     base and the destination policy gets `advance-not-maintainer`.
 
 Facts in the same push count once their actor refs have passed. A maintainer
@@ -1157,6 +1165,11 @@ for actor chains described in
 never lets a branch move to code the server does not hold.
 
 ### Base policy and destination policy
+
+With protected checks enabled, a candidate that changes a protected path is
+not ready in steps 10 and 11 until it has the required approvals from
+protected-check reviewers, and the rejection sentence names the changed
+paths.
 
 Steps 10 and 11 evaluate the same signed reviews, CI results and decisions
 twice. Step 10 uses the policy at the candidate's base commit, the policy the
@@ -1199,7 +1212,7 @@ push passes under the same checks. Such a push does not need to come from a
 maintainer, because the signed facts already carry the maintainers'
 acceptance. An advancement request with the `hn-advance` push option, which
 `hn merge --remote` sends, additionally requires the pushing actor to be a
-maintainer under both policies (step 12). See
+maintainer under both policies (step 13). See
 [Advancing a protected branch](#advancing-a-protected-branch).
 
 ### Rejection examples for protected branches

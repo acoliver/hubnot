@@ -7,11 +7,13 @@ ordinary Git remote transports both code and `refs/hn/*` collaboration facts.
 
 The active command and protocol namespace is `hn`. This is a deliberate
 pre-user hard reset: there is no `nh` executable, alias, fallback reader,
-migration, or actor-continuity bridge. Existing `.nh/**`, `.git/nh/**`, and
-`refs/nh/*` data may remain as frozen historical evidence, but `hn` ignores it
-and creates fresh identities and facts only in the active namespace.
+migration, or actor-continuity bridge. This repository's tracked configuration
+lives in `.hn/`. The obsolete `.nh/` directory is ignored; its earlier contents
+remain in Git history. Legacy `.git/nh/**` and `refs/nh/*` state is also ignored.
+Hubnot creates fresh identities and facts only in the active namespace.
 
-The current operational alpha supports signed issues, immutable proposal
+The current operational alpha supports signed issues, planning projects and items,
+threaded discussions, versioned native workflows, immutable proposal
 candidates and revisions, reviews, CI requests/results/logs, governance
 decisions and merge facts, distinct device actors, policy amendments, selected
 quarantined replication, exact shallow-history recovery, and deliberate signed
@@ -32,15 +34,69 @@ not yet stable, the security boundary is intentionally narrow, and the
 deferred work in [Completed alpha boundary](#completed-alpha-boundary) is the
 post-alpha roadmap.
 
+## Download and install
+
+[Hubnot 0.0.1-dev](https://github.com/LynnColeArt/hubnot/releases/tag/v0.0.1-dev)
+is the first packaged operational-alpha prerelease. Prebuilt executables require
+**Git 2.x** on your PATH. Running them requires no Python, Go, Docker, or forge
+account.
+
+| Platform | CPU | Standard | Native only |
+| --- | --- | --- | --- |
+| Linux | Intel / AMD 64-bit | [Download](https://github.com/LynnColeArt/hubnot/releases/download/v0.0.1-dev/hubnot_0.0.1-dev_linux_amd64.tar.gz) | [Download](https://github.com/LynnColeArt/hubnot/releases/download/v0.0.1-dev/hubnot_0.0.1-dev_linux_amd64_native-only.tar.gz) |
+| Linux | ARM64 | [Download](https://github.com/LynnColeArt/hubnot/releases/download/v0.0.1-dev/hubnot_0.0.1-dev_linux_arm64.tar.gz) | [Download](https://github.com/LynnColeArt/hubnot/releases/download/v0.0.1-dev/hubnot_0.0.1-dev_linux_arm64_native-only.tar.gz) |
+| macOS 12+ | Intel | [Download](https://github.com/LynnColeArt/hubnot/releases/download/v0.0.1-dev/hubnot_0.0.1-dev_darwin_amd64.tar.gz) | [Download](https://github.com/LynnColeArt/hubnot/releases/download/v0.0.1-dev/hubnot_0.0.1-dev_darwin_amd64_native-only.tar.gz) |
+| macOS 12+ | Apple Silicon | [Download](https://github.com/LynnColeArt/hubnot/releases/download/v0.0.1-dev/hubnot_0.0.1-dev_darwin_arm64.tar.gz) | [Download](https://github.com/LynnColeArt/hubnot/releases/download/v0.0.1-dev/hubnot_0.0.1-dev_darwin_arm64_native-only.tar.gz) |
+
+Standard builds include the optional GitHub transfer adapter. Native-only builds
+omit that adapter and retain every native feature, including local `hn gh issue`
+commands. Both variants install as `hn`; choose one. Protected checks and
+automerge remain independently disabled by default.
+
+Download [SHA256SUMS](https://github.com/LynnColeArt/hubnot/releases/download/v0.0.1-dev/SHA256SUMS)
+alongside your archive and verify it before extraction. On Linux, use
+`sha256sum --ignore-missing -c SHA256SUMS`. On macOS, use
+`shasum -a 256 <archive.tar.gz>` and compare the matching checksum entry.
+Extract your archive, enter its directory, then install:
+
+```sh
+mkdir -p "$HOME/.local/bin"
+install -m 0755 hn "$HOME/.local/bin/hn"
+export PATH="$HOME/.local/bin:$PATH"
+hn version
+```
+
+Keep that PATH setting in your shell configuration if needed. The archives also
+contain the MIT license, build provenance, and product documentation. See the
+[changelog](CHANGELOG.md) for release history and next-release requirements.
+
+Both Linux architectures have been runtime-tested: AMD64 through packaged CLI
+smoke checks, and ARM64 through native resource and policy acceptance scenarios.
+Both Apple Silicon variants passed packaged CLI smoke checks on macOS; Intel Mac
+builds have been cross-compiled and inspected but have not been runtime-tested.
+macOS downloads have no Apple Developer ID signature or notarization, so a
+quarantined download may require approval in Privacy & Security. The
+[release notes](https://github.com/LynnColeArt/hubnot/releases/tag/v0.0.1-dev)
+include the detailed platform evidence and distribution limits.
+
 ## Build and verify
 
-Go 1.26 or newer and Git 2.x are the baseline requirements. Docker is not
-required.
+Building from source requires Go 1.26 or newer and Git 2.x. Docker and Python
+are not required for the following build and test commands.
 
 ```sh
 go build -trimpath -o hn .
 go test -count=1 ./...
+
+# Optional: omit the GitHub transport while retaining all native commands.
+go build -trimpath -tags nogithub -o hn-local .
 ```
+
+The first release's separate `build-release.py` packaging script requires
+Python 3.12+, Git, and Go 1.26.4 to reproduce its archives. That requirement is
+limited to that packaging script. For the next release, packaging must use
+**Go and Git alone** and run on Linux, macOS, and Windows. The published first
+release stays unchanged; this requirement does not announce Windows binaries.
 
 The end-to-end acceptance scenarios compile the CLI and exercise the
 self-hosted governance/CI loop, repository-native agent memory, and rich issues
@@ -62,7 +118,9 @@ git diff --check
 Bubblewrap is used by the default Linux CI executor when you choose to execute
 a pipeline. It is not required for identity, policy, proposal, review,
 replication, inspection, or verification commands. The explicit unsafe host
-executor remains available for controlled debugging.
+executor remains available for controlled debugging. macOS has no bundled safe
+CI execution backend; host execution requires the existing explicit
+`--allow-unsafe-host-execution` opt-in.
 
 ## Start a repository
 
@@ -102,6 +160,52 @@ expected-head guards, actor-scoped operation retries, bounded pages and
 conflict recovery. The [runnable consumer](examples/issue-consumer/README.md)
 creates, reads, revises and retries demonstration work using only the public
 CLI. No Beads migration or consumer-specific runtime integration is performed.
+
+## Projects, discussions and workflows
+
+Native resources are signed Git facts and remain usable with no provider:
+
+```sh
+hn project help
+hn discussion help
+hn workflow help
+```
+
+[Projects](docs/projects-v1.md) contain typed planning fields and independently
+revisioned items pinned to an exact schema. [Discussions](docs/discussions-v1.md)
+keep independent replies and accepted answers pinned to exact reply content.
+[Workflows](docs/workflows-v1.md) store native `hn.pipeline/0` definitions and
+inert foreign source documents. Materializing or requesting a workflow does not
+execute it; the existing explicit policy/proposal/runner path governs execution.
+These new native kinds require a current reader; older alpha executables may
+reject them without changing their signed bytes.
+
+## Familiar local commands and optional transfers
+
+`hn gh issue` implements a documented local subset using the same native issues:
+
+```sh
+hn gh issue create -t "Improve setup" -b "Document the first successful run"
+hn gh issue list --state all --json id,title,state,conflict
+hn gh issue view <native-issue-id> --comments
+```
+
+It never invokes `gh`, contacts GitHub or reads forge credentials. Native IDs
+remain authoritative. Optional explicit transfer is separate:
+
+```sh
+hn transfer capabilities --provider github
+hn transfer import --provider github --project OWNER/REPO --key 42 --dry-run
+hn transfer import --provider github --resource discussion --project OWNER/REPO \
+  --key 7 --map history=snapshot --dry-run
+```
+
+The [interoperability guide](docs/github-interoperability.md) covers the exact
+compatibility flags/JSON, all four resource mappings, credentials, bounded
+preflight and uncertain-write recovery. GitHub is an optional first adapter;
+there is no mandatory account, service, SDK, or unmodified-`gh` API bridge.
+Imported facts remain usable after transport removal. Foreign workflows and
+Projects automation rules are not assumed equivalent to native execution.
 
 ## Distinct device actors
 
@@ -298,7 +402,15 @@ fact from that runner rather than a mutation of earlier bytes.
 ```text
 hn init [--name NAME]
 hn identity show|list|public|authorize|accept|rotate
-hn issue open|comment|list|show
+hn issue open|revise|resolve|close|reopen|comment|list|show|heads|history|graph|operation
+hn gh issue create|list|view|edit|comment|close|reopen
+hn project help
+hn project-item help
+hn discussion help
+hn discussion-reply help
+hn workflow help
+hn transfer import|export|capabilities --provider PROVIDER
+hn github import|export --repo OWNER/REPO
 hn proposal open|revise|list|show|status
 hn policy show [REV]
 hn policy check --base REV <--head REV|--file PATH>
@@ -308,6 +420,7 @@ hn run execute REQUEST [--backend sandbox|host] [--allow-unsafe-host-execution] 
 hn runner once|watch --accept-pipeline NAME --accept-actor ACTOR
 hn decide PROPOSAL <--accept|--reject> [--body TEXT]
 hn merge PROPOSAL
+hn automerge PROPOSAL --rule NAME [--execute]
 hn memory record|handoff|supersede|retract|challenge|show|recall|index
 hn replication select|show [REMOTE] [--memory STREAM]...
 hn sync [REMOTE] [--recover-shallow]
@@ -317,6 +430,36 @@ hn log
 Trust-bearing commands require full actor fingerprints and full
 `sha256:<64-hex>` event IDs. Short IDs are display conveniences only.
 
+## Opt-in check protection and automerge
+
+Both capabilities are disabled unless a repository explicitly configures them in
+`.hn/policy.json`. Initialization, upgrades and imports do not turn either on.
+
+| Capability | Default | Explicit opt-in |
+| --- | --- | --- |
+| Protected checks | Disabled | Require designated review for changes to selected check files |
+| Automerge | Disabled | Permit a named rule to merge an already-accepted candidate |
+| Background operation | None | Run the command yourself or through your own scheduler |
+
+Protection and automerge are independent: either may be enabled alone. They use
+native actor identities, signed evidence and ordinary Git; neither requires
+GitHub, `gh`, a service, or a provider account.
+
+```sh
+hn automerge <full-candidate-event-id> --rule docs-only
+hn automerge <full-candidate-event-id> --rule docs-only --execute
+```
+
+The first command previews without a signing key or mutation. The second requires
+an explicitly permitted maintainer identity and current reviews, CI passes and
+acceptances. It merges locally; `hn sync` and `git push` remain separate actions.
+Automerge requires a full repository without active partial/promisor configuration,
+a clean target equal to the candidate's signed base, and no unfinished Git operation.
+Policy amendments and protected-check changes use the manual merge path.
+
+See [optional policy rules](docs/governance-v0.md#optional-check-protection-and-automerge)
+for configuration, protected baselines, execution boundaries and recovery.
+
 ## Completed alpha boundary
 
 The operational-alpha column is implemented. The deferred column describes
@@ -324,7 +467,7 @@ the post-alpha roadmap; those capabilities are not implied by alpha completion.
 
 | Area | Operational alpha | Explicitly deferred |
 | --- | --- | --- |
-| Policy | Show, validate, diff, and govern amendments from exact base bytes | Merge queues and implicit role migration |
+| Policy | Show, validate, diff, and govern amendments from exact base bytes; opt-in protected checks and explicit native automerge | Background merge queues and implicit role migration |
 | Identity | Distinct actors, mutual device/successor facts, local keyring, retryable planned rotation | Lost-key, compromise, social/organizational recovery, or concurrent writers sharing one actor key |
 | Replication | Exact selections, quarantine, positive budgets, validation, atomic accepted refs, compatibility-all | Portable hard pre-download quotas, moderation, selective deletion, and global redaction |
 | CI | Repository-defined actions, default Bubblewrap runner, explicit unsafe host fallback | Secrets, configurable network access, strong CPU/memory/disk/process quotas, and portable/container backends |
@@ -336,6 +479,12 @@ promise global erasure from every replica.
 
 ## Documentation
 
+- [Changelog and next-release requirements](CHANGELOG.md)
+- [Rich issues](docs/issues-v1.md)
+- [Projects and typed items](docs/projects-v1.md)
+- [Discussions and pinned answers](docs/discussions-v1.md)
+- [Native workflows and explicit execution](docs/workflows-v1.md)
+- [Optional forge interoperability and local gh subset](docs/github-interoperability.md)
 - [Protocol and storage](docs/protocol-v0.md)
 - [Agent Memory Protocol and operator guide](docs/memory-v0.md)
 - [Agent memory safety model](docs/memory-safety.md)
@@ -346,3 +495,7 @@ promise global erasure from every replica.
 - [Hosted Git compatibility](docs/host-compatibility.md)
 - [Operational self-hosting proof](docs/self-hosting-alpha.md)
 - [hn serve: governed local Git hosting](docs/serve-v0.md)
+
+## License
+
+Hubnot is licensed under the [MIT License](LICENSE).

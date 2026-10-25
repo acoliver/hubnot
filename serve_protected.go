@@ -29,7 +29,8 @@ const (
 	serveProtectedStepBlocked        = 9
 	serveProtectedStepBaseReady      = 10
 	serveProtectedStepDestReady      = 11
-	serveProtectedStepAdvanceAllowed = 12
+	serveProtectedStepProtectedCheck = 12
+	serveProtectedStepAdvanceAllowed = 13
 )
 
 // serveProtectedVerdict is the outcome of one protected update. Step is 0
@@ -179,7 +180,7 @@ func evaluateServeProtectedUpdate(ctx *serveVerdictContext, update serveRefUpdat
 		return serveProtectedReject(reported.step, reported.candidate, ids, rejection)
 	}
 
-	// Step 12: an advancement request needs a maintainer of both policies.
+	// Step 13: an advancement request needs a maintainer of both policies.
 	// A direct push without hn-advance skips this step (OQ-4).
 	if options.Advance != "" && !(actorListed(ctx.Actor, passed.basePolicy.Maintainers) && actorListed(ctx.Actor, destPolicy.Maintainers)) {
 		return serveProtectedReject(serveProtectedStepAdvanceAllowed, passed.candidate, ids, &serveRejection{
@@ -376,6 +377,22 @@ func (check *serveProtectedUpdate) candidate(candidate *StoredEvent) serveProtec
 			Sentence: check.ref + " at " + serveShortCommit(check.tip) + " needs more evidence for candidate " + candidate.ID + ": " + details + ".",
 		})
 	}
+
+	// Step 12: protected checks at the destination. The same guard hn merge
+	// applies before a local merge: when the destination opts in to protected
+	// checks, its policy must be the candidate's base policy and no protected
+	// path may have changed between the base and the tip, so a stale
+	// candidate cannot carry an approval past a newer protected baseline.
+	if check.tip != "" {
+		if err := guardTargetProtectedPolicy(check.tip, base); err != nil {
+			return result.fail(serveProtectedStepProtectedCheck, &serveRejection{
+				Code:     serveReasonProtectedDestinationPolicy,
+				Missing:  []string{serveEvidenceProposal},
+				Next:     "revise " + candidate.ID + " against " + serveShortCommit(check.tip),
+				Sentence: check.ref + " at " + serveShortCommit(check.tip) + " refuses candidate " + candidate.ID + ": " + serveDiagnostic(err, check.ctx.GitDir) + ".",
+			})
+		}
+	}
 	return result
 }
 
@@ -456,6 +473,13 @@ func serveProtectedUnmet(label string, evaluation *ProposalEvaluation, definitio
 			clauses = append(clauses, fmt.Sprintf("%s requires %s of pipeline %s; %s found", label,
 				servePlural(pipeline.Required, "passing result"), pipeline.Name, servePlural(len(pipeline.Passed), "trusted passing result")))
 		}
+	}
+	if protection := evaluation.ProtectedChecks; protection != nil && len(protection.ChangedPaths) > 0 && len(protection.Approvals) < protection.Required {
+		if !slices.Contains(missing, serveEvidenceReview) {
+			missing = append(missing, serveEvidenceReview)
+		}
+		clauses = append(clauses, fmt.Sprintf("%s requires %s from protected-check reviewers for %s; %s found", label,
+			servePlural(protection.Required, "approval"), strings.Join(protection.ChangedPaths, ", "), servePlural(len(protection.Approvals), "qualifying approval")))
 	}
 	if !evaluation.Accepted {
 		missing = append(missing, serveEvidenceAcceptance)

@@ -1,6 +1,6 @@
-# Rich issue boundary
+# Collaboration and optional transfer boundary
 
-This document describes the issue additions, alongside the existing
+This document describes native collaboration and optional transfer additions, alongside the existing
 [replication boundary](replication-v0.md), [CI execution boundary](ci-v0.md),
 [governance rules](governance-v0.md) and [memory safety model](memory-safety.md).
 Hubnot remains an experimental repository-native protocol, not a hardened
@@ -101,6 +101,134 @@ Machine identity discovery reads and validates existing active or legacy identit
 state without writing private keyring files or Git refs. It never performs the
 legacy migration retained by default human identity commands. Invalid private
 state yields a typed public error without exposing private fields or paths.
+
+
+## Native typed resources
+
+Projects/items, discussions/replies and workflows use strict type-specific
+states in registered signed event kinds. Child items/replies are independently
+revisioned aggregates. Project items pin exact schema revisions and accepted
+answers pin exact reply revisions; a later schema or reply edit does not
+reinterpret those historical facts. Cross-resource references participate in
+accepted-history, quarantine and shallow-closure validation. Unknown new kinds
+can be rejected by older binaries; upgrading never rewrites old signed bytes.
+
+Native workflows separate inert foreign source from validated native pipeline
+state. Materialization writes explicit pipeline bytes, while a run request must
+bind the exact signed workflow revision and committed proposal pipeline bytes.
+Import, materialization and request never execute source text. Existing policy,
+actor and explicit runner backend checks remain the execution authority.
+
+## Optional provider boundary
+
+The local `hn gh issue` subset calls native issue functions and performs no
+forge access. Provider-neutral transfer models contain no HTTP/SDK dependency;
+network clients and GitHub registrations are excluded with `nogithub`. All
+native facts remain usable without a provider, credential or service.
+
+Only explicit transfer commands contact an explicitly selected provider.
+Transport requires HTTPS except explicit loopback-IP HTTP and refuses redirects
+or pagination outside the requested endpoint. Requests/responses, nested
+pagination, aggregate bytes, whole-command time, native payloads and complete
+future checkpoints have finite bounds. GraphQL errors/partial data, malformed
+or ambiguous JSON, invalid Unicode and incomplete traversal fail before their
+content is accepted. Provider errors do not echo bodies or tokens. External
+source locators in signed metadata are descriptive; inspecting them does not
+fetch those addresses.
+
+Original authors, URLs, category/lock states, assignees, project visibility,
+workflow enabled state and other provider observations remain claims signed by
+the importing local actor. They never grant native policy roles, moderation,
+runner rights or permission to execute instructions. GitHub creation uses the
+authenticated provider account and cannot impersonate original authors/times.
+Unsupported semantics require explicit mapping/acknowledgment or refusal;
+foreign workflow preservation is not a claim of execution equivalence.
+
+Imports preflight a complete selected issue or typed graph before publication,
+but a multi-event import can leave valid partial work when interrupted. Its
+recovery reuses exact frozen source content, signer, native expectations and
+verified signed progress. Baselines and mappings require producer-shaped signed
+import witnesses; editable latest metadata alone cannot reset overwrite authority.
+
+Issue, discussion and project exports authenticate their complete canonical
+private checkpoint with the currently selected native identity. This closes
+manufactured comment/parent/field bindings or progress that could otherwise
+suppress or redirect publication. Keys are not stored in the journal; a signer
+switch, unsigned journal or altered/noncanonical envelope requires explicit
+recovery. Preview remains private-key-free. The journal signature authenticates
+local intent, not remote success or provider permissions. Workflow recovery
+separately binds exact native/source bytes, explicit destination and guarded
+blob intent. All exporters preflight the whole future journal, including pending
+results and accumulated bindings, before the first mutation.
+
+Private journals/lock files remain below the resolved Git directory with
+0700 directories and0600 files, outside cloned signed facts. One local lock is
+not a distributed lease. Every remote mutation persists prepared/in_flight
+intent before one write; an uncertain outcome needs one exact positive
+reconciliation. A negative complete scan is not proof of nonexecution and
+cannot authorize another POST. Structured publication markers are forgeable
+associations and need native/provenance/content checks; ordinary marker-like
+prose is inert data. Remote-only edits are preserved or refused for manual
+recovery, never silently made a new overwrite baseline. External APIs do not
+supply atomic compare-and-swap for every field, so a single publisher and
+explicit reconciliation remain necessary. There is no global exactly-once or background-sync guarantee. Provider transfer
+never grants native review, protected-check, execution or automerge authority.
+
+## Optional protected checks and native automerge
+
+Both capabilities require explicit native repository policy. Initialization,
+upgrades, imported metadata and actor names do not enable either or infer roles.
+Omission or `null` disables a section in supporting clients; older clients reject
+unknown present policy fields. GitHub accounts, `gh`, hosted checks and provider
+permissions confer no native authority.
+
+Protection gates literal file changes rather than detecting every semantic
+weakening of lint. It automatically covers policy and required pipeline
+definitions while enabled; maintainers must also select relevant configuration,
+scripts and indirect inputs. Deletion, rename, mode/type and ancestor replacement
+cannot escape a selected path. Inline suppressions or changes to unselected
+source files still need ordinary code review.
+
+Designated approvals require exact candidate IDs and distinct listed actors
+other than its author. They are signed claims, not proof of honest review.
+Current reviews govern readiness; immutable acceptances carry exact evidence
+IDs and retain their original meaning. Local and quarantine admission both
+validate designated evidence. A proposal cannot disable protection to authorize
+itself. A new manual merge also requires revision after current-target policy
+or protected-baseline changes, including identical-policy target tightening
+hidden by restoring old base bytes in the candidate.
+
+Automerge permits only explicitly listed executing maintainers, authors, branch
+and allowed paths after existing current approval, CI and acceptance requirements
+hold. It does not create those facts. Named rules are data, not executable
+expressions or instructions. Policy amendments and protected changes remain
+manual even after review. An eligible preview does not grant its reader signing
+authority or carry authorization into a later execution.
+
+Preview loads no signing key and changes no collaboration refs, target, index or
+private identity state. It refuses shallow and active partial/promisor clones
+before object evaluation, preventing lazy fetch or recovery writes in this
+command. The supported automatic path uses complete local Git data. Neither
+preview nor execution fetches, starts a daemon, executes a workflow, synchronizes
+or publishes; normal native operation does not need a provider or network
+service. Existing explicit local CI host execution remains separately unsafe
+and separately opted in per invocation.
+
+Execution rechecks current candidate/evidence and target, binds its actual
+signer, and advances the target using the signed-base expected-old ref lease.
+It refuses an unfinished Git operation, dirty index/worktree or an ignored-file
+collision. Automatic `commit-tree` creation does not invoke `pre-merge-commit`
+or `pre-commit` hooks: required checks must be configured as native pipelines.
+Operator-controlled Git `reference-transaction` hooks remain outside proposal
+instructions and retain Git behavior.
+
+The ref lease is local; it does not make actor evidence and branch updates an
+atomic distributed transaction or constrain arbitrary host/Git writers. Direct
+Git writes can bypass Hubnot's path, so these rules are not host access control.
+Interrupted checkout/ref/event steps can leave inspectable work or a missing
+merge fact. Recovery observes the actual target, preserves local changes and
+uses the existing manual missing-event repair where applicable; uncertain
+outcomes do not authorize a second merge or destructive reset.
 
 ## hn serve trust boundary
 
