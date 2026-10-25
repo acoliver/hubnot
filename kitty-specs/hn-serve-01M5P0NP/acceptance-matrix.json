@@ -8,10 +8,10 @@
       "criterion_id": "FR-001",
       "description": "Verify FR-001 is satisfied",
       "proof_type": "automated_test",
-      "evidence": null,
-      "pass_fail": "pending",
-      "verified_by": null,
-      "verified_at": null,
+      "evidence": "TestServeStateUsageListsServeCommands, TestServeSessionCloneAndFetchOverSSH, TestServeAdvanceKeepsLocalMerge, TestServeReplicationSelectionsMatchOrdinaryRemote; gate log /home/acoliver/projects/appaday/gitium/.scratch/accept/hn-serve-independent-61f7d39/race.log",
+      "pass_fail": "pass",
+      "verified_by": "llxprt-gpt-sol-high",
+      "verified_at": "2026-10-25T19:08:37.970832+00:00",
       "notes": "TODO: replace with a real acceptance criterion"
     },
     {
