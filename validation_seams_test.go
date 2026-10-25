@@ -458,6 +458,47 @@ func TestValidationSeamsDestinationPolicySemantics(t *testing.T) {
 	})
 }
 
+func TestValidationSeamsDestinationAcceptanceThreshold(t *testing.T) {
+	// Given a proposal with one qualifying acceptance under a base policy that requires one
+	fixture := newSeamFixture(t)
+	accepted := fixture.open(t, "accepted", seamHead(t, "accepted head"), true)
+	decision := appendSeamDecision(t, fixture.alice, accepted.ID, fixture.digest, "accept", fixture.passingEvidence(t, accepted))
+	events := mustCollectSeamEvents(t)
+
+	base, err := evaluateProposalUnderPolicy(accepted, events, fixture.policy, fixture.digest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fixture.policy.Proposals.RequiredAccepts != 1 || len(base.AcceptDecisions) != 1 || !base.Ready || !base.Accepted {
+		t.Fatalf("base evaluation precondition: required=%d accepts=%d ready=%t accepted=%t", fixture.policy.Proposals.RequiredAccepts, len(base.AcceptDecisions), base.Ready, base.Accepted)
+	}
+
+	// And a valid destination policy that keeps every evidence permission but requires two acceptances
+	destination := clonePolicyForSeam(fixture.policy)
+	destination.Maintainers = []string{fixture.alice.Actor, fixture.carol.Actor}
+	destination.Proposals.RequiredAccepts = 2
+	if err := validatePolicy(destination); err != nil {
+		t.Fatalf("destination policy is invalid: %v", err)
+	}
+
+	// When the proposal is evaluated under the destination policy with the base digest
+	evaluation, err := evaluateProposalUnderPolicy(accepted, events, destination, fixture.digest)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Then the single acceptance still qualifies and the proposal stays ready, but it is not accepted
+	if len(evaluation.AcceptDecisions) != 1 || evaluation.AcceptDecisions[0].ID != decision.ID {
+		t.Fatalf("destination accept decisions = %d, want exactly %s", len(evaluation.AcceptDecisions), decision.ID)
+	}
+	if !evaluation.Ready || evaluation.Accepted || evaluation.Rejected {
+		t.Fatalf("destination evaluation: ready=%t accepted=%t rejected=%t; want ready and not accepted", evaluation.Ready, evaluation.Accepted, evaluation.Rejected)
+	}
+	if got := proposalStatus(evaluation); got != "ready for decision" {
+		t.Fatalf("destination status = %q, want %q", got, "ready for decision")
+	}
+}
+
 func TestValidationSeamsBasePipelineErrorKeepsItsText(t *testing.T) {
 	fixture := newSeamFixture(t)
 	mustGit(t, "checkout", "-q", "--detach")
