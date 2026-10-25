@@ -391,3 +391,4 @@ Unit tests in `serve_state_test.go` call the functions directly with a temporary
 ## Activity Log
 
 - 2026-10-25T00:09:18Z – system – Prompt generated via /spec-kitty.tasks
+- 2026-10-25T02:20:13Z – llxprt – shell_pid=3697574 – Out-of-map edit: added serve_lock_unix.go (//go:build unix, syscall.Flock) and serve_lock_other.go (//go:build !unix stub) because syscall.Flock does not exist on Windows and the repo currently cross-compiles for windows; putting Flock in serve_state.go would break non-Unix client builds (FR-001). Also: lane-a worktree allocation failed on an add/add conflict in kitty-specs/hn-serve-01M5P0NP/status.events.jsonl when merging planning commit 85deb28; resolved manually as an event_id-deduplicated union (53 planning + 14 lane events) in merge commit 9bcb087, then re-ran implement.
