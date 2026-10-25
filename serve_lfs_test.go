@@ -661,11 +661,12 @@ func (b *serveLFSEndlessBody) Read(p []byte) (int, error) {
 }
 
 // T088 and T089: the server reads no further than the declared size of an
-// upload plus the packet that passes it, both when the upload is being
-// staged and when the quota refused it before its data. The input never
-// ends, so a server that reads to the flush-pkt runs into the bound. The
-// bound allows the declared size, its packet headers, the packet that
-// passes the size and one buffer of read-ahead.
+// upload plus one byte, both when the upload is being staged and when the
+// quota refused it before its data. The input never ends, so a server that
+// reads to the flush-pkt runs into the bound. The bound is exact: the
+// requests before the data, the declared size in whole packets with their
+// headers, the header of the packet that passes the size and one byte of
+// its payload.
 func TestServeLFSUploadReadsNoFurtherThanDeclaredSize(t *testing.T) {
 	f := newServeLFSFixture(t, newServeHarness(t))
 	layout := f.h.Layout()
@@ -685,8 +686,8 @@ func TestServeLFSUploadReadsNoFurtherThanDeclaredSize(t *testing.T) {
 		prefix.Write(serveLFSWireText("put-object " + oid))
 		prefix.Write(serveLFSWireText("size=" + strconv.Itoa(declared)))
 		prefix.WriteString(serveLFSWireDelim)
-		needed := prefix.Len() + (declared/payload+1)*len(packet)
-		body := &serveLFSEndlessBody{pending: prefix.Bytes(), packet: packet, limit: needed + serveLFSMaxPacketLength}
+		needed := prefix.Len() + (declared/payload)*len(packet) + 4 + 1
+		body := &serveLFSEndlessBody{pending: prefix.Bytes(), packet: packet, limit: needed}
 
 		var output bytes.Buffer
 		status, err := runServeLFSSession(layout, serveKeyBinding{Actor: f.actors["A"]}, "r", serveLFSOperationUpload, body, &output)
@@ -716,6 +717,127 @@ func TestServeLFSUploadReadsNoFurtherThanDeclaredSize(t *testing.T) {
 		if stored := serveLFSEntries(t, layout.RepoLFSObjects("r")); len(stored) != 0 {
 			t.Fatalf("%s: lfs/objects holds %q", test.name, stored)
 		}
+	}
+}
+
+// serveLFSSegment is one part of a scripted session input: pkt-line framing
+// and request text, or object data.
+type serveLFSSegment struct {
+	data []byte
+	body bool
+}
+
+// serveLFSSegmentedInput serves its segments in order and counts the object
+// data bytes the server reads apart from everything else. Reading past the
+// last segment is recorded as an overread.
+type serveLFSSegmentedInput struct {
+	segments []serveLFSSegment
+	bodyRead int
+	overread bool
+}
+
+func (in *serveLFSSegmentedInput) Read(p []byte) (int, error) {
+	for len(in.segments) > 0 && len(in.segments[0].data) == 0 {
+		in.segments = in.segments[1:]
+	}
+	if len(in.segments) == 0 {
+		in.overread = true
+		return 0, errors.New("the server read past the scripted upload")
+	}
+	segment := &in.segments[0]
+	n := copy(p, segment.data)
+	segment.data = segment.data[n:]
+	if segment.body {
+		in.bodyRead += n
+	}
+	return n, nil
+}
+
+// T088 and T089: when a packet of the largest size crosses an upload's
+// declared size N, the server reads no more than N+1 bytes of object data
+// in total, counted apart from the framing, whether the upload is staged or
+// was refused by the quota before its data. It answers lfs-object-mismatch,
+// ends the session with exit 1 and leaves nothing staged, stored or
+// downloadable.
+func TestServeLFSUploadBodyReadCappedAtDeclaredSizePlusOne(t *testing.T) {
+	f := newServeLFSFixture(t, newServeHarness(t))
+	layout := f.h.Layout()
+	largest := serveLFSRandom(t, serveLFSMaxPayload)
+	largestPacket := func() []serveLFSSegment {
+		return []serveLFSSegment{{data: []byte(fmt.Sprintf("%04x", serveLFSMaxPacketLength))}, {data: largest, body: true}}
+	}
+	for _, test := range []struct {
+		name     string
+		quota    string
+		declared int
+		before   int
+	}{
+		{"10 bytes declared, staged", "1073741824", 10, 0},
+		{"10 bytes declared, refused by the quota", "5", 10, 0},
+		{"0 bytes declared, staged", "1073741824", 0, 0},
+		{"70000 bytes declared after one full packet, staged", "1073741824", 70_000, serveLFSMaxPayload},
+		{"70000 bytes declared after one full packet, refused by the quota", "50", 70_000, serveLFSMaxPayload},
+	} {
+		f.h.Serve("serve", "repo", "set", "r", "--lfs-quota", test.quota)
+		oid := serveLFSOID(serveLFSRandom(t, test.declared))
+		var requests bytes.Buffer
+		requests.Write(serveLFSRequestBytes("version 1", nil, nil))
+		requests.Write(serveLFSWireText("put-object " + oid))
+		requests.Write(serveLFSWireText("size=" + strconv.Itoa(test.declared)))
+		requests.WriteString(serveLFSWireDelim)
+		segments := []serveLFSSegment{{data: requests.Bytes()}}
+		if test.before > 0 {
+			segments = append(segments, serveLFSSegment{data: []byte(fmt.Sprintf("%04x", test.before+4))}, serveLFSSegment{data: serveLFSRandom(t, test.before), body: true})
+		}
+		for range 3 {
+			segments = append(segments, largestPacket()...)
+		}
+		segments = append(segments, serveLFSSegment{data: []byte(serveLFSWireFlush)})
+		segments = append(segments, serveLFSSegment{data: serveLFSRequestBytes("quit", nil, nil)})
+		input := &serveLFSSegmentedInput{segments: segments}
+
+		var output bytes.Buffer
+		status, err := runServeLFSSession(layout, serveKeyBinding{Actor: f.actors["A"]}, "r", serveLFSOperationUpload, input, &output)
+		if input.bodyRead > test.declared+1 {
+			t.Fatalf("%s: the session read %d bytes of object data, want at most %d", test.name, input.bodyRead, test.declared+1)
+		}
+		if input.overread {
+			t.Fatalf("%s: the session read past the scripted input", test.name)
+		}
+		if err != nil || status != 1 {
+			t.Fatalf("%s: session returned %d, %v; want exit 1 without an internal error", test.name, status, err)
+		}
+		conn := &serveLFSConn{t: t, stdout: bufio.NewReader(&output), stderr: &bytes.Buffer{}}
+		if capabilities := conn.readPackets(); !equalStrings(capabilities, []string{"version=1"}) {
+			t.Fatalf("%s: capability advertisement %q", test.name, capabilities)
+		}
+		if response := conn.read(); response.Status != 200 {
+			t.Fatalf("%s: version 1 answered %+v", test.name, response)
+		}
+		rejection := serveLFSRequireRejection(t, test.name, conn.read(), 422, serveReasonLFSObjectMismatch, f.actors["A"])
+		if !equalStrings(rejection.IDs, []string{oid}) {
+			t.Fatalf("%s: ids %q, want the declared OID", test.name, rejection.IDs)
+		}
+		if rest, _ := io.ReadAll(conn.stdout); len(rest) != 0 {
+			t.Fatalf("%s: the session wrote %q after the rejection, so it read on into the object data", test.name, rest)
+		}
+		if staged := serveHarnessEntries(t, layout.RepoLFSIncoming("r")); len(staged) != 0 {
+			t.Fatalf("%s: lfs/incoming holds %q", test.name, staged)
+		}
+		if stored := serveLFSEntries(t, layout.RepoLFSObjects("r")); len(stored) != 0 {
+			t.Fatalf("%s: lfs/objects holds %q", test.name, stored)
+		}
+
+		f.h.Serve("serve", "repo", "set", "r", "--lfs-quota", "1073741824")
+		download := openServeLFS(t, f.h, f.keys["B"], "download")
+		download.send(serveLFSRequestBytes("get-object "+oid, nil, nil))
+		if response := download.read(); response.Status != 404 {
+			t.Fatalf("%s: get-object answered %+v, want 404", test.name, response)
+		}
+		download.quit()
+	}
+	if stored := f.lfsStored(); stored != 0 {
+		t.Fatalf("lfs-stored = %d after only oversized uploads", stored)
 	}
 }
 

@@ -1652,7 +1652,7 @@ git diff --check
 | FR-017 | Fact advertisement | `TestServeReplicationAdvertisesAcceptedFacts`, `TestServeWireRemoteIdentification` |
 | FR-018 | All-trusted selection | `TestServeReplicationRunnerDiscoversNewWork`, `TestReplicationAllTrustedRefusesUnmarkedRemote`, `TestReplicationAllTrustedMutualExclusionBeforeNetwork`, `TestReplicationAllTrustedForgedMarkerGrantsNoTrust` |
 | FR-019 | Existing selections unchanged | `TestServeReplicationSelectionsMatchOrdinaryRemote`, `TestReplicationAllTrustedExistingModesIgnoreMarker`, `TestReplicationAllTrustedSelectionFilesAndShowOutput` |
-| FR-020 | LFS transfer | `TestServeLFSRoundTrip`, `TestServeLFSObjectMismatch`, `TestServeLFSSessionChecksKeyAndRepository`, `TestServeLFSInterruptedUploadNeverStored`, `TestServeLFSBatchActions`, `TestServeLFSFramingRefusals`, `TestServeLFSPacketReaderChecksLengthBeforeReading`, `TestServeLFSOversizedUploadEndsSession`, `TestServeLFSUploadReadsNoFurtherThanDeclaredSize` |
+| FR-020 | LFS transfer | `TestServeLFSRoundTrip`, `TestServeLFSObjectMismatch`, `TestServeLFSSessionChecksKeyAndRepository`, `TestServeLFSInterruptedUploadNeverStored`, `TestServeLFSBatchActions`, `TestServeLFSFramingRefusals`, `TestServeLFSPacketReaderChecksLengthBeforeReading`, `TestServeLFSOversizedUploadEndsSession`, `TestServeLFSUploadReadsNoFurtherThanDeclaredSize`, `TestServeLFSUploadBodyReadCappedAtDeclaredSizePlusOne` |
 | FR-021 | LFS quota | `TestServeLFSQuotaBoundary`, `TestServeLFSQuotaRecheckedBeforeStoring`, `TestServeLFSDocumentedExample`, `TestServeLFSLockingUnsupported` |
 | FR-022 | Protected-update serialization | `TestServeSessionPushWaitsForLockAndFetchDoesNot`, `TestServeProtectedNotFastForwardAndStaleTip`, `TestServeAdvanceConcurrentMaintainers` |
 | FR-023 | Documentation with tested examples | `TestServeQualityDocumentedExamplesAreExecuted`, `TestServeQualityTraceabilityTestsExist`, `TestServeReasonsDocsTableMatchesCatalogue` |
@@ -1826,12 +1826,14 @@ object ID, which the client shows as the reason for the failed upload:
 hn-serve/1 reject ref=- actor=4f1c9a6d0d2b7e3a8c5f6e1b9d0a7c3e2f4b6d8a0c1e3f5a7b9d1c3e5f7a9b1c code=lfs-object-mismatch ids=6a1e5e2f0c9d4b3a8f7e6d5c4b3a2f1e0d9c8b7a6f5e4d3c2b1a0f9e8d7c6b5a next="retry the upload"
 ```
 
-The server reads at most the declared size of an upload. When the data goes
-past that size, the server stops reading at the packet that passes it,
-removes the staged file and sends the same `lfs-object-mismatch` answer. The
-rest of the object is left unread, so the session ends there with exit
-status 1. A client therefore cannot make the server read more than the
-declared size plus one packet of at most 65515 bytes. A `put-object` request
+The server reads at most the declared size of an upload plus one byte of
+object data. It reads each data packet only up to the bytes the declared
+size still allows, so when a packet goes past that size, the server reads
+one byte beyond the size from it and stops there. It removes the staged file
+and sends the same `lfs-object-mismatch` answer. The rest of the object is
+left unread, so the session ends there with exit status 1. A client
+therefore cannot make the server read more than the declared size plus one
+byte of object data, however large its packets are. A `put-object` request
 without a valid object ID or `size=` argument has no such bound, so the
 server answers status 400 and ends the session without reading its data.
 
@@ -1851,7 +1853,8 @@ would exceed it never becomes downloadable:
    sizes of every requested object that is not stored yet. If the total would
    exceed the quota, it refuses the whole request with status 507.
 2. Before it reads an object's data, it checks the declared size the same way,
-   and on refusal reads and discards the data, up to the declared size.
+   and on refusal reads and discards the data, up to the declared size plus
+   one byte.
 3. After verifying the content, it takes the repository's `lfs.lock`, counts
    the stored bytes again and renames the object into place only if it still
    fits. Two uploads that each fit alone cannot exceed the quota together.

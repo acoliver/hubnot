@@ -81,7 +81,10 @@ const (
 )
 
 // serveLFSPacketReader reads pkt-lines with one fixed payload buffer, so no
-// length header can make it allocate.
+// length header can make it allocate. It reads its input without
+// read-ahead: every byte it takes from r belongs to a packet it was asked
+// for, so a caller that bounds the payload it reads also bounds the input
+// consumed.
 type serveLFSPacketReader struct {
 	r       io.Reader
 	header  [serveLFSPacketHeader]byte
@@ -92,41 +95,51 @@ func newServeLFSPacketReader(r io.Reader) *serveLFSPacketReader {
 	return &serveLFSPacketReader{r: r, payload: make([]byte, serveLFSMaxPayload)}
 }
 
-// next reads one packet. The returned payload is only valid until the next
-// call. The length header is checked before any payload byte is read.
+// next reads one whole packet. The returned payload is only valid until the
+// next call. The length header is checked before any payload byte is read.
 func (p *serveLFSPacketReader) next() (serveLFSPacketKind, []byte, error) {
+	kind, payload, _, err := p.nextUpTo(serveLFSMaxPayload)
+	return kind, payload, err
+}
+
+// nextUpTo reads one packet but at most limit bytes of its payload. It
+// returns the payload bytes read and the payload length the header
+// declared; when that length is above limit, the rest of the packet stays
+// unread and the input is no longer at a packet boundary.
+func (p *serveLFSPacketReader) nextUpTo(limit int) (serveLFSPacketKind, []byte, int, error) {
 	if _, err := io.ReadFull(p.r, p.header[:]); err != nil {
 		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
-			return 0, nil, errServeLFSClosed
+			return 0, nil, 0, errServeLFSClosed
 		}
-		return 0, nil, err
+		return 0, nil, 0, err
 	}
 	length := 0
 	for _, digit := range p.header {
 		value, ok := serveLFSHexValue(digit)
 		if !ok {
-			return 0, nil, serveLFSMalformed("pkt-line length %q is not four hexadecimal digits", serveSanitizeText(string(p.header[:])))
+			return 0, nil, 0, serveLFSMalformed("pkt-line length %q is not four hexadecimal digits", serveSanitizeText(string(p.header[:])))
 		}
 		length = length<<4 | value
 	}
 	switch {
 	case length == 0:
-		return serveLFSFlushPacket, nil, nil
+		return serveLFSFlushPacket, nil, 0, nil
 	case length == 1:
-		return serveLFSDelimPacket, nil, nil
+		return serveLFSDelimPacket, nil, 0, nil
 	case length < serveLFSPacketHeader:
-		return 0, nil, serveLFSMalformed("pkt-line length %d is reserved", length)
+		return 0, nil, 0, serveLFSMalformed("pkt-line length %d is reserved", length)
 	case length > serveLFSMaxPacketLength:
-		return 0, nil, serveLFSMalformed("pkt-line length %d exceeds %d", length, serveLFSMaxPacketLength)
+		return 0, nil, 0, serveLFSMalformed("pkt-line length %d exceeds %d", length, serveLFSMaxPacketLength)
 	}
-	payload := p.payload[:length-serveLFSPacketHeader]
+	declared := length - serveLFSPacketHeader
+	payload := p.payload[:min(declared, max(limit, 0))]
 	if _, err := io.ReadFull(p.r, payload); err != nil {
 		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
-			return 0, nil, errServeLFSClosed
+			return 0, nil, 0, errServeLFSClosed
 		}
-		return 0, nil, err
+		return 0, nil, 0, err
 	}
-	return serveLFSDataPacket, payload, nil
+	return serveLFSDataPacket, payload, declared, nil
 }
 
 func serveLFSHexValue(digit byte) (int, bool) {
@@ -234,7 +247,7 @@ func runServeLFSSession(layout serveLayout, binding serveKeyBinding, repo, opera
 		actor:     binding.Actor,
 		repo:      repo,
 		operation: operation,
-		in:        newServeLFSPacketReader(bufio.NewReaderSize(in, serveLFSMaxPacketLength)),
+		in:        newServeLFSPacketReader(in),
 		out:       newServeLFSPacketWriter(out),
 	}
 	if err := session.prepare(); err != nil {
@@ -654,15 +667,21 @@ func (s *serveLFSTransfer) putObject(oid string) error {
 }
 
 // readObjectData passes the data packets of one put-object request, up to
-// its flush-pkt, to write. It reads no more than size bytes of data: when a
-// packet would take the total past size, it stops reading at that packet
-// and reports overran, and the rest of the body stays unread. The client
-// therefore cannot make the server read more than the declared size plus
-// one packet, and the session must end after its answer because the input
-// is no longer at a request boundary.
+// its flush-pkt, to write. It reads no more than size+1 bytes of object
+// data in total (T088): each packet's payload is read only up to the bytes
+// still allowed, so when a packet would take the total past size, the
+// server reads at most one byte beyond size from it, reports overran and
+// leaves the rest of the body unread. The bytes past size are never
+// written. The session must end after its answer because the input is no
+// longer at a request boundary.
 func (s *serveLFSTransfer) readObjectData(size int64, write func([]byte) error) (received int64, overran bool, err error) {
 	for {
-		kind, payload, err := s.in.next()
+		remaining := size - received
+		allowed := serveLFSMaxPayload
+		if remaining < serveLFSMaxPayload {
+			allowed = int(remaining) + 1
+		}
+		kind, payload, declared, err := s.in.nextUpTo(allowed)
 		if err != nil {
 			return received, false, err
 		}
@@ -672,7 +691,7 @@ func (s *serveLFSTransfer) readObjectData(size int64, write func([]byte) error) 
 		case serveLFSDelimPacket:
 			return received, false, serveLFSMalformed("unexpected delim packet in object data")
 		}
-		if int64(len(payload)) > size-received {
+		if int64(declared) > remaining {
 			return received, true, nil
 		}
 		if err := write(payload); err != nil {
