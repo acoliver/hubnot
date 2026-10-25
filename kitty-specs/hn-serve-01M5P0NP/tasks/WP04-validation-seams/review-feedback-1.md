@@ -1,13 +1,3 @@
----
-affected_files: []
-cycle_number: 1
-mission_slug: hn-serve-01M5P0NP
-reproduction_command:
-reviewed_at: '2026-10-25T07:29:43Z'
-reviewer_agent: user
-wp_id: WP04
----
-
 # WP04 review: changes requested
 
 Reviewer: llxprt, 2026-10-25.
