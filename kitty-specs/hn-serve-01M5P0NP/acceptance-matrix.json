@@ -158,10 +158,10 @@
       "criterion_id": "FR-016",
       "description": "Verify FR-016 is satisfied",
       "proof_type": "automated_test",
-      "evidence": null,
-      "pass_fail": "pending",
-      "verified_by": null,
-      "verified_at": null,
+      "evidence": "TestServeAdvanceKeepsLocalMerge; TestServeAdvanceRefusesOrdinaryRemote; gate log /home/acoliver/projects/appaday/gitium/.scratch/accept/race.log; candidate 151b7be421b507596728c507370adcb5b14ccfdf",
+      "pass_fail": "pass",
+      "verified_by": "llxprt-gpt-sol-high",
+      "verified_at": "2026-10-25T20:10:52.878743+00:00",
       "notes": "TODO: replace with a real acceptance criterion"
     },
     {
