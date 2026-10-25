@@ -13,6 +13,7 @@
   "accepted_at": "2026-10-25T20:14:12.729067+00:00",
   "accepted_by": "acoliver (maintainer)",
   "accepted_from_commit": "288190ce87563b762ee8a92adbe76ae8fafbda03",
+  "baseline_merge_commit": "25ddff64bde2b6594d126c8b0c0d8feffe36a745",
   "coordination_branch": "kitty/mission-hn-serve-01M5P0NP",
   "created_at": "2026-10-24T03:53:32.837247+00:00",
   "flattened": false,
