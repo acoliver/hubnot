@@ -1,13 +1,3 @@
----
-affected_files: []
-cycle_number: 2
-mission_slug: hn-serve-01M5P0NP
-reproduction_command:
-reviewed_at: '2026-10-25T11:57:55Z'
-reviewer_agent: user
-wp_id: WP08
----
-
 # WP08 independent review, cycle 2: changes required
 
 Reviewer: llxprt. Mission: hn-serve-01M5P0NP.
