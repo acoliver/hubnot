@@ -1,7 +1,7 @@
 {
-  "event_count": 128,
-  "last_event_id": "01M5SXVCTSXX2GGXR43QYMVXAN",
-  "materialized_at": "2026-10-25T16:21:11.641703+00:00",
+  "event_count": 131,
+  "last_event_id": "01M5SYMYZN08RR4YGBMKA39Z2K",
+  "materialized_at": "2026-10-25T16:35:09.422734+00:00",
   "mission_number": "",
   "mission_slug": "hn-serve-01M5P0NP",
   "mission_type": "software-dev",
@@ -12,8 +12,8 @@
     "claimed": 0,
     "done": 0,
     "for_review": 0,
-    "in_progress": 0,
-    "in_review": 1,
+    "in_progress": 1,
+    "in_review": 0,
     "planned": 0
   },
   "work_packages": {
@@ -471,28 +471,35 @@
     },
     "WP14": {
       "actor": "llxprt",
-      "agent": "llxprt",
+      "agent": null,
       "agent_profile": "__resolved_profile_absent__",
       "agent_profile_version": "__resolved_profile_version_absent__",
-      "force_count": 0,
-      "lane": "in_review",
-      "last_event_id": "01M5SXVCTSXX2GGXR43QYMVXAN",
-      "last_transition_at": "2026-10-25T16:21:11.641703+00:00",
+      "force_count": 1,
+      "lane": "in_progress",
+      "last_event_id": "01M5SYMYZN08RR4YGBMKA39Z2K",
+      "last_transition_at": "2026-10-25T16:35:09.422734+00:00",
       "model": "__resolved_model_absent__",
       "notes": [
         "Implemented git-lfs-transfer v1 in serve_lfs.go (stdlib only): pkt-line reader checks length (max 65519) before any read/alloc; version/batch/put-object/verify-object/get-object/quit; lock, unlock, list-lock answer 501 \"locking is unsupported by hn serve\", locking never advertised. Uploads stage 0600 in lfs/incoming, verified size+SHA-256 (422 lfs-object-mismatch), then quota recheck under lfs.lock and rename+fsync into lfs/objects. Inclusive quota at batch, before put-object data, after verification (507 lfs-quota budget/limit/measured). Staged files >1h removed at session start; closed connection removes its own staged file. Renames/removals in lfs/incoming take the exclusive layout lock so concurrent session validation cannot see a vanishing file. Request text bounded (64 args, 10000 lines, 4 MiB). serve_session.go: only the LFS arm (calls runServeLFSSession with session streams) and serveLFSEnabled=true. Tests: 14 TestServeLFS* (real Git LFS 3.7.1 round trip, mismatch, quota boundary, concurrent recheck, locking incl. client, interruption incl. killed session, batch, framing, reader unit test, key/repo checks, NFR-004 snapshot + bwrap boundary, documented examples lfs-quota and lfs-object-mismatch). Docs: guide LFS section, traceability rows without pending markers, NFR-004/008 rows extended, threat-model Git LFS storage. Small guide wording fixes outside the LFS section removed now-false \"refused while LFS is not enabled\" text. Gate: gofmt clean; go vet/build ok; go test -race (skip perf) ./... ok (693s); perf test without race ok (10.9s). Note: client sends list-lock before every push regardless of capability; 501 makes it set locksverify=false (pinned). Ran the authorized kitty-specs cleanup commit on the lane before this move."
       ],
       "provider": "__resolved_provider_absent__",
-      "role": "reviewer",
-      "shell_pid": 2658552,
-      "shell_pid_created_at": "1792945269.53",
+      "review": null,
+      "review_result": {
+        "feedback_path": "/home/acoliver/projects/appaday/gitium/hubnot/kitty-specs/hn-serve-01M5P0NP/tasks/WP14-git-lfs-transfer-and-quota/review-cycle-1.md",
+        "reference": "review-cycle://hn-serve-01M5P0NP/WP14-git-lfs-transfer-and-quota/review-cycle-1.md",
+        "reviewer": "user",
+        "verdict": "changes_requested"
+      },
+      "role": "implementer",
+      "shell_pid": null,
+      "shell_pid_created_at": null,
       "subtasks": {
-        "T086": "done",
-        "T087": "done",
-        "T088": "done",
-        "T089": "done",
-        "T090": "done",
-        "T091": "done"
+        "T086": "planned",
+        "T087": "planned",
+        "T088": "planned",
+        "T089": "planned",
+        "T090": "planned",
+        "T091": "planned"
       }
     }
   }
