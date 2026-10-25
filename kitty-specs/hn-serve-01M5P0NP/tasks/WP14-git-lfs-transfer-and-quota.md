@@ -92,7 +92,7 @@ Serve Git LFS objects for hosted repositories over the `git-lfs-transfer` SSH pr
 | File | Change |
 |----|----|
 | `serve_lfs.go` | NEW. pkt-line framing, protocol, storage, quota. |
-| `serve_session.go` | CHANGE. Replace only the `git-lfs-transfer` refusal arm with a call into `serve_lfs.go`. |
+| `serve_session.go` | CHANGE. Replace only the `git-lfs-transfer` refusal arm with a call into `serve_lfs.go`, and set `serveLFSEnabled = true`. |
 | `serve_lfs_test.go` | NEW. |
 | `docs/serve-v0.md` | CHANGE. "Large files with Git LFS" section only. |
 | `docs/threat-model.md` | CHANGE. Fill the "Git LFS storage" placeholder WP13 left. |
@@ -113,7 +113,7 @@ Serve Git LFS objects for hosted repositories over the `git-lfs-transfer` SSH pr
 
 **Steps**:
 
-1. In `serve_session.go`, replace the refusal arm so a validated `git-lfs-transfer` request calls `runServeLFSSession(layout, binding, repo, op, os.Stdin, os.Stdout)`. Change nothing else in that file.
+1. In `serve_session.go`, replace the refusal arm so a validated `git-lfs-transfer` request calls `runServeLFSSession(layout, binding, repo, op, os.Stdin, os.Stdout)`, and set `serveLFSEnabled = true` so WP06's seam test skips with its documented reason. Change nothing else in that file and do not edit `serve_session_test.go`.
 2. Session (contract table): send `version=1` then flush (never advertise `locking`). Then loop over commands:
    - `version 1` gets `status 200` and flush; any other version `status 400`.
    - `batch` with arguments `transfer`, `refname` and `hash-algo` (ignore other arguments, as the proposal requires; `hash-algo` must be absent or `sha256`, otherwise `status 400`), followed by `oid size` lines until flush. Each OID is 64 lowercase hex and each size decimal. For `upload`: a stored object gets action `noop`, a missing one `upload`. For `download`: every object gets `download`. No `id` or `token` values.
