@@ -377,7 +377,14 @@ right before the rename, so concurrent uploads cannot exceed it together
 Requests are bounded too: a pkt-line length header above 65519 is refused
 before the server reads the packet, and one request may carry at most 64
 arguments, 10,000 object lines and 4 MiB of text (`TestServeLFSFramingRefusals`,
-`TestServeLFSPacketReaderChecksLengthBeforeReading`).
+`TestServeLFSPacketReaderChecksLengthBeforeReading`). The server reads an
+upload's data only up to its declared size, whether it stores the data or
+discards it after a quota refusal. Data that goes past that size gets an
+`lfs-object-mismatch` answer at the packet that passes it, and the session
+ends without reading the rest, so a client that declares a small object and
+keeps sending cannot hold the session open or make the server read without
+limit (`TestServeLFSOversizedUploadEndsSession`,
+`TestServeLFSUploadReadsNoFurtherThanDeclaredSize`).
 
 **Staging isolation.** Uploads in progress live only in `lfs/incoming/`, which
 no download reads and the quota never counts. An interrupted upload therefore

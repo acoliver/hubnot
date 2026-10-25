@@ -65,6 +65,11 @@ func serveLFSMalformed(format string, args ...any) error {
 // request boundary or in the middle of one. Nothing can be answered.
 var errServeLFSClosed = errors.New("git-lfs-transfer connection closed")
 
+// errServeLFSEnded reports that the session has sent its last answer and
+// must end with exit status 1 without reading further, because the input is
+// no longer at a request boundary: an upload sent more data than it declared.
+var errServeLFSEnded = errors.New("git-lfs-transfer session ended after its answer")
+
 // T086: pkt-line framing.
 
 type serveLFSPacketKind int
@@ -220,8 +225,9 @@ type serveLFSRequest struct {
 }
 
 // runServeLFSSession serves git-lfs-transfer on in and out and returns the
-// exit status: 0 after quit, 1 after a malformed request or a lost
-// connection. An error is an internal failure that main reports.
+// exit status: 0 after quit, 1 after a malformed request, an upload that
+// sent more data than it declared, or a lost connection. An error is an
+// internal failure that main reports.
 func runServeLFSSession(layout serveLayout, binding serveKeyBinding, repo, operation string, in io.Reader, out io.Writer) (int, error) {
 	session := &serveLFSTransfer{
 		layout:    layout,
@@ -244,7 +250,7 @@ func runServeLFSSession(layout serveLayout, binding serveKeyBinding, repo, opera
 	for {
 		done, err := session.serveOne()
 		switch {
-		case errors.Is(err, errServeLFSClosed):
+		case errors.Is(err, errServeLFSClosed), errors.Is(err, errServeLFSEnded):
 			return 1, nil
 		case errors.Is(err, errServeLFSMalformed):
 			_ = session.respond(400, nil, []string{serveSanitizeText(err.Error())})
@@ -624,10 +630,8 @@ func (s *serveLFSTransfer) putObject(oid string) error {
 	}
 	size, sizeOK := serveLFSSizeArgument(args)
 	if !validServeLFSOID(oid) || !sizeOK {
-		if err := s.discardData(); err != nil {
-			return err
-		}
-		return s.respond(400, nil, []string{"put-object needs a 64-hex lowercase OID and one decimal size= argument"})
+		// Without a valid size the data has no bound, so it is not read.
+		return serveLFSMalformed("put-object needs a 64-hex lowercase OID and one decimal size= argument")
 	}
 	present, err := s.objectStored(oid)
 	if err != nil {
@@ -639,10 +643,7 @@ func (s *serveLFSTransfer) putObject(oid string) error {
 			return err
 		}
 		if measured > limit {
-			if err := s.discardData(); err != nil {
-				return err
-			}
-			return s.respondQuota(limit, measured)
+			return s.discardData(oid, size, limit, measured)
 		}
 	}
 	staged, err := s.receiveStaged(oid, size)
@@ -652,32 +653,74 @@ func (s *serveLFSTransfer) putObject(oid string) error {
 	return s.commitStaged(staged, oid, size)
 }
 
-// discardData reads and drops object data up to the flush-pkt.
-func (s *serveLFSTransfer) discardData() error {
+// readObjectData passes the data packets of one put-object request, up to
+// its flush-pkt, to write. It reads no more than size bytes of data: when a
+// packet would take the total past size, it stops reading at that packet
+// and reports overran, and the rest of the body stays unread. The client
+// therefore cannot make the server read more than the declared size plus
+// one packet, and the session must end after its answer because the input
+// is no longer at a request boundary.
+func (s *serveLFSTransfer) readObjectData(size int64, write func([]byte) error) (received int64, overran bool, err error) {
 	for {
-		kind, _, err := s.in.next()
+		kind, payload, err := s.in.next()
 		if err != nil {
-			return err
+			return received, false, err
 		}
 		switch kind {
 		case serveLFSFlushPacket:
-			return nil
+			return received, false, nil
 		case serveLFSDelimPacket:
-			return serveLFSMalformed("unexpected delim packet in object data")
+			return received, false, serveLFSMalformed("unexpected delim packet in object data")
 		}
+		if int64(len(payload)) > size-received {
+			return received, true, nil
+		}
+		if err := write(payload); err != nil {
+			return received, false, err
+		}
+		received += int64(len(payload))
 	}
 }
 
+// discardData reads and drops the data of an upload refused by the quota,
+// then answers with the quota refusal. Data beyond the declared size gets
+// the lfs-object-mismatch answer instead and ends the session.
+func (s *serveLFSTransfer) discardData(oid string, size, limit, measured int64) error {
+	_, overran, err := s.readObjectData(size, func([]byte) error { return nil })
+	if err != nil {
+		return err
+	}
+	if overran {
+		return s.respondOverran(oid)
+	}
+	return s.respondQuota(limit, measured)
+}
+
+// serveLFSUpload is the outcome of streaming one upload into staging.
+type serveLFSUpload int
+
+const (
+	// serveLFSUploadMatched: the byte count and SHA-256 match the request.
+	serveLFSUploadMatched serveLFSUpload = iota
+	// serveLFSUploadMismatched: the data ended at a flush-pkt but its byte
+	// count or SHA-256 differs.
+	serveLFSUploadMismatched
+	// serveLFSUploadOverran: the data went past the declared size and was
+	// not read to its end.
+	serveLFSUploadOverran
+)
+
 // receiveStaged streams the object data into a new 0600 file in
 // lfs/incoming/ and returns its path when the content matches oid and size.
-// On a mismatch it removes the file, answers status 422 and returns "". On
+// On a mismatch it removes the file, answers status 422 and returns "";
+// when the data went past the declared size it also ends the session. On
 // any error, a lost connection included, it removes the file too.
 func (s *serveLFSTransfer) receiveStaged(oid string, size int64) (string, error) {
 	file, path, err := s.createStaged()
 	if err != nil {
 		return "", err
 	}
-	matched, err := s.streamStaged(file, path, oid, size)
+	upload, err := s.streamStaged(file, path, oid, size)
 	if closeErr := file.Close(); closeErr != nil && err == nil {
 		err = serveStateError(path, closeErr)
 	}
@@ -685,56 +728,63 @@ func (s *serveLFSTransfer) receiveStaged(oid string, size int64) (string, error)
 		_ = s.removeStaged(path)
 		return "", err
 	}
-	if !matched {
-		if err := s.removeStaged(path); err != nil {
-			return "", err
-		}
-		return "", s.respondRejection(422, serveRejection{
-			Ref:   "-",
-			Actor: s.actor,
-			Code:  serveReasonLFSObjectMismatch,
-			IDs:   []string{oid},
-			Next:  serveReasonDefaultNext(serveReasonLFSObjectMismatch),
-		})
+	if upload == serveLFSUploadMatched {
+		return path, nil
 	}
-	return path, nil
+	if err := s.removeStaged(path); err != nil {
+		return "", err
+	}
+	if upload == serveLFSUploadOverran {
+		return "", s.respondOverran(oid)
+	}
+	return "", s.respondMismatch(oid)
 }
 
-// streamStaged copies data packets up to the flush-pkt into file while
-// hashing them. It keeps at most size+1 bytes, enough to prove a size
-// mismatch, and drops the rest. It reports whether the byte count equals
-// size and the SHA-256 equals oid, and syncs the file when they do.
-func (s *serveLFSTransfer) streamStaged(file *os.File, path, oid string, size int64) (bool, error) {
+// streamStaged copies the object data into file while hashing it, reading
+// at most size bytes (see readObjectData). It reports whether the byte count
+// equals size and the SHA-256 equals oid, and syncs the file when they do.
+func (s *serveLFSTransfer) streamStaged(file *os.File, path, oid string, size int64) (serveLFSUpload, error) {
 	hash := sha256.New()
 	writer := io.MultiWriter(file, hash)
-	keepLimit := serveLFSAddBytes(size, 1)
-	var received int64
-	for {
-		kind, payload, err := s.in.next()
-		if err != nil {
-			return false, err
+	received, overran, err := s.readObjectData(size, func(payload []byte) error {
+		if _, err := writer.Write(payload); err != nil {
+			return serveStateError(path, err)
 		}
-		if kind == serveLFSFlushPacket {
-			break
-		}
-		if kind == serveLFSDelimPacket {
-			return false, serveLFSMalformed("unexpected delim packet in object data")
-		}
-		if received < keepLimit {
-			wanted := min(int64(len(payload)), keepLimit-received)
-			if _, err := writer.Write(payload[:wanted]); err != nil {
-				return false, serveStateError(path, err)
-			}
-		}
-		received = serveLFSAddBytes(received, int64(len(payload)))
-	}
-	if received != size || hex.EncodeToString(hash.Sum(nil)) != oid {
-		return false, nil
+		return nil
+	})
+	switch {
+	case err != nil:
+		return serveLFSUploadMismatched, err
+	case overran:
+		return serveLFSUploadOverran, nil
+	case received != size || hex.EncodeToString(hash.Sum(nil)) != oid:
+		return serveLFSUploadMismatched, nil
 	}
 	if err := file.Sync(); err != nil {
-		return false, serveStateError(path, err)
+		return serveLFSUploadMismatched, serveStateError(path, err)
 	}
-	return true, nil
+	return serveLFSUploadMatched, nil
+}
+
+// respondMismatch answers status 422 with the lfs-object-mismatch line.
+func (s *serveLFSTransfer) respondMismatch(oid string) error {
+	return s.respondRejection(422, serveRejection{
+		Ref:   "-",
+		Actor: s.actor,
+		Code:  serveReasonLFSObjectMismatch,
+		IDs:   []string{oid},
+		Next:  serveReasonDefaultNext(serveReasonLFSObjectMismatch),
+	})
+}
+
+// respondOverran answers an upload whose data went past its declared size
+// with the lfs-object-mismatch line and ends the session, whose input still
+// holds the unread rest of the object.
+func (s *serveLFSTransfer) respondOverran(oid string) error {
+	if err := s.respondMismatch(oid); err != nil {
+		return err
+	}
+	return errServeLFSEnded
 }
 
 // createStaged creates a new 0600 file with a random name in lfs/incoming/.

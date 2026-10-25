@@ -347,6 +347,25 @@ func (c *serveLFSConn) finish() (int, string) {
 	}
 }
 
+// requireEnded requires the server to end the session on its own, with no
+// further output, while the client still holds stdin open.
+func (c *serveLFSConn) requireEnded(label string) {
+	c.t.Helper()
+	ended := make(chan []byte, 1)
+	go func() {
+		rest, _ := io.ReadAll(c.stdout)
+		ended <- rest
+	}()
+	select {
+	case rest := <-ended:
+		if len(rest) != 0 {
+			c.t.Fatalf("%s: the session wrote %q after its last answer", label, rest)
+		}
+	case <-time.After(30 * time.Second):
+		c.t.Fatalf("%s: the session was still open 30 seconds after its last answer; stderr %s", label, c.stderr)
+	}
+}
+
 // quit sends quit, requires status 200 and exit 0.
 func (c *serveLFSConn) quit() {
 	c.t.Helper()
@@ -488,9 +507,11 @@ func serveLFSGuideExample(t *testing.T, marker string) []string {
 }
 
 // US5-2 and FR-020: an upload whose content does not hash to its OID, or
-// whose length differs from its declared size, is discarded with an
-// lfs-object-mismatch line and is never stored or downloadable. The line is
-// the guide's lfs-object-mismatch example.
+// whose length falls short of its declared size, is discarded with an
+// lfs-object-mismatch line and is never stored or downloadable, and the
+// session goes on. The line is the guide's lfs-object-mismatch example.
+// Content longer than the declared size is covered by
+// TestServeLFSOversizedUploadEndsSession.
 func TestServeLFSObjectMismatch(t *testing.T) {
 	documented := serveLFSGuideExample(t, "<!-- example: lfs-object-mismatch -->")
 	if len(documented) != 1 {
@@ -511,7 +532,6 @@ func TestServeLFSObjectMismatch(t *testing.T) {
 	}{
 		{"other content of the declared size", serveLFSRandom(t, len(declared))},
 		{"declared content cut short", declared[:len(declared)-1]},
-		{"declared content with extra bytes", append(append([]byte{}, declared...), serveLFSRandom(t, 70000)...)},
 		{"empty content", nil},
 	} {
 		conn.send(serveLFSPutObject(oid, len(declared), attempt.content))
@@ -548,6 +568,154 @@ func TestServeLFSObjectMismatch(t *testing.T) {
 	download.quit()
 	if stored := f.lfsStored(); stored != 0 {
 		t.Fatalf("lfs-stored = %d after only mismatched uploads", stored)
+	}
+}
+
+// T088 and FR-020: an upload that sends more data than its declared size,
+// by one byte or by far more, is answered with the lfs-object-mismatch line
+// as soon as the data passes the size, and the session ends with exit
+// status 1 without reading the rest. A put-object without a valid size has
+// no bound for its data and ends the session with status 400. Nothing is
+// staged, stored or downloadable afterwards.
+func TestServeLFSOversizedUploadEndsSession(t *testing.T) {
+	f := newServeLFSFixture(t, newServeHarness(t))
+	layout := f.h.Layout()
+	declared := serveLFSRandom(t, 4096)
+	oid := serveLFSOID(declared)
+	for _, attempt := range []struct {
+		name    string
+		size    int
+		content []byte
+	}{
+		{"declared content with one extra byte", len(declared), append(append([]byte{}, declared...), 0)},
+		{"declared content with extra bytes", len(declared), append(append([]byte{}, declared...), serveLFSRandom(t, 70000)...)},
+		{"one byte declared, 1 MiB sent", 1, serveLFSRandom(t, 1<<20)},
+	} {
+		conn := openServeLFS(t, f.h, f.keys["A"], "upload")
+		// The server stops reading once the data passes the declared size
+		// and exits, so a failed write here is expected and ignored.
+		go func(wire []byte) { _, _ = conn.stdin.Write(wire) }(serveLFSPutObject(oid, attempt.size, attempt.content))
+		response := conn.read()
+		serveLFSRequireRejection(t, attempt.name, response, 422, serveReasonLFSObjectMismatch, f.actors["A"])
+		want := "hn-serve/1 reject ref=- actor=" + f.actors["A"] + " code=lfs-object-mismatch ids=" + oid + ` next="retry the upload"`
+		if response.Lines[0] != want {
+			t.Fatalf("%s: message %q, want %q", attempt.name, response.Lines[0], want)
+		}
+		conn.requireEnded(attempt.name)
+		if status, rest := conn.finish(); status != 1 || rest != "" {
+			t.Fatalf("%s: exit %d with trailing output %q, want exit 1; stderr %s", attempt.name, status, rest, conn.stderr)
+		}
+		if staged := serveHarnessEntries(t, layout.RepoLFSIncoming("r")); len(staged) != 0 {
+			t.Fatalf("%s: lfs/incoming holds %q after the rejection", attempt.name, staged)
+		}
+	}
+
+	conn := openServeLFS(t, f.h, f.keys["A"], "upload")
+	unsized := serveLFSRequestBytes("put-object "+oid, nil, serveLFSWireData(serveLFSRandom(t, 1<<20)))
+	go func() { _, _ = conn.stdin.Write(unsized) }()
+	if response := conn.read(); response.Status != 400 || len(response.Lines) != 1 || !strings.Contains(response.Lines[0], "one decimal size= argument") {
+		t.Fatalf("put-object without a size answered %+v, want 400 naming the size argument", response)
+	}
+	conn.requireEnded("put-object without a size")
+	if status, rest := conn.finish(); status != 1 || rest != "" {
+		t.Fatalf("put-object without a size: exit %d with trailing output %q, want exit 1", status, rest)
+	}
+
+	if stored := serveLFSEntries(t, layout.RepoLFSObjects("r")); len(stored) != 0 {
+		t.Fatalf("lfs/objects holds %q after only oversized uploads", stored)
+	}
+	download := openServeLFS(t, f.h, f.keys["B"], "download")
+	download.send(serveLFSRequestBytes("get-object "+oid, nil, nil))
+	if response := download.read(); response.Status != 404 {
+		t.Fatalf("get-object after oversized uploads answered %+v, want 404", response)
+	}
+	download.quit()
+	if stored := f.lfsStored(); stored != 0 {
+		t.Fatalf("lfs-stored = %d after only oversized uploads", stored)
+	}
+}
+
+// serveLFSEndlessBody is the input of an upload session that declares a
+// size and then sends data packets without end. It counts the bytes the
+// server reads and refuses, and records, any read past limit.
+type serveLFSEndlessBody struct {
+	pending  []byte
+	packet   []byte
+	limit    int
+	read     int
+	overread bool
+}
+
+func (b *serveLFSEndlessBody) Read(p []byte) (int, error) {
+	if b.read >= b.limit {
+		b.overread = true
+		return 0, errors.New("the server read past the bound on an oversized upload")
+	}
+	if len(b.pending) == 0 {
+		b.pending = b.packet
+	}
+	n := copy(p[:min(len(p), b.limit-b.read)], b.pending)
+	b.pending = b.pending[n:]
+	b.read += n
+	return n, nil
+}
+
+// T088 and T089: the server reads no further than the declared size of an
+// upload plus the packet that passes it, both when the upload is being
+// staged and when the quota refused it before its data. The input never
+// ends, so a server that reads to the flush-pkt runs into the bound. The
+// bound allows the declared size, its packet headers, the packet that
+// passes the size and one buffer of read-ahead.
+func TestServeLFSUploadReadsNoFurtherThanDeclaredSize(t *testing.T) {
+	f := newServeLFSFixture(t, newServeHarness(t))
+	layout := f.h.Layout()
+	const declared, payload = 100_000, 1000
+	oid := serveLFSOID(serveLFSRandom(t, declared))
+	packet := serveLFSWireData(serveLFSRandom(t, payload))
+	for _, test := range []struct {
+		name  string
+		quota string
+	}{
+		{"staged upload", "1073741824"},
+		{"upload refused by the quota", "50"},
+	} {
+		f.h.Serve("serve", "repo", "set", "r", "--lfs-quota", test.quota)
+		var prefix bytes.Buffer
+		prefix.Write(serveLFSRequestBytes("version 1", nil, nil))
+		prefix.Write(serveLFSWireText("put-object " + oid))
+		prefix.Write(serveLFSWireText("size=" + strconv.Itoa(declared)))
+		prefix.WriteString(serveLFSWireDelim)
+		needed := prefix.Len() + (declared/payload+1)*len(packet)
+		body := &serveLFSEndlessBody{pending: prefix.Bytes(), packet: packet, limit: needed + serveLFSMaxPacketLength}
+
+		var output bytes.Buffer
+		status, err := runServeLFSSession(layout, serveKeyBinding{Actor: f.actors["A"]}, "r", serveLFSOperationUpload, body, &output)
+		if body.overread {
+			t.Fatalf("%s: the session read past %d bytes of input", test.name, body.limit)
+		}
+		if err != nil || status != 1 {
+			t.Fatalf("%s: session returned %d, %v; want exit 1 without an internal error", test.name, status, err)
+		}
+		conn := &serveLFSConn{t: t, stdout: bufio.NewReader(&output), stderr: &bytes.Buffer{}}
+		if capabilities := conn.readPackets(); !equalStrings(capabilities, []string{"version=1"}) {
+			t.Fatalf("%s: capability advertisement %q", test.name, capabilities)
+		}
+		if response := conn.read(); response.Status != 200 {
+			t.Fatalf("%s: version 1 answered %+v", test.name, response)
+		}
+		rejection := serveLFSRequireRejection(t, test.name, conn.read(), 422, serveReasonLFSObjectMismatch, f.actors["A"])
+		if !equalStrings(rejection.IDs, []string{oid}) {
+			t.Fatalf("%s: ids %q, want the declared OID", test.name, rejection.IDs)
+		}
+		if rest, _ := io.ReadAll(conn.stdout); len(rest) != 0 {
+			t.Fatalf("%s: the session wrote %q after the rejection", test.name, rest)
+		}
+		if staged := serveHarnessEntries(t, layout.RepoLFSIncoming("r")); len(staged) != 0 {
+			t.Fatalf("%s: lfs/incoming holds %q", test.name, staged)
+		}
+		if stored := serveLFSEntries(t, layout.RepoLFSObjects("r")); len(stored) != 0 {
+			t.Fatalf("%s: lfs/objects holds %q", test.name, stored)
+		}
 	}
 }
 

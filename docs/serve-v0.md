@@ -1652,7 +1652,7 @@ git diff --check
 | FR-017 | Fact advertisement | `TestServeReplicationAdvertisesAcceptedFacts`, `TestServeWireRemoteIdentification` |
 | FR-018 | All-trusted selection | `TestServeReplicationRunnerDiscoversNewWork`, `TestReplicationAllTrustedRefusesUnmarkedRemote`, `TestReplicationAllTrustedMutualExclusionBeforeNetwork`, `TestReplicationAllTrustedForgedMarkerGrantsNoTrust` |
 | FR-019 | Existing selections unchanged | `TestServeReplicationSelectionsMatchOrdinaryRemote`, `TestReplicationAllTrustedExistingModesIgnoreMarker`, `TestReplicationAllTrustedSelectionFilesAndShowOutput` |
-| FR-020 | LFS transfer | `TestServeLFSRoundTrip`, `TestServeLFSObjectMismatch`, `TestServeLFSSessionChecksKeyAndRepository`, `TestServeLFSInterruptedUploadNeverStored`, `TestServeLFSBatchActions`, `TestServeLFSFramingRefusals`, `TestServeLFSPacketReaderChecksLengthBeforeReading` |
+| FR-020 | LFS transfer | `TestServeLFSRoundTrip`, `TestServeLFSObjectMismatch`, `TestServeLFSSessionChecksKeyAndRepository`, `TestServeLFSInterruptedUploadNeverStored`, `TestServeLFSBatchActions`, `TestServeLFSFramingRefusals`, `TestServeLFSPacketReaderChecksLengthBeforeReading`, `TestServeLFSOversizedUploadEndsSession`, `TestServeLFSUploadReadsNoFurtherThanDeclaredSize` |
 | FR-021 | LFS quota | `TestServeLFSQuotaBoundary`, `TestServeLFSQuotaRecheckedBeforeStoring`, `TestServeLFSDocumentedExample`, `TestServeLFSLockingUnsupported` |
 | FR-022 | Protected-update serialization | `TestServeSessionPushWaitsForLockAndFetchDoesNot`, `TestServeProtectedNotFastForwardAndStaleTip`, `TestServeAdvanceConcurrentMaintainers` |
 | FR-023 | Documentation with tested examples | `TestServeQualityDocumentedExamplesAreExecuted`, `TestServeQualityTraceabilityTestsExist`, `TestServeReasonsDocsTableMatchesCatalogue` |
@@ -1699,7 +1699,7 @@ git diff --check
 | US4-5 | Existing selections behave as against an ordinary remote | `TestServeReplicationSelectionsMatchOrdinaryRemote`, `TestReplicationAllTrustedExistingModesIgnoreMarker` |
 | US4-6 | Phase 0 flow without selections or direct main pushes | `TestServeReplicationPhaseZeroFlow` |
 | US5-1 | LFS file reaches a second clone byte for byte | `TestServeLFSRoundTrip`, `TestServeLFSEnforcedWriteBoundary` |
-| US5-2 | Upload that does not match its object ID discarded | `TestServeLFSObjectMismatch` |
+| US5-2 | Upload that does not match its object ID discarded | `TestServeLFSObjectMismatch`, `TestServeLFSOversizedUploadEndsSession` |
 | US5-3 | Quota is inclusive at the limit | `TestServeLFSQuotaBoundary`, `TestServeLFSQuotaRecheckedBeforeStoring`, `TestServeLFSDocumentedExample` |
 | US5-4 | Locking answered as unsupported | `TestServeLFSLockingUnsupported` |
 
@@ -1826,6 +1826,15 @@ object ID, which the client shows as the reason for the failed upload:
 hn-serve/1 reject ref=- actor=4f1c9a6d0d2b7e3a8c5f6e1b9d0a7c3e2f4b6d8a0c1e3f5a7b9d1c3e5f7a9b1c code=lfs-object-mismatch ids=6a1e5e2f0c9d4b3a8f7e6d5c4b3a2f1e0d9c8b7a6f5e4d3c2b1a0f9e8d7c6b5a next="retry the upload"
 ```
 
+The server reads at most the declared size of an upload. When the data goes
+past that size, the server stops reading at the packet that passes it,
+removes the staged file and sends the same `lfs-object-mismatch` answer. The
+rest of the object is left unread, so the session ends there with exit
+status 1. A client therefore cannot make the server read more than the
+declared size plus one packet of at most 65515 bytes. A `put-object` request
+without a valid object ID or `size=` argument has no such bound, so the
+server answers status 400 and ends the session without reading its data.
+
 ### The LFS quota
 
 Every repository has an LFS quota in bytes, set with `--lfs-quota` on
@@ -1842,7 +1851,7 @@ would exceed it never becomes downloadable:
    sizes of every requested object that is not stored yet. If the total would
    exceed the quota, it refuses the whole request with status 507.
 2. Before it reads an object's data, it checks the declared size the same way,
-   and on refusal reads and discards the data.
+   and on refusal reads and discards the data, up to the declared size.
 3. After verifying the content, it takes the repository's `lfs.lock`, counts
    the stored bytes again and renames the object into place only if it still
    fits. Two uploads that each fit alone cannot exceed the quota together.
@@ -1900,9 +1909,9 @@ Each request in an LFS session gets one of these statuses. Statuses 400, 404,
 | Status | When |
 |----|----|
 | 200 | The request succeeded |
-| 400 | An unsupported protocol version, `hash-algo` other than `sha256`, an object ID that is not 64 lowercase hexadecimal digits, or a missing or malformed size. A malformed pkt-line, an unknown command, or `get-object` in an upload session or `put-object` and `verify-object` in a download session also end the session with exit status 1 |
+| 400 | An unsupported protocol version, `hash-algo` other than `sha256`, an object ID that is not 64 lowercase hexadecimal digits, or a missing or malformed size. A malformed pkt-line, an unknown command, a `put-object` without a valid object ID or size, or `get-object` in an upload session or `put-object` and `verify-object` in a download session also end the session with exit status 1 |
 | 404 | `get-object` or `verify-object` for an object that is not stored, or stored with a different size |
-| 422 | Uploaded content does not match its object ID or declared size (`lfs-object-mismatch`) |
+| 422 | Uploaded content does not match its object ID or declared size (`lfs-object-mismatch`). Data that goes past the declared size also ends the session with exit status 1 |
 | 501 | `lock`, `unlock` or `list-lock` |
 | 503 | `lfs.lock` stayed busy for 30 seconds; retry the upload |
 | 507 | The upload would exceed the quota (`lfs-quota`) |
