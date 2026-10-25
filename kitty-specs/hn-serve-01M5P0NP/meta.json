@@ -1,6 +1,8 @@
 {
+  "accept_commit": "78bfc768c8280c78ac5ba76c2738b3e39202cbc3",
   "acceptance_history": [
     {
+      "accept_commit": "78bfc768c8280c78ac5ba76c2738b3e39202cbc3",
       "acceptance_mode": "pr",
       "accepted_at": "2026-10-25T20:14:12.729067+00:00",
       "accepted_by": "acoliver (maintainer)",
