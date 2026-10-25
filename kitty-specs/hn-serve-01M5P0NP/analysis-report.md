@@ -4,7 +4,7 @@ artifact_type: spec-kitty.analysis-report
 command: /spec-kitty.analyze
 mission_slug: hn-serve-01M5P0NP
 mission_id: 01M5P0NPCQXWXNN63MXCBQSRVP
-generated_at: '2026-10-25T03:50:05.366465+00:00'
+generated_at: '2026-10-25T03:50:45.294962+00:00'
 analyzer_agent: llxprt
 input_artifacts:
   spec.md:
@@ -19,22 +19,11 @@ input_artifacts:
   charter:
     path: .kittify/charter/charter.yaml
     sha256: 404c65fe9e64919858d009c763644aefbfd369884d573d1986e3db7fa1f14bc9
-verdict: unknown
-issue_counts:
-  medium:
-  high:
-  info:
-  low:
-  critical:
-findings: []
----
-
----
 verdict: ready
 issue_counts:
-  low: 0
-  high: 0
   critical: 0
+  high: 0
+  low: 0
   medium: 1
   info: 0
 findings:
@@ -43,7 +32,6 @@ findings:
   category: ambiguity
   summary: Charter CLI timeout applicability to the hosted push-verdict workload is undefined.
 ---
-
 
 ## Specification Analysis Report
 
