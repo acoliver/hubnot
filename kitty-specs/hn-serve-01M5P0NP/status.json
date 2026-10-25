@@ -240,6 +240,9 @@
       "last_event_id": "01M5S2W0ZM38NJVP44AYB1GEM0",
       "last_transition_at": "2026-10-25T08:29:40.724381+00:00",
       "model": "__resolved_model_absent__",
+      "notes": [
+        "Implemented --all-trusted selection (T068-T073) in commit a50d1bd (planning-artifact cleanup in eafe873). replication.go: AllTrusted field (omitempty), --all mutual exclusion, select-time serveRemoteIdentifies check after local validation, show line, usage string. quarantine.go: AllTrusted request branch (advertised actors and proposals only, sorted, exact selectors deduplicated by key), not-advertised status ignored by hasFailures, memoryReplicationRecovery treats actors/proposals as selected; exact memory loop extracted unchanged into appendExactMemoryRequests. commands.go: cmdSync rechecks identification only for all-trusted, skips import and keeps publication, prints not advertised yet. shallow.go untouched (documented). docs/replication-v0.md: all-trusted section, trust boundary paragraph, executed example. New replication_all_trusted_test.go covers US4-1..4, mutual exclusion before network, identification loss, broken-signature chain on a marked remote, FR-019 parity for exact/--all/no-selection, golden files and show output, shallow recovery, documented example; 7 scratch mutants all killed. Old vs new binary: exact and --all files and show output byte-identical; old binary rejects allTrusted with unknown field. Gate: gofmt -l empty; go vet and go build pass; go test -race -count=1 -timeout 60m -skip ^TestMemoryIndexTenThousandRecordsPerformanceAndRecovery$ ./... ok (699s); perf test without -race PASS (46.9s). No pre-existing test changed. README synopsis not owned by WP11, left for a later docs WP."
+      ],
       "provider": "__resolved_provider_absent__",
       "role": "implementer",
       "shell_pid": 3854634,
