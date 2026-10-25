@@ -1421,7 +1421,185 @@ fact for that commit, and it does not contact any remote, including an
 `hn serve` remote. `--branch` without `--remote` is a usage error.
 
 ## Runners and verifiers
-<!-- section owned by WP12 -->
+
+A CI runner executes run requests and publishes signed results. A verifier
+checks the evidence for a proposal in its own clone. Both follow a hosted
+repository with the all-trusted selection, which imports every new proposal
+and run request without naming each actor and candidate. The trust boundary of
+that selection is described in
+[All-trusted selection for hn serve remotes](replication-v0.md#all-trusted-selection-for-hn-serve-remotes).
+
+### Key bindings for runners and verifiers
+
+The server account accepts SSH connections only from bound keys, so a runner
+or a verifier needs a key binding before it can clone or fetch. A runner also
+publishes: `hn sync` pushes its actor chain, which carries every `run.result`
+it signs, and the server accepts an actor chain only from a key bound to that
+actor. Any other key is refused with `actor-key-mismatch`. Bind the runner's
+key to the actor that `hn identity show` prints in the runner's clone, as
+[Binding and removing keys](#binding-and-removing-keys) describes.
+
+A binding grants no policy role. Readiness counts a result only when its
+runner is listed under `trustedRunners` for the pipeline in the base
+`.hn/policy.json`, so add the runner's actor there as well.
+
+A verifier with its own Hubnot identity is bound the same way. A verifier
+clone without an identity signs nothing and publishes nothing, but it still
+needs a bound key to connect. The administrator binds that key to an actor
+fingerprint reserved for the verifier.
+
+### Saving the all-trusted selection
+
+Run this once in each runner or verifier clone:
+
+```sh
+hn replication select origin --all-trusted
+```
+
+The command checks that `origin` advertises the `refs/hn/serve/v1` marker and
+refuses an ordinary remote. The selection is saved in the clone, and every
+later `hn sync origin`, `hn runner once` and `hn runner watch` uses it. Add
+exact `--actor`, `--proposal` or `--memory` selectors to the same command only
+when the clone needs something the mode does not discover.
+
+### What each sync imports and validates
+
+Every `hn sync origin` with the all-trusted selection runs these steps:
+
+1. It checks identification again. When `origin` no longer advertises the
+   marker, it fetches nothing, prints
+   `remote origin no longer identifies as hn serve; reselect with hn replication select`,
+   still publishes the clone's own facts and exits 1.
+2. It requests every advertised `refs/hn/actors/ACTOR` and
+   `refs/hn/proposals/HASH` ref, then each exact selector.
+3. It fetches each ref into client quarantine and applies the saved per-ref
+   budgets, structural validation, relationship and dependency validation and
+   identity continuity. A ref that passes is promoted atomically into
+   `refs/hn/remotes/origin/...`.
+4. It prints one line per requested ref, such as
+   `Replication actor ACTOR: promoted`,
+   `Replication proposal ID: promoted` or a `failed (STATUS)` line with a
+   diagnostic.
+5. It publishes the clone's own actor chain, proposal code refs and memory
+   streams.
+
+The server checked every actor chain and proposal ref when it arrived and
+refused the ones that failed, so refused facts never appear in the
+advertisement. The client checks every fact again itself. A server that
+misbehaves can withhold facts from a clone, and it cannot make the clone
+accept an event with a broken signature or a broken chain. The marker ref is
+never imported.
+
+### Participants who have not published yet
+
+An actor whose key is bound and who has never pushed has no actor ref on the
+server. The all-trusted selection requests only advertised refs, so that
+actor produces no request and no output line. A clone that also names the
+actor with `--actor` next to `--all-trusted` prints
+`Replication actor ACTOR: not advertised yet` and still exits 0. Under an
+exact selection without `--all-trusted`, the same actor fails as
+`dependency-missing` and `hn sync` exits 1.
+
+### Memory streams need exact selection
+
+The all-trusted selection never requests memory refs. Import a memory stream
+by naming it next to the mode:
+
+```sh
+hn replication select origin --all-trusted --memory sha256:STREAM
+```
+
+An exact memory selector that the server does not advertise fails as
+`dependency-missing`.
+
+### Running CI requests
+
+`hn runner once` synchronizes, executes the first pending request for one
+pipeline signed by one requester, records a signed result and synchronizes
+again to publish it:
+
+```sh
+hn runner once --accept-pipeline test --accept-actor MAINTAINER
+```
+
+```text
+Runner accepted request 1e2822d10cd6 from 9d71a3cd9c0a for pipeline test
+Runner recorded passed result 9a34c097bf6b with sandbox backend
+```
+
+`--accept-actor` takes the requester's full actor fingerprint, usually a
+maintainer's, because readiness counts a result only when a policy maintainer
+signed its run request. When nothing is pending, the command prints
+`No pending test requests from actor 9d71a3cd9c0a.` and exits 0. The default
+`--backend sandbox` runs the steps under Bubblewrap. On a host without
+Bubblewrap, `--backend host --allow-unsafe-host-execution` runs them directly
+on the runner's host, which is safe only for proposals the runner's operator
+trusts.
+
+`hn runner watch` takes the same flags and repeats the cycle until it is
+interrupted. It waits `--interval` between cycles that ran nothing; the
+default is 30 seconds and the minimum is 1 second.
+
+Each cycle starts with `hn sync`, and a failing import stops the cycle before
+any request runs. Under the all-trusted selection a participant who has not
+published yet causes no failure, so new participants do not stop CI.
+
+### Verifying a hosted repository from a fresh clone
+
+A verifier needs only Git, `hn` and a bound key:
+
+```sh
+git clone ssh://hn-serve@git.example.internal/pingpong.git verify && cd verify
+hn replication select origin --all-trusted
+hn sync origin
+hn proposal status sha256:1c2d3e4f...
+```
+
+The clone has no Hubnot identity. `hn proposal status` recomputes the result
+from the events the clone verified itself, under the proposal's base policy:
+the signed head, the trusted approvals, the trusted CI passes, the acceptance
+decisions and, after an advancement, `Status:   merged`. No server verdict is
+read. `hn issue show ISSUE` shows the state of an issue the same way.
+
+### End-to-end team flow
+
+This is the Phase 0 flow of the rust-pingpong project with five participants:
+a maintainer, an orchestrator, an implementer, a reviewer and a runner. Each
+one has a clone, an identity from `hn init`, a bound key and the saved
+`hn replication select origin --all-trusted`. The base policy requires one
+trusted approval, one passing `test` result from the runner and one
+maintainer acceptance.
+
+1. The orchestrator opens an issue:
+   `hn issue open --body "Serve the ball and answer with pong." "Serve the ball"`,
+   then `hn sync origin`.
+2. The implementer runs `hn sync origin` and reads the issue with
+   `hn issue show ISSUE --json`.
+3. The implementer runs `git switch -c feature/serve-ball`, commits the
+   change, runs `git push -u origin feature/serve-ball`, opens the proposal with
+   `hn proposal open --base main --head feature/serve-ball "Serve the ball"`
+   and runs `hn sync origin`.
+4. The maintainer runs `hn sync origin`, `hn run request PROPOSAL test` and
+   `hn sync origin`.
+5. The runner runs `hn runner once --accept-pipeline test --accept-actor MAINTAINER`
+   and `hn sync origin`.
+6. The reviewer runs `hn sync origin`,
+   `hn review PROPOSAL --approve --body "pingpong.sh answers pong."` and
+   `hn sync origin`.
+7. The maintainer runs `hn sync origin`, `hn decide PROPOSAL --accept` and
+   `hn sync origin`, then advances `main` with
+   `hn merge PROPOSAL --remote origin`.
+8. The orchestrator runs `hn sync origin`, reads the issue head from
+   `head_ids` in `hn issue show ISSUE --json`, closes the issue with
+   `hn issue close ISSUE --expect HEAD` and runs `hn sync origin`.
+9. Anyone runs the verifier recipe above and sees the proposal `merged` and
+   the issue closed.
+
+No participant names an actor or a proposal in a selection, and no
+participant pushes `main`. The server moves `main` once, when the
+maintainer's `hn merge --remote` requests the advancement.
+`serve_replication_test.go` runs this flow on every test run with a portable
+shell pipeline in place of the project's cargo pipeline.
 
 ## Verification and traceability
 <!-- section owned by WP13 -->
