@@ -34,6 +34,7 @@ owned_files:
 - serve_wire.go
 - serve_reasons_test.go
 - docs/protocol-v0.md
+- commands.go
 role: implementer
 tags: []
 tracker_refs: []
@@ -86,6 +87,7 @@ This WP has no dependencies and runs in its own lane, in parallel with WP01, WP0
 | `serve_wire.go` | NEW. Marker constants, push option names, remote identification. |
 | `serve_reasons_test.go` | NEW. Tests for both files. |
 | `docs/protocol-v0.md` | CHANGE. New section "hn serve wire surface". Do not edit other sections. |
+| `commands.go` | CHANGE, shared with WP11 in dependency order (WP03 first). Only the three `git push` calls in `publishLocalFacts` are routed through `servePushRef`, so `hn sync` reports `hn-serve/1` rejections. WP11 owns every other change to this file. Recorded in the Activity Log entry for review cycle 2. |
 
 ## Subtasks
 

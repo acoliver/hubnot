@@ -64,7 +64,8 @@ No two work packages that can run at the same time own the same file. A file lis
 | `serve_verdict_facts.go` | WP08 | |
 | `serve_protected.go` | WP09 | |
 | `serve_client.go`, `governance.go` | WP10 | |
-| `replication.go`, `commands.go` | WP11 | |
+| `replication.go` | WP11 | |
+| `commands.go` | WP03, WP11 | WP03 routes only the three `git push` calls in `publishLocalFacts` through `servePushRef`; WP11 adds the `hn sync` identification recheck and output line |
 | `serve_lfs.go` | WP14 | |
 | `docs/serve-v0.md` | WP01, WP02, WP05, WP06, WP07, WP08, WP09, WP10, WP12, WP13, WP14 | Each owner writes the section named in its prompt |
 | `docs/threat-model.md` | WP06, WP13, WP14 | WP06 adds the server trust boundary; WP13 consolidates verdict and client trust; WP14 adds LFS |

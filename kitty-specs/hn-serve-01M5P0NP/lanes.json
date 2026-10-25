@@ -11,6 +11,7 @@
         "WP03"
       ],
       "write_scope": [
+        "commands.go",
         "docs/protocol-v0.md",
         "serve_reasons.go",
         "serve_reasons_test.go",
