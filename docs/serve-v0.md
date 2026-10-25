@@ -993,6 +993,13 @@ push over both `max-object-bytes` and `max-total-bytes` is reported as
 `max-object-bytes`, with the size of the largest object as the measurement.
 The hosted refs stay unchanged.
 
+An object the hosted value of the ref already reaches is not counted again,
+whatever file it was before. A run log with the same bytes as an earlier
+event's `event.json`, signature blob or run log adds no object and no bytes.
+For an actor ref the server counts the same objects and bytes that client
+replication counts for the same chain, so a push measured at exactly a limit
+on the client is accepted.
+
 A proposal code ref is new when it is pushed, so its measurement covers every
 object reachable from the proposal's head, including the history it shares
 with hosted branches, the way client replication measures a new proposal

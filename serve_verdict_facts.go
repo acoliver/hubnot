@@ -2,9 +2,6 @@ package main
 
 import (
 	"bufio"
-	"crypto/sha1"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"math"
@@ -147,63 +144,134 @@ func (usage serveFactUsage) plus(other serveFactUsage) serveFactUsage {
 // hostedFactUsage measures the hosted events the way the reader counts
 // them. event.json and the run log are in memory already; the signature is
 // stored base64-encoded and its blob may hold surrounding whitespace, so
-// one batched size query gives the exact blob sizes.
+// the batched object query gives the exact blob sizes.
 func (ctx *serveVerdictContext) hostedFactUsage() (serveFactUsage, error) {
-	if ctx.hostedUsageLoaded {
-		return ctx.hostedUsage, ctx.hostedUsageErr
-	}
-	ctx.hostedUsageLoaded = true
 	hosted, err := ctx.HostedEvents()
 	if err != nil {
-		ctx.hostedUsageErr = err
+		return serveFactUsage{}, err
+	}
+	objects, err := ctx.hostedEventObjects()
+	if err != nil {
 		return serveFactUsage{}, err
 	}
 	usage := serveFactUsage{Events: int64(len(hosted))}
-	paths := make([]string, 0, len(hosted))
 	for _, event := range hosted {
-		usage.Bytes += int64(len(event.Payload) + len(event.Attachments["log.txt"]))
-		paths = append(paths, event.Commit+":signature")
+		usage.Bytes += int64(len(event.Payload)+len(event.Attachments["log.txt"])) + objects[event.Commit].SignatureBytes
 	}
-	sizes, err := serveBlobSizes(ctx.GitDir, paths)
-	if err == nil {
-		for index, size := range sizes {
-			if size < 0 {
-				err = fmt.Errorf("hosted %s is missing", paths[index])
-				break
-			}
-			usage.Bytes += size
+	return usage, nil
+}
+
+// serveHostedEventObjects is what one hosted event commit reaches besides
+// itself: the object IDs of its tree, event.json, signature and, for a run
+// result, log.txt, and the stored size of its signature blob.
+type serveHostedEventObjects struct {
+	IDs            []string
+	SignatureBytes int64
+}
+
+// hostedEventObjects returns the objects of every hosted event commit,
+// read in one batched query at most once per hook run.
+func (ctx *serveVerdictContext) hostedEventObjects() (map[string]serveHostedEventObjects, error) {
+	if !ctx.hostedObjectsLoaded {
+		ctx.hostedObjectsLoaded = true
+		hosted, err := ctx.HostedEvents()
+		if err != nil {
+			ctx.hostedObjectsErr = err
+		} else {
+			ctx.hostedObjects, ctx.hostedObjectsErr = serveEventObjects(ctx.GitDir, hosted)
 		}
 	}
-	ctx.hostedUsage, ctx.hostedUsageErr = usage, err
-	return usage, err
+	return ctx.hostedObjects, ctx.hostedObjectsErr
+}
+
+// serveEventObjects reads the objects of each event commit with one
+// cat-file batch. It uses the object IDs Git stored, never IDs derived from
+// decoded content: a signature blob may hold whitespace the reader trims,
+// and any of these blobs can recur later, for example as a run log.
+func serveEventObjects(gitDir string, events []StoredEvent) (map[string]serveHostedEventObjects, error) {
+	paths := []string{"^{tree}", ":event.json", ":signature", ":log.txt"}
+	input := make([]string, 0, len(paths)*len(events))
+	for _, event := range events {
+		for _, path := range paths {
+			input = append(input, event.Commit+path)
+		}
+	}
+	answers, err := serveBatchCheck(gitDir, input)
+	if err != nil {
+		return nil, err
+	}
+	objects := make(map[string]serveHostedEventObjects, len(events))
+	for index, event := range events {
+		entry := serveHostedEventObjects{IDs: make([]string, 0, len(paths))}
+		for offset, path := range paths {
+			answer := answers[index*len(paths)+offset]
+			if !answer.Found {
+				if path == ":log.txt" {
+					continue
+				}
+				return nil, fmt.Errorf("hosted %s%s is missing", event.Commit, path)
+			}
+			entry.IDs = append(entry.IDs, answer.ID)
+			if path == ":signature" {
+				entry.SignatureBytes = answer.Size
+			}
+		}
+		objects[event.Commit] = entry
+	}
+	return objects, nil
+}
+
+// serveBatchAnswer is cat-file's answer for one requested object.
+type serveBatchAnswer struct {
+	ID    string
+	Type  string
+	Size  int64
+	Found bool
+}
+
+// serveBatchCheck asks cat-file --batch-check about each object name in
+// one process. A name that does not resolve is not Found.
+func serveBatchCheck(gitDir string, names []string) ([]serveBatchAnswer, error) {
+	answers := make([]serveBatchAnswer, len(names))
+	if len(names) == 0 {
+		return answers, nil
+	}
+	batch, err := gitInputAt(gitDir, []byte(strings.Join(names, "\n")+"\n"), "cat-file", "--batch-check=%(objectname) %(objecttype) %(objectsize)")
+	if err != nil {
+		return nil, fmt.Errorf("measure fact objects: %w", err)
+	}
+	lines := strings.Split(strings.TrimSuffix(string(batch), "\n"), "\n")
+	if len(lines) != len(names) {
+		return nil, fmt.Errorf("measure fact objects: %d answers for %d names", len(lines), len(names))
+	}
+	for index, line := range lines {
+		fields := strings.Fields(line)
+		if len(fields) != 3 {
+			// "<name> missing" or "<name> ambiguous".
+			continue
+		}
+		size, err := strconv.ParseInt(fields[2], 10, 64)
+		if err != nil || size < 0 {
+			return nil, fmt.Errorf("invalid object size %q", line)
+		}
+		answers[index] = serveBatchAnswer{ID: fields[0], Type: fields[1], Size: size, Found: true}
+	}
+	return answers, nil
 }
 
 // serveBlobSizes returns the size of each REV:PATH blob in one batched
 // query, or -1 for a path that does not name a blob.
 func serveBlobSizes(gitDir string, paths []string) ([]int64, error) {
-	sizes := make([]int64, len(paths))
-	if len(paths) == 0 {
-		return sizes, nil
-	}
-	batch, err := gitInputAt(gitDir, []byte(strings.Join(paths, "\n")+"\n"), "cat-file", "--batch-check=%(objecttype) %(objectsize)")
+	answers, err := serveBatchCheck(gitDir, paths)
 	if err != nil {
-		return nil, fmt.Errorf("measure fact blobs: %w", err)
+		return nil, err
 	}
-	lines := strings.Split(strings.TrimSuffix(string(batch), "\n"), "\n")
-	if len(lines) != len(paths) {
-		return nil, fmt.Errorf("measure fact blobs: %d answers for %d paths", len(lines), len(paths))
-	}
-	for index, line := range lines {
-		fields := strings.Fields(line)
-		if len(fields) != 2 || fields[0] != "blob" {
-			sizes[index] = -1
-			continue
+	sizes := make([]int64, len(paths))
+	for index, answer := range answers {
+		sizes[index] = -1
+		if answer.Found && answer.Type == "blob" {
+			sizes[index] = answer.Size
 		}
-		size, err := strconv.ParseInt(fields[1], 10, 64)
-		if err != nil || size < 0 {
-			return nil, fmt.Errorf("invalid blob size %q", line)
-		}
-		sizes[index] = size
 	}
 	return sizes, nil
 }
@@ -354,7 +422,11 @@ func checkServeActorUpdate(ctx *serveVerdictContext, update serveRefUpdate) *ser
 	// Step 3: budgets, measured over what this push adds, then the
 	// repository-wide ceilings of the hosted fact read.
 	budgets := ctx.Config.Budgets
-	measured, appendedCommits, err := measureServeActorRange(ctx.GitDir, oldHead, update.New, prefix, budgets, update.Ref)
+	hostedObjects, err := ctx.hostedEventObjects()
+	if err != nil {
+		return serveHostedFactsRejection()
+	}
+	measured, appendedCommits, err := measureServeActorRange(ctx.GitDir, oldHead, update.New, prefix, hostedObjects, budgets, update.Ref)
 	if err != nil {
 		var exceeded replicationBudgetExceeded
 		if errors.As(err, &exceeded) {
@@ -565,9 +637,12 @@ func serveFirstFailingActorEvent(gitDir, actor, oldHead, newHead string, prefix 
 //
 // The objects counted are those reachable from newHead and not from
 // oldHead. git rev-list --not excludes every hosted commit but only the
-// trees and blobs of oldHead itself, so hosted event.json and log blobs are
-// discounted by their object IDs as well; a run log can repeat across
-// events. Hosted trees and signature blobs cannot recur in a valid chain.
+// trees and blobs of oldHead itself, so every object an earlier hosted
+// event reaches is discounted by its stored object ID: its tree, event.json,
+// signature and run log. Any of those blobs can recur in the push, for
+// example a later run log with the bytes of an earlier signature blob,
+// whitespace included. The IDs come from one batched query over the prefix
+// (serveEventObjects), which the verdict context reads once per hook run.
 //
 // The client helper stops at the first limit a running total crosses. The
 // server must name the first exceeded budget in the order events, objects,
@@ -577,13 +652,18 @@ func serveFirstFailingActorEvent(gitDir, actor, oldHead, newHead string, prefix 
 // budgets. That work stays bounded: it sizes at most max-objects objects
 // and at most max-events attachments without reading their contents.
 func measureServeActorRangeUnderBudgets(gitDir, oldHead, newHead string, hostedPrefix []StoredEvent, budgets ReplicationBudgets, selectionID string) (ReplicationMeasurements, error) {
-	measurements, _, err := measureServeActorRange(gitDir, oldHead, newHead, hostedPrefix, budgets, selectionID)
+	hostedObjects, err := serveEventObjects(gitDir, hostedPrefix)
+	if err != nil {
+		return ReplicationMeasurements{}, err
+	}
+	measurements, _, err := measureServeActorRange(gitDir, oldHead, newHead, hostedPrefix, hostedObjects, budgets, selectionID)
 	return measurements, err
 }
 
-// measureServeActorRange is measureServeActorRangeUnderBudgets that also
+// measureServeActorRange is measureServeActorRangeUnderBudgets with the
+// objects of the hosted events already read, keyed by commit. It also
 // returns the appended commits in chain order.
-func measureServeActorRange(gitDir, oldHead, newHead string, hostedPrefix []StoredEvent, budgets ReplicationBudgets, selectionID string) (ReplicationMeasurements, []string, error) {
+func measureServeActorRange(gitDir, oldHead, newHead string, hostedPrefix []StoredEvent, hostedObjects map[string]serveHostedEventObjects, budgets ReplicationBudgets, selectionID string) (ReplicationMeasurements, []string, error) {
 	if objectType, err := gitTextAt(gitDir, "cat-file", "-t", newHead); err != nil || objectType != "commit" {
 		return ReplicationMeasurements{}, nil, fmt.Errorf("selected root %s is not a commit", newHead)
 	}
@@ -608,12 +688,15 @@ func measureServeActorRange(gitDir, oldHead, newHead string, hostedPrefix []Stor
 	if err != nil {
 		return ReplicationMeasurements{}, nil, fmt.Errorf("enumerate selected graph: %w", err)
 	}
-	hostedObjects := make(map[string]bool, 3*len(hostedPrefix))
+	previouslyAccepted := make(map[string]bool, 5*len(hostedPrefix))
 	for _, event := range hostedPrefix {
-		hostedObjects[event.Commit] = true
-		hostedObjects[serveGitBlobID(event.Payload, len(newHead))] = true
-		for _, attachment := range event.Attachments {
-			hostedObjects[serveGitBlobID(attachment, len(newHead))] = true
+		reached, ok := hostedObjects[event.Commit]
+		if !ok {
+			return ReplicationMeasurements{}, nil, fmt.Errorf("the objects of hosted event %s were not read", event.ID)
+		}
+		previouslyAccepted[event.Commit] = true
+		for _, objectID := range reached.IDs {
+			previouslyAccepted[objectID] = true
 		}
 	}
 	objects := make([]string, 0)
@@ -624,7 +707,7 @@ func measureServeActorRange(gitDir, oldHead, newHead string, hostedPrefix []Stor
 			continue
 		}
 		seen[fields[0]] = true
-		if hostedObjects[fields[0]] {
+		if previouslyAccepted[fields[0]] {
 			continue
 		}
 		objects = append(objects, fields[0])
@@ -702,22 +785,6 @@ func measureServeSelectionUnderBudgets(gitDir, kind, root, acceptedRoot string, 
 		return measurements, replicationBudgetExceeded{err}
 	}
 	return measurements, nil
-}
-
-// serveGitBlobID is the object ID Git gives a blob with content, for a
-// repository whose object IDs have hexLength digits.
-func serveGitBlobID(content []byte, hexLength int) string {
-	header := "blob " + strconv.Itoa(len(content)) + "\x00"
-	if hexLength == 64 {
-		hash := sha256.New()
-		hash.Write([]byte(header))
-		hash.Write(content)
-		return hex.EncodeToString(hash.Sum(nil))
-	}
-	hash := sha1.New()
-	hash.Write([]byte(header))
-	hash.Write(content)
-	return hex.EncodeToString(hash.Sum(nil))
 }
 
 // Proposal code ref refs/hn/proposals/<id> (FR-010).

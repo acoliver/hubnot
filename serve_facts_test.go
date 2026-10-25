@@ -1129,3 +1129,210 @@ func TestServeFactsHostedFactCeilings(t *testing.T) {
 		t.Fatalf("hosted facts do not load under the default ceilings: %v", err)
 	}
 }
+
+// servePaddedSignature returns the signature blob of commit with
+// whitespace around the encoded signature, which the event reader trims
+// and accepts, so its object ID differs from any ID derived from the
+// decoded signature.
+func servePaddedSignature(encoded []byte) []byte {
+	return []byte(" \n" + strings.TrimSpace(string(encoded)) + "\n\n")
+}
+
+// Review cycle 2: every object an earlier hosted event reaches is
+// discounted by its stored object ID, signature blobs included, so a run
+// log with the bytes of an earlier signature blob, padded or not, or of an
+// earlier event.json or run log is not counted again. The range measurement
+// gives the client helper's totals and inclusive limits for that chain.
+func TestServeFactsRangeMeasurementDiscountsReusedHostedBlobs(t *testing.T) {
+	inReplicationTestRepository(t)
+	gitDir, err := requireGitRepository()
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity := testIdentity(t, "Reuse")
+	ref := actorRef(identity.Actor)
+	appendRun := func(log []byte) {
+		t.Helper()
+		event, err := nextEvent(identity, "run.result")
+		if err != nil {
+			t.Fatal(err)
+		}
+		event.Subject = "sha256:" + strings.Repeat("a", 64)
+		event.Pipeline = "test"
+		event.Definition = "sha256:" + strings.Repeat("b", 64)
+		event.Commit = strings.Repeat("c", 40)
+		event.Outcome = "passed"
+		event.DurationMS = 1
+		event.Log = eventID(log)
+		event.Backend = "host"
+		event.Platform = "test/test"
+		event.Runner = "hn/test"
+		if _, err := appendEventWithAttachments(event, identity, map[string][]byte{"log.txt": log}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	appendIssue := func(title string) *StoredEvent {
+		t.Helper()
+		event, err := nextEvent(identity, "issue.open")
+		if err != nil {
+			t.Fatal(err)
+		}
+		event.Title = title
+		stored, err := appendEvent(event, identity)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return stored
+	}
+
+	first := appendIssue("first")
+	signature := []byte(mustGitText(t, "cat-file", "-p", first.Commit+":signature"))
+	payload := []byte(mustGitText(t, "cat-file", "-p", first.Commit+":event.json"))
+	if !bytes.Equal(payload, first.Payload) {
+		t.Fatal("event.json differs from the stored payload")
+	}
+	// The second event is rewritten with a padded signature blob.
+	second := appendIssue("padded")
+	padded := servePaddedSignature([]byte(mustGitText(t, "cat-file", "-p", second.Commit+":signature")))
+	paddedBlob := mustGitTextFromInput(t, padded, "hash-object", "-w", "--stdin")
+	eventBlob := mustGitText(t, "rev-parse", second.Commit+":event.json")
+	tree := mustGitTextFromInput(t, []byte("100644 blob "+eventBlob+"\tevent.json\n100644 blob "+paddedBlob+"\tsignature\n"), "mktree")
+	paddedCommit := mustGitText(t, "commit-tree", tree, "-p", first.Commit, "-m", "padded signature")
+	mustGit(t, "update-ref", ref, paddedCommit, second.Commit)
+	hostedLog := []byte("a run log hosted before the push\n")
+	appendRun(hostedLog)
+	old, _, _ := refValue(ref)
+
+	reused := [][]byte{signature, padded, payload, hostedLog}
+	for _, log := range reused {
+		appendRun(log)
+	}
+	head, _, _ := refValue(ref)
+	reachable := map[string]bool{}
+	for _, name := range strings.Fields(mustGitText(t, "rev-list", "--objects", old)) {
+		// Each line is an object ID, then a path for trees and blobs.
+		reachable[name] = true
+	}
+	for _, log := range reused {
+		if blob := mustGitTextFromInput(t, log, "hash-object", "--stdin"); !reachable[blob] {
+			t.Fatalf("reused log %q is not an object of the hosted prefix", log)
+		}
+	}
+	if mustGitText(t, "rev-parse", old+"~1:signature") != paddedBlob {
+		t.Fatal("the hosted prefix does not hold the padded signature blob")
+	}
+
+	unbounded := ReplicationBudgets{MaxEvents: 1 << 62, MaxObjects: 1 << 62, MaxObjectBytes: 1 << 62, MaxAttachmentBytes: 1 << 62, MaxTotalBytes: 1 << 62}
+	prefix, err := loadActorEventsAt(gitDir, old)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := measureQuarantinedSelectionUnderBudgets(gitDir, gitDir, replicationActor, head, old, unbounded, "full")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Four new commits, trees, event.json and signature blobs; every log
+	// is already reachable from the hosted prefix.
+	if want.Objects != 4*4 {
+		t.Fatalf("client helper counts %d objects, want 16", want.Objects)
+	}
+	got, err := measureServeActorRangeUnderBudgets(gitDir, old, head, prefix, unbounded, "range")
+	if err != nil || got != want {
+		t.Fatalf("range measurement %+v, %v; want %+v", got, err, want)
+	}
+	for _, tc := range []struct {
+		name  string
+		set   func(*ReplicationBudgets, int64)
+		value int64
+	}{
+		{"max-objects", func(b *ReplicationBudgets, v int64) { b.MaxObjects = v }, want.Objects},
+		{"max-total-bytes", func(b *ReplicationBudgets, v int64) { b.MaxTotalBytes = v }, want.TotalBytes},
+	} {
+		atLimit := unbounded
+		tc.set(&atLimit, tc.value)
+		if _, err := measureServeActorRangeUnderBudgets(gitDir, old, head, prefix, atLimit, "range"); err != nil {
+			t.Fatalf("%s=%d at the limit: %v", tc.name, tc.value, err)
+		}
+		over := unbounded
+		tc.set(&over, tc.value-1)
+		measured, err := measureServeActorRangeUnderBudgets(gitDir, old, head, prefix, over, "range")
+		var exceeded replicationBudgetExceeded
+		if !errors.As(err, &exceeded) {
+			t.Fatalf("%s=%d one over: %v", tc.name, tc.value-1, err)
+		}
+		if rejection := serveOverBudgetRejection("r", over, measured); rejection.Budget != tc.name || rejection.Measured != tc.value {
+			t.Fatalf("%s one over: %+v", tc.name, rejection)
+		}
+	}
+}
+
+// Review cycle 2, through real pushes: a run log with the bytes of an
+// earlier hosted signature blob, as hn wrote it and padded with
+// whitespace, is accepted at exactly the max-objects and max-total-bytes
+// the client helper measures, and one below each is over-budget with the
+// helper's measurement and leaves the hosted refs unchanged.
+func TestServeFactsReusedHostedSignatureBlobAtLimits(t *testing.T) {
+	f := newServeFactsFixture(t, "A")
+	ref := f.actorRef("A")
+	f.issue("A", "first signed fact")
+	first := f.localHead("A", ref)
+	signature := runOperationalGitBytes(t, f.work["A"], "show", first+":signature")
+
+	// Rewrite the newest local event with a padded signature blob before
+	// it is ever pushed; the server accepts it as a valid event.
+	f.issue("A", "a fact with a padded signature")
+	unpadded := f.localHead("A", ref)
+	padded := servePaddedSignature(runOperationalGitBytes(t, f.work["A"], "show", unpadded+":signature"))
+	paddedBlob := f.gitInput("A", padded, "hash-object", "-w", "--stdin")
+	tree := f.gitInput("A", []byte("100644 blob "+f.git("A", "rev-parse", unpadded+":event.json")+"\tevent.json\n100644 blob "+paddedBlob+"\tsignature\n"), "mktree")
+	f.git("A", "update-ref", ref, f.git("A", "commit-tree", tree, "-p", first, "-m", "padded signature"), unpadded)
+
+	proposal := f.proposal("A", "a proposal with later runner logs")
+	f.hn("A", "sync", "origin")
+	if f.hostedRef(ref) != f.localHead("A", ref) {
+		t.Fatal("hn sync did not publish the actor chain")
+	}
+	chain := newServeTestChain(t, f, "A")
+	clientGitDir := filepath.Join(f.work["A"], ".git")
+	for _, tc := range []struct {
+		name string
+		log  []byte
+		blob string
+	}{
+		{"signature as written", signature, f.git("A", "rev-parse", first+":signature")},
+		{"padded signature", padded, paddedBlob},
+	} {
+		old := f.hostedRef(ref)
+		chain.run(proposal, tc.log)
+		if blob := f.gitInput("A", tc.log, "hash-object", "--stdin"); blob != tc.blob {
+			t.Fatalf("%s: log blob %s, want the hosted signature blob %s", tc.name, blob, tc.blob)
+		}
+		want := measureServeTestActorPush(f, "A")
+		// A run request and a run result: commit, tree, event.json and
+		// signature each; the log is already hosted.
+		if want.Objects != 8 {
+			t.Fatalf("%s: client helper counts %d objects, want 8", tc.name, want.Objects)
+		}
+		prefix, err := loadActorEventsAt(clientGitDir, old)
+		if err != nil {
+			t.Fatal(err)
+		}
+		unbounded := ReplicationBudgets{MaxEvents: 1 << 62, MaxObjects: 1 << 62, MaxObjectBytes: 1 << 62, MaxAttachmentBytes: 1 << 62, MaxTotalBytes: 1 << 62}
+		if got, err := measureServeActorRangeUnderBudgets(clientGitDir, old, f.localHead("A", ref), prefix, unbounded, "range"); err != nil || got != want {
+			t.Fatalf("%s: range measurement %+v, %v; want %+v", tc.name, got, err, want)
+		}
+
+		serveSetBudget(f, "max-objects", want.Objects-1)
+		rejections := f.reject("A", map[string]string{ref: serveReasonOverBudget}, "origin", ref+":"+ref)
+		requireServeOverBudget(t, rejections[0], "max-objects", want.Objects-1, want.Objects)
+		serveResetBudgets(f)
+		serveSetBudget(f, "max-total-bytes", want.TotalBytes-1)
+		rejections = f.reject("A", map[string]string{ref: serveReasonOverBudget}, "origin", ref+":"+ref)
+		requireServeOverBudget(t, rejections[0], "max-total-bytes", want.TotalBytes-1, want.TotalBytes)
+
+		serveSetBudget(f, "max-objects", want.Objects)
+		serveSetBudget(f, "max-total-bytes", want.TotalBytes)
+		f.pushOwn("A")
+		serveResetBudgets(f)
+	}
+}

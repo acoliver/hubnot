@@ -141,17 +141,17 @@ type serveVerdictContext struct {
 	// past it, so every accepted push stays readable by the next one.
 	HostedCeilings serveHostedFactCeilings
 
-	loadHostedEvents  func() ([]StoredEvent, error)
-	hostedLoaded      bool
-	hostedEvents      []StoredEvent
-	hostedErr         error
-	hostedByID        map[string]StoredEvent
-	hostedUsageLoaded bool
-	hostedUsage       serveFactUsage
-	hostedUsageErr    error
-	pushFactUsage     serveFactUsage
-	maintainersLoaded bool
-	maintainers       []string
+	loadHostedEvents    func() ([]StoredEvent, error)
+	hostedLoaded        bool
+	hostedEvents        []StoredEvent
+	hostedErr           error
+	hostedByID          map[string]StoredEvent
+	hostedObjectsLoaded bool
+	hostedObjects       map[string]serveHostedEventObjects
+	hostedObjectsErr    error
+	pushFactUsage       serveFactUsage
+	maintainersLoaded   bool
+	maintainers         []string
 }
 
 func newServeVerdictContext(gitDir, actor, key string, config serveRepoConfig, owners serveBranchOwners) *serveVerdictContext {
