@@ -52,7 +52,7 @@ func (admin *serveAdministration) finish() error {
 // run, still holding the administration lock. Every subcommand also
 // rewrites the managed authorized_keys block from the registry, which is
 // idempotent and repairs the block after hn moves, like the hooks: see
-// rewriteAuthorizedKeys and repairAuthorizedKeys.
+// rewriteAuthorizedKeys and refreshAuthorizedKeys.
 func runServeAdministration(layout serveLayout, administer func(*serveAdministration, []string) error, args []string) error {
 	if err := ensureServeLayout(layout); err != nil {
 		return err
@@ -104,13 +104,47 @@ func (admin *serveAdministration) rewriteAuthorizedKeys() error {
 	return writeServeAuthorizedKeys(admin.layout, registry.Keys, admin.hnPath)
 }
 
-// repairAuthorizedKeys is the form read-only commands and lock-exec use: a
-// failure is reported on standard error and the command still runs, so an
-// administrator can inspect a broken registry or recover a repository.
-func (admin *serveAdministration) repairAuthorizedKeys() {
-	if err := admin.rewriteAuthorizedKeys(); err != nil {
-		fmt.Fprintf(os.Stderr, "hn serve: warning: authorized_keys was not rewritten: %v\n", err)
+// refreshAuthorizedKeys is the form read-only commands and lock-exec use.
+// Unsafe SSH state and every write failure refuse the command, like
+// rewriteAuthorizedKeys, and lock-exec calls it before it starts anything.
+// The one tolerated failure is a registry binding whose stored public key
+// does not parse or does not match its fingerprint. That binding can only
+// be repaired with hn serve key remove, which an administrator finds with
+// hn serve key list, so inspection still runs and the block is left as it
+// is. Leaving it fails closed: the forced command names only a
+// fingerprint, and hn serve git authorizes from the registry.
+func (admin *serveAdministration) refreshAuthorizedKeys() error {
+	if err := checkServeAuthorizedKeysState(admin.layout); err != nil {
+		return err
 	}
+	registry, err := loadServeRegistry(admin.layout)
+	if err != nil {
+		return err
+	}
+	if _, err := renderServeAuthorizedKeysBlock(registry.Keys, admin.hnPath); err != nil {
+		fmt.Fprintf(os.Stderr, "hn serve: warning: authorized_keys was left unchanged because %s holds a binding it cannot write: %v; hn serve key add, repo create and repo set refuse until 'hn serve key remove FINGERPRINT' removes that binding\n", admin.layout.Registry, err)
+		return nil
+	}
+	return writeServeAuthorizedKeys(admin.layout, registry.Keys, admin.hnPath)
+}
+
+// checkServeAuthorizedKeysState applies the checks writeServeAuthorizedKeys
+// makes before it writes, without needing a block: .ssh and authorized_keys
+// must be safe and the managed block markers well formed. Every failure
+// names the offending path.
+func checkServeAuthorizedKeysState(layout serveLayout) error {
+	exists, err := checkServeSSHDirectory(layout.SSHDir)
+	if err != nil || !exists {
+		return err
+	}
+	existing, err := readServeAuthorizedKeys(layout.AuthorizedKeys)
+	if err != nil {
+		return err
+	}
+	if _, err := mergeServeAuthorizedKeys(existing, nil); err != nil {
+		return serveDefect(layout.AuthorizedKeys, "%v; fix the managed block markers by hand", err)
+	}
+	return nil
 }
 
 // removeAbandonedServeStaging deletes create-* directories in state/tmp.
@@ -223,14 +257,15 @@ func cmdServeKeyRemove(admin *serveAdministration, args []string) error {
 	return nil
 }
 
-// changeKeys first rewrites the block from the current registry, which
-// proves authorized_keys can be written, and renders the block for next.
-// Only then does it save the registry and rewrite authorized_keys again. A
-// failure after the registry write is reported with the repair step and
-// fails closed: an added key cannot connect yet and a removed key finds no
-// binding when it connects.
+// changeKeys first checks that .ssh and authorized_keys are safe and the
+// block markers well formed, and renders the block for next. Only then does
+// it save the registry and rewrite authorized_keys. The block for the
+// current registry is not needed, so key remove can drop a binding whose
+// stored key cannot be written. A failure after the registry write is
+// reported with the repair step and fails closed: an added key cannot
+// connect yet and a removed key finds no binding when it connects.
 func (admin *serveAdministration) changeKeys(next serveRegistry) error {
-	if err := admin.rewriteAuthorizedKeys(); err != nil {
+	if err := checkServeAuthorizedKeysState(admin.layout); err != nil {
 		return err
 	}
 	if _, err := renderServeAuthorizedKeysBlock(next.Keys, admin.hnPath); err != nil {

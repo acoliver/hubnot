@@ -132,15 +132,21 @@ func cmdServeRepo(admin *serveAdministration, args []string) error {
 	case "create":
 		return cmdServeRepoCreate(admin, args[1:])
 	case "list":
-		admin.repairAuthorizedKeys()
+		if err := admin.refreshAuthorizedKeys(); err != nil {
+			return err
+		}
 		return cmdServeRepoList(layout, args[1:])
 	case "show":
-		admin.repairAuthorizedKeys()
+		if err := admin.refreshAuthorizedKeys(); err != nil {
+			return err
+		}
 		return cmdServeRepoShow(layout, args[1:])
 	case "set":
 		return cmdServeRepoSet(admin, args[1:])
 	case "lock-exec":
-		admin.repairAuthorizedKeys()
+		if err := admin.refreshAuthorizedKeys(); err != nil {
+			return err
+		}
 		return cmdServeRepoLockExec(admin, args[1:])
 	default:
 		return fmt.Errorf("unknown hn serve repo subcommand %q; run 'hn help'", args[0])
@@ -157,7 +163,9 @@ func cmdServeKey(admin *serveAdministration, args []string) error {
 	case "remove":
 		return cmdServeKeyRemove(admin, args[1:])
 	case "list":
-		admin.repairAuthorizedKeys()
+		if err := admin.refreshAuthorizedKeys(); err != nil {
+			return err
+		}
 		return cmdServeKeyList(admin.layout, args[1:])
 	default:
 		return fmt.Errorf("unknown hn serve key subcommand %q; run 'hn help'", args[0])

@@ -521,13 +521,32 @@ for it stops with `hn: hn serve administration is busy: ...`.
 repository lock, so a long recovery does not block key changes.
 
 Every administration command rewrites the managed block in `authorized_keys`
-from the registry, in addition to the hook scripts. A command that changes
-state, such as `repo create`, `repo set`, `key add` or `key remove`, rewrites
-the block before its own change and stops when the block cannot be written,
-for example when `~/.ssh` is writable by group or others. The read-only
-commands `repo list`, `repo show` and `key list`, and `repo lock-exec`, print
-`hn serve: warning: authorized_keys was not rewritten: ...` and still run, so
-you can inspect a broken setup or recover a repository.
+from the registry, in addition to the hook scripts. Before its own work, each
+command checks `~/.ssh` and `authorized_keys` as described in
+[When hn serve refuses to touch authorized_keys](#when-hn-serve-refuses-to-touch-authorized_keys).
+When a check fails, the command writes nothing, exits with status 1 and names
+the path:
+
+```text
+hn: hn serve state defect: /home/hn-serve/.ssh: directory mode 0777 is writable by group or others; run chmod 700 /home/hn-serve/.ssh
+```
+
+The read-only commands `repo list`, `repo show` and `key list` refuse in the
+same way. `hn serve repo lock-exec` checks before it starts its command, so a
+refused `lock-exec` runs nothing. Fix the path and rerun the command; it
+rewrites the block.
+
+A registry binding whose stored public key does not parse, or does not match
+its fingerprint, also keeps the block from being written. This can happen
+after a hand edit of `state/registry.json`. In that case `repo create`,
+`repo set` and `key add` refuse. `repo list`, `repo show`, `key list` and
+`repo lock-exec` print
+`hn serve: warning: authorized_keys was left unchanged because ...`, which
+names the fingerprint, and then run, so you can find the binding. Remove it
+with `hn serve key remove FINGERPRINT`, which also rewrites the block. The old
+block stays safe in the meantime: each entry's forced command names only a
+fingerprint, and `hn serve git` looks the actor up in the registry when the
+key connects.
 
 ### Running a command under the repository lock
 

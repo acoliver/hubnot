@@ -685,32 +685,201 @@ func TestServeAdminRemovesAbandonedCreateStaging(t *testing.T) {
 	}
 }
 
-// Read-only commands report a block they cannot rewrite and still run, so
-// an administrator can inspect a broken setup; changes refuse before any
-// write.
-func TestServeAdminAuthorizedKeysFailureHandling(t *testing.T) {
+// serveAdminTestSSHSnapshot records what a refused command must not touch:
+// the type and mode of .ssh and authorized_keys and the bytes reached
+// through authorized_keys.
+func serveAdminTestSSHSnapshot(t *testing.T, layout serveLayout) []string {
+	t.Helper()
+	var snapshot []string
+	for _, path := range []string{layout.SSHDir, layout.AuthorizedKeys} {
+		info, err := os.Lstat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		snapshot = append(snapshot, path+" "+info.Mode().String())
+	}
+	return append(snapshot, readServeAdminFile(t, layout.AuthorizedKeys))
+}
+
+// moveServeAdminTestBehindSymlink moves path to a private directory outside
+// HOME, puts a symbolic link to it in its place and returns the undo.
+func moveServeAdminTestBehindSymlink(t *testing.T, path string) func() {
+	t.Helper()
+	target := filepath.Join(t.TempDir(), filepath.Base(path))
+	if err := os.Rename(path, target); err != nil {
+		t.Fatal(err)
+	}
+	symlinkServeTest(t, target, path)
+	return func() {
+		removeServeTest(t, path)
+		if err := os.Rename(target, path); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// rewriteServeAdminTestKeys replaces authorized_keys with change applied to
+// its contents and returns the undo.
+func rewriteServeAdminTestKeys(t *testing.T, layout serveLayout, change func(string) string) func() {
+	t.Helper()
+	original := readServeAdminFile(t, layout.AuthorizedKeys)
+	writeServeTestFile(t, layout.AuthorizedKeys, change(original), 0o600)
+	return func() { writeServeTestFile(t, layout.AuthorizedKeys, original, 0o600) }
+}
+
+// NFR-008, FR-004: unsafe .ssh or authorized_keys state and broken managed
+// block markers make every administration command refuse and name the path,
+// the read-only commands and lock-exec included. Nothing is written or
+// repaired, and a refused lock-exec never starts its command. Once the state
+// is fixed, administration works again.
+func TestServeAdminRefusesUnsafeAuthorizedKeys(t *testing.T) {
 	h := newServeHarness(t)
 	layout := h.Layout()
 	h.Serve("serve", "repo", "create", "demo", "--from", serveHarnessSourceRepo(t))
 	key := serveHarnessAddKey(h, serveHarnessActor("alice"))
-	registry := readServeAdminFile(t, layout.Registry)
-	chmodServeTest(t, layout.SSHDir, 0o777)
-	defer chmodServeTest(t, layout.SSHDir, 0o700)
+	source := serveHarnessSourceRepo(t)
+	block := readServeAdminFile(t, layout.AuthorizedKeys)
+	if !strings.HasPrefix(block, serveAuthorizedKeysBegin+"\n") || !strings.HasSuffix(block, serveAuthorizedKeysEnd+"\n") {
+		t.Fatalf("authorized_keys after key add:\n%s", block)
+	}
 
-	output := h.Serve("serve", "key", "list")
-	requireServeAdminContains(t, output, "hn serve: warning: authorized_keys was not rewritten: hn serve state defect: "+layout.SSHDir, key.Fingerprint+" ")
+	for _, tc := range []struct {
+		name   string
+		path   string
+		reason string
+		plant  func(t *testing.T) (undo func())
+	}{
+		{".ssh writable by others", layout.SSHDir, "directory mode 0777 is writable by group or others", func(t *testing.T) func() {
+			chmodServeTest(t, layout.SSHDir, 0o777)
+			return func() { chmodServeTest(t, layout.SSHDir, 0o700) }
+		}},
+		{".ssh is a symbolic link", layout.SSHDir, "is a symbolic link", func(t *testing.T) func() {
+			return moveServeAdminTestBehindSymlink(t, layout.SSHDir)
+		}},
+		{"authorized_keys writable by group", layout.AuthorizedKeys, "file mode 0660 is writable by group or others", func(t *testing.T) func() {
+			chmodServeTest(t, layout.AuthorizedKeys, 0o660)
+			return func() { chmodServeTest(t, layout.AuthorizedKeys, 0o600) }
+		}},
+		{"authorized_keys is a symbolic link", layout.AuthorizedKeys, "is a symbolic link", func(t *testing.T) func() {
+			return moveServeAdminTestBehindSymlink(t, layout.AuthorizedKeys)
+		}},
+		{"duplicate begin marker", layout.AuthorizedKeys, "is a second managed block begin marker", func(t *testing.T) func() {
+			return rewriteServeAdminTestKeys(t, layout, func(s string) string { return s + serveAuthorizedKeysBegin + "\n" })
+		}},
+		{"duplicate end marker", layout.AuthorizedKeys, "is a second managed block end marker", func(t *testing.T) func() {
+			return rewriteServeAdminTestKeys(t, layout, func(s string) string { return s + serveAuthorizedKeysEnd + "\n" })
+		}},
+		{"begin marker without end marker", layout.AuthorizedKeys, "the managed block begin marker has no following end marker", func(t *testing.T) func() {
+			return rewriteServeAdminTestKeys(t, layout, func(s string) string { return strings.TrimSuffix(s, serveAuthorizedKeysEnd+"\n") })
+		}},
+		{"end marker without begin marker", layout.AuthorizedKeys, "end marker without a preceding begin marker", func(t *testing.T) func() {
+			return rewriteServeAdminTestKeys(t, layout, func(s string) string { return strings.TrimPrefix(s, serveAuthorizedKeysBegin+"\n") })
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			undo := tc.plant(t)
+			registry := readServeAdminFile(t, layout.Registry)
+			config := readServeAdminFile(t, layout.RepoConfig("demo"))
+			ssh := serveAdminTestSSHSnapshot(t, layout)
+			hosted := serveAdminTestHostedState(t, layout)
+			started := filepath.Join(t.TempDir(), "started")
+			want := "hn: hn serve state defect: " + tc.path + ": "
+			for _, args := range [][]string{
+				{"serve", "repo", "list"},
+				{"serve", "repo", "show", "demo"},
+				{"serve", "key", "list"},
+				{"serve", "repo", "lock-exec", "demo", "--", "touch", started},
+				{"serve", "key", "add", "--actor", serveHarnessActor("bob"), "-"},
+				{"serve", "key", "remove", key.Fingerprint},
+				{"serve", "repo", "set", "demo", "--lfs-quota", "5"},
+				{"serve", "repo", "create", "other", "--from", source},
+			} {
+				output := h.ServeFailureWith(serveHarnessRun{Stdin: newServeTestKey(t, "").PublicLine}, args...)
+				if !strings.HasPrefix(output, want) || !strings.Contains(output, tc.reason) || strings.Count(output, "\n") != 1 {
+					t.Fatalf("hn %s:\n%s\nwant one line starting %q and containing %q", strings.Join(args, " "), output, want, tc.reason)
+				}
+			}
+			if _, err := os.Lstat(started); !os.IsNotExist(err) {
+				t.Fatalf("refused lock-exec started its command: %v", err)
+			}
+			if readServeAdminFile(t, layout.Registry) != registry || readServeAdminFile(t, layout.RepoConfig("demo")) != config {
+				t.Fatal("a refused command changed the registry or the repository configuration")
+			}
+			if after := serveAdminTestSSHSnapshot(t, layout); !reflect.DeepEqual(after, ssh) {
+				t.Fatalf("a refused command changed .ssh:\nbefore %q\nafter  %q", ssh, after)
+			}
+			if after := serveAdminTestHostedState(t, layout); !reflect.DeepEqual(after, hosted) {
+				t.Fatalf("a refused command changed hosted state:\nbefore %v\nafter  %v", hosted, after)
+			}
+
+			undo()
+			if output := h.Serve("serve", "repo", "list"); output != "demo\n" {
+				t.Fatalf("repo list after the fix = %q", output)
+			}
+			if got := readServeAdminFile(t, layout.AuthorizedKeys); got != block {
+				t.Fatalf("authorized_keys after the fix:\n%s\nwant:\n%s", got, block)
+			}
+		})
+	}
+}
+
+// A registry binding whose stored public key does not parse cannot be
+// written into the block. Commands that change state refuse; the read-only
+// commands and lock-exec warn, leave authorized_keys as it is and still run,
+// so key list finds the binding and key remove repairs the registry.
+func TestServeAdminRegistryBindingDefect(t *testing.T) {
+	h := newServeHarness(t)
+	layout := h.Layout()
+	h.Serve("serve", "repo", "create", "demo", "--from", serveHarnessSourceRepo(t))
+	alice := serveHarnessAddKey(h, serveHarnessActor("alice"))
+	block := readServeAdminFile(t, layout.AuthorizedKeys)
+
+	t.Setenv("HOME", h.Home)
+	registry, err := loadServeRegistry(layout)
+	if err != nil {
+		t.Fatal(err)
+	}
+	broken := serveTestBinding("mallory")
+	registry.Keys = append(registry.Keys, broken)
+	sort.Slice(registry.Keys, func(i, j int) bool { return registry.Keys[i].Fingerprint < registry.Keys[j].Fingerprint })
+	writeServeTestRegistry(t, layout, registry)
+	stored := readServeAdminFile(t, layout.Registry)
+
+	warning := "hn serve: warning: authorized_keys was left unchanged because " + layout.Registry +
+		" holds a binding it cannot write: fingerprint " + broken.Fingerprint + " has an invalid public key"
+	requireServeAdminContains(t, h.Serve("serve", "key", "list"), warning,
+		alice.Fingerprint+" "+serveHarnessActor("alice")+" ssh-ed25519\n", broken.Fingerprint+" "+broken.Actor+" ssh-ed25519\n")
+	requireServeAdminContains(t, h.Serve("serve", "repo", "list"), warning, "demo\n")
+	requireServeAdminContains(t, h.Serve("serve", "repo", "show", "demo"), warning, "name: demo\n")
+	started := filepath.Join(t.TempDir(), "started")
+	requireServeAdminContains(t, h.Serve("serve", "repo", "lock-exec", "demo", "--", "touch", started), warning)
+	if _, err := os.Lstat(started); err != nil {
+		t.Fatalf("lock-exec did not run its command: %v", err)
+	}
+
 	for _, args := range [][]string{
-		{"serve", "key", "remove", key.Fingerprint},
+		{"serve", "key", "add", "--actor", serveHarnessActor("bob"), "-"},
 		{"serve", "repo", "set", "demo", "--lfs-quota", "5"},
 		{"serve", "repo", "create", "other", "--from", serveHarnessSourceRepo(t)},
 	} {
-		requireServeAdminContains(t, h.ServeFailure(args...), "hn serve state defect: "+layout.SSHDir, "writable by group or others")
+		output := h.ServeFailureWith(serveHarnessRun{Stdin: newServeTestKey(t, "").PublicLine}, args...)
+		requireServeAdminContains(t, output, "fingerprint "+broken.Fingerprint+" has an invalid public key")
 	}
-	if readServeAdminFile(t, layout.Registry) != registry {
-		t.Fatal("a refused key change rewrote the registry")
+	if readServeAdminFile(t, layout.Registry) != stored || readServeAdminFile(t, layout.AuthorizedKeys) != block {
+		t.Fatal("a command changed the registry or authorized_keys while a binding could not be written")
 	}
 	if _, err := os.Lstat(layout.RepoGitDir("other")); !os.IsNotExist(err) {
-		t.Fatalf("repo create ran with an unsafe .ssh: %v", err)
+		t.Fatalf("repo create ran while a binding could not be written: %v", err)
+	}
+
+	if output := h.Serve("serve", "key", "remove", broken.Fingerprint); output != "Removed "+broken.Fingerprint+" from actor "+broken.Actor+"\n" {
+		t.Fatalf("key remove of the broken binding = %q", output)
+	}
+	if output := h.Serve("serve", "key", "list"); output != alice.Fingerprint+" "+serveHarnessActor("alice")+" ssh-ed25519\n" {
+		t.Fatalf("key list after the repair = %q", output)
+	}
+	if got := readServeAdminFile(t, layout.AuthorizedKeys); got != block {
+		t.Fatalf("authorized_keys after the repair:\n%s\nwant:\n%s", got, block)
 	}
 }
 
