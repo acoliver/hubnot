@@ -198,10 +198,10 @@
       "criterion_id": "FR-020",
       "description": "Verify FR-020 is satisfied",
       "proof_type": "automated_test",
-      "evidence": null,
-      "pass_fail": "pending",
-      "verified_by": null,
-      "verified_at": null,
+      "evidence": "TestServeLFSRoundTrip; TestServeLFSObjectMismatch; TestServeLFSSessionChecksKeyAndRepository; TestServeLFSInterruptedUploadNeverStored; TestServeLFSBatchActions; TestServeLFSFramingRefusals; TestServeLFSPacketReaderChecksLengthBeforeReading; TestServeLFSOversizedUploadEndsSession; TestServeLFSUploadReadsNoFurtherThanDeclaredSize; TestServeLFSUploadBodyReadCappedAtDeclaredSizePlusOne; gate log /home/acoliver/projects/appaday/gitium/.scratch/accept/race.log; candidate 151b7be421b507596728c507370adcb5b14ccfdf",
+      "pass_fail": "pass",
+      "verified_by": "llxprt-gpt-sol-high",
+      "verified_at": "2026-10-25T20:11:02.151777+00:00",
       "notes": "TODO: replace with a real acceptance criterion"
     },
     {
