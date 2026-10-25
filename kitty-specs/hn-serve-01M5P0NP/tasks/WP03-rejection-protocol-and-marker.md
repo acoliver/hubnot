@@ -34,6 +34,7 @@ owned_files:
 - serve_wire.go
 - serve_reasons_test.go
 - docs/protocol-v0.md
+- commands.go
 role: implementer
 tags: []
 tracker_refs: []
@@ -86,6 +87,7 @@ This WP has no dependencies and runs in its own lane, in parallel with WP01, WP0
 | `serve_wire.go` | NEW. Marker constants, push option names, remote identification. |
 | `serve_reasons_test.go` | NEW. Tests for both files. |
 | `docs/protocol-v0.md` | CHANGE. New section "hn serve wire surface". Do not edit other sections. |
+| `commands.go` | CHANGE, shared with WP11 in dependency order (WP03 first). Only the three `git push` calls in `publishLocalFacts` are routed through `servePushRef`, so `hn sync` reports `hn-serve/1` rejections. WP11 owns every other change to this file. Recorded in the Activity Log entry for review cycle 2. |
 
 ## Subtasks
 
@@ -239,3 +241,4 @@ Unit tests only, plus temporary bare repositories for identification. Run with `
 ## Activity Log
 
 - 2026-10-25T00:09:18Z – system – Prompt generated via /spec-kitty.tasks
+- 2026-10-25T03:14:46Z – llxprt – Review cycle 2, issue 1 (shared-file ownership): coordination decision recorded under delegated maintainer authority. commands.go is co-owned by WP03 then WP11 in dependency order (WP11 depends on WP03; lane-c depends on lane-b; WP11 and WP04 not started; WP04 does not own commands.go). WP03 scope in commands.go is limited to routing the three git push calls in publishLocalFacts through servePushRef; WP11 keeps every other change (cmdSync identification recheck and output line). Amended WP03 owned_files and Ownership table, tasks.md File ownership row, and lanes.json lane-b write_scope (commit 7495ff3 on mission/hn-serve, 342e8a3 on the coordination branch). spec-kitty validate_no_overlap over all 14 WPs reports no errors. Lane-c owner: rebase onto kitty/mission-hn-serve-01M5P0NP-lane-b; publishLocalFacts already calls servePushRef.

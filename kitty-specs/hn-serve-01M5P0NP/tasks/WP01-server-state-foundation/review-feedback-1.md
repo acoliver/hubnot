@@ -1,13 +1,3 @@
----
-affected_files: []
-cycle_number: 1
-mission_slug: hn-serve-01M5P0NP
-reproduction_command:
-reviewed_at: '2026-10-25T02:33:59Z'
-reviewer_agent: user
-wp_id: WP01
----
-
 # WP01 independent review: REQUEST_CHANGES
 
 ## Scope and authority
