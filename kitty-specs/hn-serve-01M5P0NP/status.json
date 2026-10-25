@@ -1,10 +1,10 @@
 {
-  "event_count": 14,
-  "last_event_id": "01M5R806X4HJPWH79FV4BMPAFY",
-  "materialized_at": "2026-10-25T00:40:06.308955+00:00",
+  "event_count": 18,
+  "last_event_id": "01M5RCC9FAQCKMQEB5N1QC5GM2",
+  "materialized_at": "2026-10-25T01:56:36.456170+00:00",
   "mission_number": "",
   "mission_slug": "hn-serve-01M5P0NP",
-  "mission_type": "",
+  "mission_type": "software-dev",
   "summary": {
     "approved": 0,
     "blocked": 0,
@@ -12,17 +12,25 @@
     "claimed": 0,
     "done": 0,
     "for_review": 0,
-    "in_progress": 0,
+    "in_progress": 2,
     "in_review": 0,
-    "planned": 14
+    "planned": 12
   },
   "work_packages": {
     "WP01": {
-      "actor": "finalize-tasks",
+      "actor": "llxprt",
+      "agent": "llxprt",
+      "agent_profile": "__resolved_profile_absent__",
+      "agent_profile_version": "__resolved_profile_version_absent__",
       "force_count": 0,
-      "lane": "planned",
-      "last_event_id": "01M5R805SXQ142H6WF9BJT0HVG",
-      "last_transition_at": "2026-10-25T00:40:05.181466+00:00"
+      "lane": "in_progress",
+      "last_event_id": "01M5RCBHVPJCCJ63ERYNJSB018",
+      "last_transition_at": "2026-10-25T01:56:12.271039+00:00",
+      "model": "__resolved_model_absent__",
+      "provider": "__resolved_provider_absent__",
+      "role": "implementer",
+      "shell_pid": 3697574,
+      "shell_pid_created_at": "1792893369.85"
     },
     "WP02": {
       "actor": "finalize-tasks",
@@ -32,11 +40,19 @@
       "last_transition_at": "2026-10-25T00:40:05.305979+00:00"
     },
     "WP03": {
-      "actor": "finalize-tasks",
+      "actor": "llxprt",
+      "agent": "llxprt",
+      "agent_profile": "__resolved_profile_absent__",
+      "agent_profile_version": "__resolved_profile_version_absent__",
       "force_count": 0,
-      "lane": "planned",
-      "last_event_id": "01M5R8060GGX1GKZW9666RTZPM",
-      "last_transition_at": "2026-10-25T00:40:05.392160+00:00"
+      "lane": "in_progress",
+      "last_event_id": "01M5RCC9FAQCKMQEB5N1QC5GM2",
+      "last_transition_at": "2026-10-25T01:56:36.456170+00:00",
+      "model": "__resolved_model_absent__",
+      "provider": "__resolved_provider_absent__",
+      "role": "implementer",
+      "shell_pid": 3699711,
+      "shell_pid_created_at": "1792893391.97"
     },
     "WP04": {
       "actor": "finalize-tasks",
