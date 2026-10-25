@@ -171,7 +171,138 @@ not reliable on every network filesystem, so keep the server home on a local
 filesystem.
 
 ## Key bindings and authorized_keys
-<!-- section owned by WP02 -->
+
+OpenSSH authenticates every connection to the server account. `hn serve` does
+not implement SSH; it decides which Hubnot actor an authenticated key belongs
+to and makes sure OpenSSH runs `hn serve git` for that key and nothing else.
+
+### What a key binding is
+
+A key binding maps one SSH public key, identified by its full SHA256
+fingerprint, to one Hubnot actor, identified by its full 64-hex actor
+fingerprint. Bindings are stored in `state/registry.json`. One key binds to
+exactly one actor. One actor may hold several keys, for example one per
+laptop or one per security key.
+
+A binding gives the actor two things: SSH access to the hosted repositories
+and attribution of that actor's pushes. It grants no policy role. Roles such as
+maintainer or verifier come only from the policy documents in each repository,
+and a push from a bound key is checked against those policies like any other
+(C-006).
+
+The [Administering hosted repositories](#administering-hosted-repositories)
+section shows the `hn serve key` commands that add, list and remove bindings.
+
+### Supported key types
+
+`hn serve` accepts these OpenSSH public key types:
+
+- `ssh-ed25519`
+- `sk-ssh-ed25519@openssh.com`
+- `ecdsa-sha2-nistp256`
+- `ecdsa-sha2-nistp384`
+- `ecdsa-sha2-nistp521`
+- `sk-ecdsa-sha2-nistp256@openssh.com`
+- `ssh-rsa`
+
+Any other type, including `ssh-dss` and every certificate type, is refused with
+a message that names it.
+
+A key is given as one line in the format of a `.pub` file or an
+`authorized_keys` entry: the key type, the base64 key and an optional comment,
+separated by spaces. A leading `authorized_keys` options field such as
+`restrict,command="a b"` is accepted and ignored. Only the key type and base64
+key are stored and written back, so options and comments from the input never
+reach the server's `authorized_keys`. The line is refused when it is empty,
+longer than 16 KiB, contains a tab or any other control character apart from a
+single final newline, uses base64 without its `=` padding, or holds a key blob
+whose embedded type differs from the type field, whose lengths run past its
+end, or that carries trailing bytes.
+
+### Fingerprints
+
+A fingerprint is `SHA256:` followed by 43 characters of unpadded standard
+base64: the SHA-256 digest of the decoded key blob. It is the value that
+`ssh-keygen -l -E sha256 -f KEY.pub` prints in its second field:
+
+```console
+$ ssh-keygen -l -E sha256 -f ~/.ssh/id_ed25519.pub
+256 SHA256:Mnm7DCteTtegvPg/NcGZVvsMTFM5gR+dbIBbGci5vSg alice@laptop (ED25519)
+```
+
+Every `hn serve` command that takes a fingerprint requires all 43 characters.
+A shortened or otherwise malformed fingerprint is refused.
+
+### The managed block in authorized_keys
+
+`hn serve` writes one managed block into `$HOME/.ssh/authorized_keys` of the
+server account. The block starts and ends with fixed marker lines and holds one
+entry per binding, sorted by fingerprint:
+
+```text
+# BEGIN hn serve managed keys; edit with hn serve key
+restrict,command="/usr/local/bin/hn serve git --key SHA256:Mnm7DCteTtegvPg/NcGZVvsMTFM5gR+dbIBbGci5vSg" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICqPfpPz/R1uz/vd9nUpjEhAMWYVmeerTHMSJDGYgg3A hn-serve:4f1c9a6d0d2b
+# END hn serve managed keys
+```
+
+Each entry has three parts:
+
+- `restrict` turns off port, agent and X11 forwarding, PTY allocation and
+  `~/.ssh/rc`;
+- `command="ABS_HN serve git --key FINGERPRINT"` makes `sshd` run `hn serve git`
+  with the binding's fingerprint whatever command the client asked for.
+  `ABS_HN` is the absolute, symlink-resolved path of the `hn` binary that wrote
+  the block. The same path rules apply as for the hook scripts, so a path with a
+  quote, a backslash or whitespace is refused before anything is written;
+- the key type and base64 key, followed by the comment `hn-serve:` and the
+  first 12 characters of the bound actor.
+
+A registry with no bindings still produces the two marker lines. Before it
+writes an entry, `hn serve` parses the stored public key again and requires its
+fingerprint to equal the binding's fingerprint, so a hand-edited registry whose
+key and fingerprint disagree stops the command.
+
+Do not edit the block by hand. Every `hn serve key` command rewrites it from
+the registry, and so does every `hn serve repo` command. After you move or
+upgrade `hn`, run one of them to update the command path.
+
+### Lines outside the block
+
+You can keep your own keys and comments in the same file. `hn serve` changes
+only the lines from the begin marker through the end marker. Every byte outside
+the block stays as it was, including Windows `
+` line endings and a missing
+final newline. When the file has no block yet, `hn serve` appends one at the
+end, first adding a single `
+` if the file does not already end with one. A
+marker counts only when it is the whole line, without leading or trailing
+spaces.
+
+The new file is written to a temporary file in `.ssh` with mode 0600, synced
+and renamed over `authorized_keys`, so `sshd` sees either the old file or the
+new one. If a command is interrupted between those steps, a file such as
+`.ssh/.hn-private-1234` may be left behind; remove it.
+
+### When hn serve refuses to touch authorized_keys
+
+`hn serve` creates `$HOME/.ssh` with mode 0700 when it does not exist. It stops
+before writing anything when it finds any of the following:
+
+- `.ssh` is a symbolic link or is not a directory;
+- `.ssh` is writable by group or others, for example mode 0775;
+- `authorized_keys` is a symbolic link or is not a regular file;
+- `authorized_keys` is writable by group or others, for example mode 0664;
+- `authorized_keys` is larger than 4 MiB;
+- `authorized_keys` has two begin markers, two end markers, an end marker
+  without a begin marker before it, or a begin marker without an end marker
+  after it.
+
+The message names the path and, for a mode problem, the command that fixes it,
+such as `chmod 700 /home/hn/.ssh`. `hn serve` never repairs an unsafe `.ssh`
+or `authorized_keys` itself, because `sshd` with `StrictModes` rejects the same
+setup and a silent repair would hide the misconfiguration. An existing `.ssh`
+with a safe mode such as 0755 is kept as it is. The rewritten
+`authorized_keys` always has mode 0600.
 
 ## Administering hosted repositories
 <!-- section owned by WP05 -->
