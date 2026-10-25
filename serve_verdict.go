@@ -136,29 +136,40 @@ type serveVerdictContext struct {
 	// in the same push.
 	PushUpdates []serveRefUpdate
 
+	// HostedCeilings bounds the batched read of the hosted facts. The
+	// actor-ref rule refuses any append that would take the hosted facts
+	// past it, so every accepted push stays readable by the next one.
+	HostedCeilings serveHostedFactCeilings
+
 	loadHostedEvents  func() ([]StoredEvent, error)
 	hostedLoaded      bool
 	hostedEvents      []StoredEvent
 	hostedErr         error
 	hostedByID        map[string]StoredEvent
+	hostedUsageLoaded bool
+	hostedUsage       serveFactUsage
+	hostedUsageErr    error
+	pushFactUsage     serveFactUsage
 	maintainersLoaded bool
 	maintainers       []string
 }
 
 func newServeVerdictContext(gitDir, actor, key string, config serveRepoConfig, owners serveBranchOwners) *serveVerdictContext {
-	return &serveVerdictContext{
-		GitDir: gitDir,
-		Actor:  actor,
-		Key:    key,
-		Config: config,
-		Owners: owners,
-		loadHostedEvents: func() ([]StoredEvent, error) {
-			// The hook runs with GIT_DIR naming the hosted repository and
-			// the quarantine variables set, which collectIssueEvents uses.
-			events, _, err := collectIssueEvents()
-			return events, err
-		},
+	ctx := &serveVerdictContext{
+		GitDir:         gitDir,
+		Actor:          actor,
+		Key:            key,
+		Config:         config,
+		Owners:         owners,
+		HostedCeilings: defaultServeHostedFactCeilings(),
 	}
+	ctx.loadHostedEvents = func() ([]StoredEvent, error) {
+		// The hook runs with GIT_DIR naming the hosted repository and the
+		// quarantine variables set, which collectIssueEventsWithLimits uses.
+		events, _, err := collectIssueEventsWithLimits(ctx.HostedCeilings.readLimits())
+		return events, err
+	}
+	return ctx
 }
 
 // HostedEvents returns every verified event reachable from the hosted

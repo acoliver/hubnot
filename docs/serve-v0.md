@@ -898,7 +898,8 @@ reported:
 
 1. A deletion or a non-descending update is `actor-chain-rewrite`.
 2. A chain of another actor is `actor-key-mismatch`.
-3. The push must fit the repository budgets, otherwise `over-budget`.
+3. The push must fit the repository budgets, and the hosted facts with the
+   push must stay within the hosted fact ceilings, otherwise `over-budget`.
 4. Each appended event must carry a valid signature by the chain's actor,
    continue the sequence and the previous event ID, have the previous
    event's commit as its only parent, and hold exactly `event.json`,
@@ -986,13 +987,55 @@ Limits are inclusive: a measurement equal to its limit passes, and one above
 it is rejected with `over-budget`. The rejection line names the first budget
 the push exceeds, in the order of the table, with its limit and the
 measurement, for example
-`budget=max-events limit=11 measured=12`. The hosted refs stay unchanged.
+`budget=max-events limit=11 measured=12`. When a push exceeds several budgets
+at once, the server still measures every byte budget before it chooses, so a
+push over both `max-object-bytes` and `max-total-bytes` is reported as
+`max-object-bytes`, with the size of the largest object as the measurement.
+The hosted refs stay unchanged.
 
 A proposal code ref is new when it is pushed, so its measurement covers every
 object reachable from the proposal's head, including the history it shares
 with hosted branches, the way client replication measures a new proposal
 selection. Repositories with long histories may need a higher
 `max-objects` or `max-total-bytes` before their proposal refs fit.
+
+### Hosted fact ceilings
+
+Every push that updates a fact ref or a protected branch reads all hosted
+actor chains into memory to check the push against them. Two ceilings bound
+that read for the whole repository. They are fixed in this build and are
+the same aggregate limits `hn` uses when it reads issue history in a clone:
+
+| Ceiling | Value | What is counted |
+|----|----|----|
+| `hosted-fact-events` | 100000 | events in all hosted actor chains together |
+| `hosted-fact-bytes` | 268435456 (256 MiB) | bytes of every hosted event's `event.json`, `signature` and run log together |
+
+A single object may use the whole byte ceiling, so any event and run log the
+five budgets admit can be read back, whatever the budgets were when it was
+admitted. A run log of up to 16 MiB is accepted with the default budgets and
+stays readable on every later push.
+
+The server checks the ceilings before it accepts an actor chain. A push that
+would bring the hosted facts above either ceiling is rejected with
+`over-budget`, `budget=hosted-fact-events` or `budget=hosted-fact-bytes`, the
+ceiling as `limit` and the total the hosted facts would reach as `measured`.
+Like the budgets, the ceilings are inclusive and the events ceiling is
+checked first. The check runs after the five budgets. Because of it, an
+accepted push can never make the hosted facts unreadable for the next push.
+The ceilings do not apply to proposal code refs and memory streams, which
+the hosted fact read does not load.
+
+A repository that reaches a ceiling accepts no further actor events. Other
+refs, including ordinary branches, tags, proposal code refs and memory
+streams, are still checked as usual. Signed history cannot be removed, so
+start a new hosted repository for further collaboration when a repository
+approaches 256 MiB of facts. `hn serve repo show` does not print the
+ceilings because they cannot be changed.
+
+If the hosted facts cannot be read for any other reason, for example damaged
+objects, the server refuses every fact ref and protected update as described
+under [Rejection codes for fact refs](#rejection-codes-for-fact-refs).
 
 ### Identity rotation
 
@@ -1016,7 +1059,7 @@ actor's key.
 | `proposal-ref-mismatch` | a new proposal code ref is not the candidate's signed head or does not descend from its base |
 | `memory-key-mismatch` | the memory stream belongs to another actor |
 | `memory-invalid` | the push deletes or rewrites a memory stream, or the stream fails `hn-memory/0` validation |
-| `over-budget` | the pushed ref exceeds one of the budgets |
+| `over-budget` | the pushed ref exceeds one of the budgets, or an actor chain would take the hosted facts past a hosted fact ceiling |
 
 When the server cannot read its hosted facts, every fact ref and every
 protected branch update in the push is rejected with `actor-chain-invalid`

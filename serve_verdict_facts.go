@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"math"
 	"sort"
 	"strconv"
 	"strings"
@@ -92,6 +93,170 @@ func (ctx *serveVerdictContext) lookupFact(id string) (StoredEvent, bool, error)
 		}
 	}
 	return StoredEvent{}, false, nil
+}
+
+// Hosted fact ceilings. Each push reads every hosted event with the
+// batched reader of issue_read.go, which holds the events in memory and
+// refuses to read past its limits. The ceilings below are those limits for
+// the server, and the actor-ref rule refuses an append that would take the
+// hosted facts past them, so a fact the server admits can never make the
+// next push's read fail.
+
+const (
+	// serveHostedFactEventsCeiling is the client reader's event limit.
+	serveHostedFactEventsCeiling = 100_000
+	// serveHostedFactBytesCeiling is the client reader's aggregate byte
+	// limit: event.json, signature and run log bytes of all hosted events.
+	serveHostedFactBytesCeiling = 256 << 20
+
+	serveHostedFactEventsBudget = "hosted-fact-events"
+	serveHostedFactBytesBudget  = "hosted-fact-bytes"
+)
+
+// serveHostedFactCeilings bounds the hosted facts of one repository: how
+// many events all hosted actor chains hold together and how many bytes the
+// reader loads for them.
+type serveHostedFactCeilings struct {
+	Events, Bytes int64
+}
+
+func defaultServeHostedFactCeilings() serveHostedFactCeilings {
+	return serveHostedFactCeilings{Events: serveHostedFactEventsCeiling, Bytes: serveHostedFactBytesCeiling}
+}
+
+// readLimits turns the ceilings into reader limits. A single object may
+// use the whole byte ceiling, so every object the five budgets admit stays
+// readable, whatever the budgets are or were when it was admitted; the
+// memory the read uses stays bounded by the byte ceiling. Each hosted
+// actor ref reaches at least its own events, so there are never more refs
+// than events.
+func (ceilings serveHostedFactCeilings) readLimits() issueReadLimits {
+	return issueReadLimits{events: int(ceilings.Events), refs: int(ceilings.Events), object: ceilings.Bytes, total: ceilings.Bytes}
+}
+
+// serveFactUsage is what the hosted fact reader spends on a set of events:
+// one event each, and the bytes of each event.json, signature and run log.
+type serveFactUsage struct {
+	Events, Bytes int64
+}
+
+func (usage serveFactUsage) plus(other serveFactUsage) serveFactUsage {
+	return serveFactUsage{Events: usage.Events + other.Events, Bytes: usage.Bytes + other.Bytes}
+}
+
+// hostedFactUsage measures the hosted events the way the reader counts
+// them. event.json and the run log are in memory already; the signature is
+// stored base64-encoded and its blob may hold surrounding whitespace, so
+// one batched size query gives the exact blob sizes.
+func (ctx *serveVerdictContext) hostedFactUsage() (serveFactUsage, error) {
+	if ctx.hostedUsageLoaded {
+		return ctx.hostedUsage, ctx.hostedUsageErr
+	}
+	ctx.hostedUsageLoaded = true
+	hosted, err := ctx.HostedEvents()
+	if err != nil {
+		ctx.hostedUsageErr = err
+		return serveFactUsage{}, err
+	}
+	usage := serveFactUsage{Events: int64(len(hosted))}
+	paths := make([]string, 0, len(hosted))
+	for _, event := range hosted {
+		usage.Bytes += int64(len(event.Payload) + len(event.Attachments["log.txt"]))
+		paths = append(paths, event.Commit+":signature")
+	}
+	sizes, err := serveBlobSizes(ctx.GitDir, paths)
+	if err == nil {
+		for index, size := range sizes {
+			if size < 0 {
+				err = fmt.Errorf("hosted %s is missing", paths[index])
+				break
+			}
+			usage.Bytes += size
+		}
+	}
+	ctx.hostedUsage, ctx.hostedUsageErr = usage, err
+	return usage, err
+}
+
+// serveBlobSizes returns the size of each REV:PATH blob in one batched
+// query, or -1 for a path that does not name a blob.
+func serveBlobSizes(gitDir string, paths []string) ([]int64, error) {
+	sizes := make([]int64, len(paths))
+	if len(paths) == 0 {
+		return sizes, nil
+	}
+	batch, err := gitInputAt(gitDir, []byte(strings.Join(paths, "\n")+"\n"), "cat-file", "--batch-check=%(objecttype) %(objectsize)")
+	if err != nil {
+		return nil, fmt.Errorf("measure fact blobs: %w", err)
+	}
+	lines := strings.Split(strings.TrimSuffix(string(batch), "\n"), "\n")
+	if len(lines) != len(paths) {
+		return nil, fmt.Errorf("measure fact blobs: %d answers for %d paths", len(lines), len(paths))
+	}
+	for index, line := range lines {
+		fields := strings.Fields(line)
+		if len(fields) != 2 || fields[0] != "blob" {
+			sizes[index] = -1
+			continue
+		}
+		size, err := strconv.ParseInt(fields[1], 10, 64)
+		if err != nil || size < 0 {
+			return nil, fmt.Errorf("invalid blob size %q", line)
+		}
+		sizes[index] = size
+	}
+	return sizes, nil
+}
+
+// serveAppendedFactUsage measures the appended commits the way the reader
+// will count them once they are hosted. event.json and signature must be
+// present; log.txt counts wherever it is, which chain validation later
+// allows only for a run result.
+func serveAppendedFactUsage(gitDir string, commits []string) (serveFactUsage, error) {
+	paths := make([]string, 0, 3*len(commits))
+	for _, commit := range commits {
+		paths = append(paths, commit+":event.json", commit+":signature", commit+":log.txt")
+	}
+	sizes, err := serveBlobSizes(gitDir, paths)
+	if err != nil {
+		return serveFactUsage{}, err
+	}
+	usage := serveFactUsage{Events: int64(len(commits))}
+	for index, size := range sizes {
+		if size < 0 {
+			if strings.HasSuffix(paths[index], ":log.txt") {
+				continue
+			}
+			return serveFactUsage{}, fmt.Errorf("%s is not a blob", paths[index])
+		}
+		usage.Bytes += size
+	}
+	return usage, nil
+}
+
+// serveHostedCeilingRejection refuses an actor update that would take the
+// hosted facts past a ceiling, events first. Limits are inclusive.
+func serveHostedCeilingRejection(ref string, ceilings serveHostedFactCeilings, after serveFactUsage) *serveRejection {
+	checks := []struct {
+		name, unit         string
+		limit, measurement int64
+	}{
+		{serveHostedFactEventsBudget, "events", ceilings.Events, after.Events},
+		{serveHostedFactBytesBudget, "bytes", ceilings.Bytes, after.Bytes},
+	}
+	for _, check := range checks {
+		if check.measurement > check.limit {
+			return &serveRejection{
+				Code:     serveReasonOverBudget,
+				Budget:   check.name,
+				Limit:    check.limit,
+				Measured: check.measurement,
+				Sentence: fmt.Sprintf("accepting %s would bring the hosted facts of this repository to %d %s and the server reads at most %d; ask the administrator.",
+					ref, check.measurement, check.unit, check.limit),
+			}
+		}
+	}
+	return nil
 }
 
 // serveBudgetChecks lists the five budgets in the order the mapping reports
@@ -186,15 +351,27 @@ func checkServeActorUpdate(ctx *serveVerdictContext, update serveRefUpdate) *ser
 		}
 	}
 
-	// Step 3: budgets, measured over what this push adds.
+	// Step 3: budgets, measured over what this push adds, then the
+	// repository-wide ceilings of the hosted fact read.
 	budgets := ctx.Config.Budgets
-	measured, err := measureServeActorRangeUnderBudgets(ctx.GitDir, oldHead, update.New, prefix, budgets, update.Ref)
+	measured, appendedCommits, err := measureServeActorRange(ctx.GitDir, oldHead, update.New, prefix, budgets, update.Ref)
 	if err != nil {
 		var exceeded replicationBudgetExceeded
 		if errors.As(err, &exceeded) {
 			return serveOverBudgetRejection(update.Ref, budgets, measured)
 		}
 		return serveActorChainInvalidRejection(ctx, update, actor, oldHead, prefix, err)
+	}
+	appendedUsage, err := serveAppendedFactUsage(ctx.GitDir, appendedCommits)
+	if err != nil {
+		return serveActorChainInvalidRejection(ctx, update, actor, oldHead, prefix, err)
+	}
+	hostedUsage, err := ctx.hostedFactUsage()
+	if err != nil {
+		return serveHostedFactsRejection()
+	}
+	if rejection := serveHostedCeilingRejection(update.Ref, ctx.HostedCeilings, hostedUsage.plus(ctx.pushFactUsage).plus(appendedUsage)); rejection != nil {
+		return rejection
 	}
 
 	// Step 4: signature, actor, sequence, previous ID, parent and tree.
@@ -224,8 +401,10 @@ func checkServeActorUpdate(ctx *serveVerdictContext, update serveRefUpdate) *ser
 		}
 	}
 
-	// Step 7: later checks of this push see the appended events.
+	// Step 7: later checks of this push see the appended events, and later
+	// actor updates count them against the hosted fact ceilings.
 	ctx.PushFacts = append(ctx.PushFacts, appended...)
+	ctx.pushFactUsage = ctx.pushFactUsage.plus(appendedUsage)
 	return nil
 }
 
@@ -389,9 +568,24 @@ func serveFirstFailingActorEvent(gitDir, actor, oldHead, newHead string, prefix 
 // trees and blobs of oldHead itself, so hosted event.json and log blobs are
 // discounted by their object IDs as well; a run log can repeat across
 // events. Hosted trees and signature blobs cannot recur in a valid chain.
+//
+// The client helper stops at the first limit a running total crosses. The
+// server must name the first exceeded budget in the order events, objects,
+// largest object, largest attachment, total bytes, so this measurement
+// stops early only on events and objects, which come first in that order,
+// and otherwise measures every byte dimension before it checks the
+// budgets. That work stays bounded: it sizes at most max-objects objects
+// and at most max-events attachments without reading their contents.
 func measureServeActorRangeUnderBudgets(gitDir, oldHead, newHead string, hostedPrefix []StoredEvent, budgets ReplicationBudgets, selectionID string) (ReplicationMeasurements, error) {
+	measurements, _, err := measureServeActorRange(gitDir, oldHead, newHead, hostedPrefix, budgets, selectionID)
+	return measurements, err
+}
+
+// measureServeActorRange is measureServeActorRangeUnderBudgets that also
+// returns the appended commits in chain order.
+func measureServeActorRange(gitDir, oldHead, newHead string, hostedPrefix []StoredEvent, budgets ReplicationBudgets, selectionID string) (ReplicationMeasurements, []string, error) {
 	if objectType, err := gitTextAt(gitDir, "cat-file", "-t", newHead); err != nil || objectType != "commit" {
-		return ReplicationMeasurements{}, fmt.Errorf("selected root %s is not a commit", newHead)
+		return ReplicationMeasurements{}, nil, fmt.Errorf("selected root %s is not a commit", newHead)
 	}
 	revisions := []string{newHead}
 	if oldHead != "" {
@@ -399,20 +593,20 @@ func measureServeActorRangeUnderBudgets(gitDir, oldHead, newHead string, hostedP
 	}
 	listedCommits, err := gitTextAt(gitDir, append([]string{"rev-list", "--reverse"}, revisions...)...)
 	if err != nil {
-		return ReplicationMeasurements{}, fmt.Errorf("count selected actor events: %w", err)
+		return ReplicationMeasurements{}, nil, fmt.Errorf("count selected actor events: %w", err)
 	}
 	appended := strings.Fields(listedCommits)
 	measurements := ReplicationMeasurements{Events: int64(len(hostedPrefix) + len(appended))}
 	if measurements.Events < 1 {
-		return measurements, fmt.Errorf("invalid selected actor event count %d", measurements.Events)
+		return measurements, nil, fmt.Errorf("invalid selected actor event count %d", measurements.Events)
 	}
 	if err := enforceReplicationBudgets(selectionID, budgets, measurements); err != nil {
-		return measurements, replicationBudgetExceeded{err}
+		return measurements, appended, replicationBudgetExceeded{err}
 	}
 
 	listed, err := gitTextAt(gitDir, append([]string{"rev-list", "--objects"}, revisions...)...)
 	if err != nil {
-		return ReplicationMeasurements{}, fmt.Errorf("enumerate selected graph: %w", err)
+		return ReplicationMeasurements{}, nil, fmt.Errorf("enumerate selected graph: %w", err)
 	}
 	hostedObjects := make(map[string]bool, 3*len(hostedPrefix))
 	for _, event := range hostedPrefix {
@@ -437,73 +631,75 @@ func measureServeActorRangeUnderBudgets(gitDir, oldHead, newHead string, hostedP
 	}
 	measurements.Objects = int64(len(objects))
 	if err := enforceReplicationBudgets(selectionID, budgets, measurements); err != nil {
-		return measurements, replicationBudgetExceeded{err}
+		return measurements, appended, replicationBudgetExceeded{err}
 	}
 	if len(objects) > 0 {
 		batch, err := gitInputAt(gitDir, []byte(strings.Join(objects, "\n")+"\n"),
 			"cat-file", "--batch-check=%(objectname) %(objecttype) %(objectsize)")
 		if err != nil {
-			return ReplicationMeasurements{}, fmt.Errorf("measure selected graph: %w", err)
+			return ReplicationMeasurements{}, nil, fmt.Errorf("measure selected graph: %w", err)
 		}
 		scanner := bufio.NewScanner(strings.NewReader(string(batch)))
 		for scanner.Scan() {
 			fields := strings.Fields(scanner.Text())
 			if len(fields) != 3 || fields[1] == "missing" {
-				return ReplicationMeasurements{}, fmt.Errorf("unreadable reachable object %q", scanner.Text())
+				return ReplicationMeasurements{}, nil, fmt.Errorf("unreadable reachable object %q", scanner.Text())
 			}
 			size, err := strconv.ParseInt(fields[2], 10, 64)
 			if err != nil || size < 0 {
-				return ReplicationMeasurements{}, fmt.Errorf("invalid object size for %s", fields[0])
+				return ReplicationMeasurements{}, nil, fmt.Errorf("invalid object size for %s", fields[0])
 			}
 			measurements.TotalBytes += size
 			if size > measurements.LargestObjectBytes {
 				measurements.LargestObjectBytes = size
 			}
-			if err := enforceReplicationBudgets(selectionID, budgets, measurements); err != nil {
-				return measurements, replicationBudgetExceeded{err}
-			}
 		}
 		if err := scanner.Err(); err != nil {
-			return ReplicationMeasurements{}, err
+			return ReplicationMeasurements{}, nil, err
 		}
 	}
 
-	// Attachments in chain order: the hosted prefix, then each appended
-	// commit's log.txt, the only attachment an actor event can carry.
-	attachmentSizes := make([]int64, 0)
+	// Attachments: the hosted prefix's, then each appended commit's
+	// log.txt, the only attachment an actor event can carry.
 	for _, event := range hostedPrefix {
 		for _, attachment := range event.Attachments {
-			attachmentSizes = append(attachmentSizes, int64(len(attachment)))
+			measurements.LargestAttachmentBytes = max(measurements.LargestAttachmentBytes, int64(len(attachment)))
 		}
 	}
-	if len(appended) > 0 {
-		var request strings.Builder
-		for _, commit := range appended {
-			request.WriteString(commit + ":log.txt\n")
-		}
-		batch, err := gitInputAt(gitDir, []byte(request.String()), "cat-file", "--batch-check=%(objecttype) %(objectsize)")
-		if err != nil {
-			return ReplicationMeasurements{}, fmt.Errorf("measure appended attachments: %w", err)
-		}
-		for _, line := range strings.Split(strings.TrimSuffix(string(batch), "\n"), "\n") {
-			fields := strings.Fields(line)
-			if len(fields) != 2 || fields[0] != "blob" {
-				continue
-			}
-			size, err := strconv.ParseInt(fields[1], 10, 64)
-			if err != nil || size < 0 {
-				return ReplicationMeasurements{}, fmt.Errorf("invalid attachment size %q", line)
-			}
-			attachmentSizes = append(attachmentSizes, size)
-		}
+	logs := make([]string, 0, len(appended))
+	for _, commit := range appended {
+		logs = append(logs, commit+":log.txt")
 	}
-	for _, size := range attachmentSizes {
-		if size > measurements.LargestAttachmentBytes {
-			measurements.LargestAttachmentBytes = size
-		}
-		if err := enforceReplicationBudgets(selectionID, budgets, measurements); err != nil {
-			return measurements, replicationBudgetExceeded{err}
-		}
+	sizes, err := serveBlobSizes(gitDir, logs)
+	if err != nil {
+		return ReplicationMeasurements{}, nil, fmt.Errorf("measure appended attachments: %w", err)
+	}
+	for _, size := range sizes {
+		measurements.LargestAttachmentBytes = max(measurements.LargestAttachmentBytes, size)
+	}
+
+	if err := enforceReplicationBudgets(selectionID, budgets, measurements); err != nil {
+		return measurements, appended, replicationBudgetExceeded{err}
+	}
+	return measurements, appended, nil
+}
+
+// measureServeSelectionUnderBudgets measures a proposal or memory ref with
+// the client helper, unchanged, and reports the first exceeded budget in
+// the server's order. The helper stops at the first running total that
+// crosses a limit, so it runs with the byte limits lifted and the event
+// and object limits kept: those two come first in the order, and the
+// object limit bounds how many sizes the helper reads. Proposal and memory
+// selections carry no attachments, so the helper never loads contents.
+func measureServeSelectionUnderBudgets(gitDir, kind, root, acceptedRoot string, budgets ReplicationBudgets, selectionID string) (ReplicationMeasurements, error) {
+	counting := budgets
+	counting.MaxObjectBytes, counting.MaxAttachmentBytes, counting.MaxTotalBytes = math.MaxInt64, math.MaxInt64, math.MaxInt64
+	measurements, err := measureQuarantinedSelectionUnderBudgets(gitDir, gitDir, kind, root, acceptedRoot, counting, selectionID)
+	if err != nil {
+		return measurements, err
+	}
+	if err := enforceReplicationBudgets(selectionID, budgets, measurements); err != nil {
+		return measurements, replicationBudgetExceeded{err}
 	}
 	return measurements, nil
 }
@@ -582,7 +778,7 @@ func checkServeProposalUpdate(ctx *serveVerdictContext, update serveRefUpdate) *
 	// Step 5: the candidate's whole code graph, as client replication
 	// measures a new proposal selection.
 	budgets := ctx.Config.Budgets
-	measured, err := measureQuarantinedSelectionUnderBudgets(ctx.GitDir, ctx.GitDir, replicationProposal, update.New, "", budgets, update.Ref)
+	measured, err := measureServeSelectionUnderBudgets(ctx.GitDir, replicationProposal, update.New, "", budgets, update.Ref)
 	if err != nil {
 		var exceeded replicationBudgetExceeded
 		if errors.As(err, &exceeded) {
@@ -646,7 +842,7 @@ func checkServeMemoryUpdate(ctx *serveVerdictContext, update serveRefUpdate) *se
 		oldHead = update.Old
 	}
 	budgets := ctx.Config.Budgets
-	measured, err := measureQuarantinedSelectionUnderBudgets(ctx.GitDir, ctx.GitDir, replicationMemory, update.New, oldHead, budgets, update.Ref)
+	measured, err := measureServeSelectionUnderBudgets(ctx.GitDir, replicationMemory, update.New, oldHead, budgets, update.Ref)
 	if err != nil {
 		var exceeded replicationBudgetExceeded
 		if errors.As(err, &exceeded) {

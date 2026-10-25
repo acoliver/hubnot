@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -819,5 +820,312 @@ func TestServeFactsDocumentedExample(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, expected) {
 		t.Fatalf("fields %+v, want %+v", got, expected)
+	}
+}
+
+// serveTestChain appends signed events to who's actor chain in-process,
+// in who's clone, so a test controls run log sizes exactly.
+type serveTestChain struct {
+	t        *testing.T
+	f        *servePushFixture
+	who      string
+	identity *Identity
+}
+
+func newServeTestChain(t *testing.T, f *servePushFixture, who string) *serveTestChain {
+	t.Helper()
+	t.Chdir(f.work[who])
+	identity, err := loadIdentity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if identity.Actor != f.actors[who] {
+		t.Fatalf("identity in %s's clone is %s, want %s", who, identity.Actor, f.actors[who])
+	}
+	return &serveTestChain{t: t, f: f, who: who, identity: identity}
+}
+
+func (c *serveTestChain) issue(title string) {
+	c.t.Helper()
+	event, err := nextEvent(c.identity, "issue.open")
+	if err != nil {
+		c.t.Fatal(err)
+	}
+	event.Title = title
+	if _, err := appendEvent(event, c.identity); err != nil {
+		c.t.Fatal(err)
+	}
+}
+
+// run appends a run request for proposal and a run result carrying log.
+func (c *serveTestChain) run(proposal operationalEvent, log []byte) {
+	c.t.Helper()
+	request, err := nextEvent(c.identity, "run.request")
+	if err != nil {
+		c.t.Fatal(err)
+	}
+	request.Subject, request.Pipeline = proposal.ID, "test"
+	request.Definition, request.Commit = "sha256:"+strings.Repeat("b", 64), proposal.Head
+	stored, err := appendEvent(request, c.identity)
+	if err != nil {
+		c.t.Fatal(err)
+	}
+	result, err := nextEvent(c.identity, "run.result")
+	if err != nil {
+		c.t.Fatal(err)
+	}
+	result.Subject, result.Pipeline = stored.ID, request.Pipeline
+	result.Definition, result.Commit = request.Definition, request.Commit
+	result.Outcome, result.Log = "passed", eventID(log)
+	result.Backend, result.Platform, result.Runner = "host", "linux/amd64", "hn/test"
+	if _, err := appendEventWithAttachments(result, c.identity, map[string][]byte{"log.txt": log}); err != nil {
+		c.t.Fatal(err)
+	}
+}
+
+// Review cycle 1, issue 1: a run log the budgets admit stays readable. A
+// log above the client reader's 8 MiB object limit and a log at the 16 MiB
+// attachment budget are accepted with the default budgets, and an ordinary
+// append after each is accepted too, which needs the hosted facts to load.
+// One byte over the attachment budget is over-budget.
+func TestServeFactsAdmittedRunLogsStayReadable(t *testing.T) {
+	f := newServeFactsFixture(t, "A")
+	proposal := f.proposal("A", "large signed runner logs")
+	f.hn("A", "sync", "origin")
+	chain := newServeTestChain(t, f, "A")
+	ref := f.actorRef("A")
+	attachmentBudget := defaultReplicationBudgets().MaxAttachmentBytes
+
+	for _, size := range []int64{8<<20 + 1, attachmentBudget} {
+		chain.run(proposal, bytes.Repeat([]byte("x"), int(size)))
+		if measured := measureServeTestActorPush(f, "A"); measured.LargestAttachmentBytes != size {
+			t.Fatalf("fixture log measures %d bytes, want %d", measured.LargestAttachmentBytes, size)
+		}
+		f.pushOwn("A")
+		chain.issue(fmt.Sprintf("ordinary append after a %d-byte log", size))
+		f.pushOwn("A")
+	}
+
+	hosted := f.hostedRef(ref)
+	chain.run(proposal, bytes.Repeat([]byte("y"), int(attachmentBudget+1)))
+	rejections := f.reject("A", map[string]string{ref: serveReasonOverBudget}, "origin", ref+":"+ref)
+	requireServeOverBudget(t, rejections[0], "max-attachment-bytes", attachmentBudget, attachmentBudget+1)
+	f.git("A", "update-ref", ref, hosted)
+	chain.issue("ordinary append after the refused log")
+	f.pushOwn("A")
+}
+
+// Review cycle 1, issue 2: when several budgets are exceeded at once, the
+// rejection names the first in the order events, objects, largest object,
+// largest attachment, total bytes, with complete measurements, for actor,
+// proposal and memory refs alike. Every rejection leaves the hosted refs
+// unchanged (servePushFixture.reject).
+func TestServeFactsBudgetPriorityWithSeveralExceeded(t *testing.T) {
+	f := newServeFactsFixture(t, "A")
+	ref := f.actorRef("A")
+	unbounded := ReplicationBudgets{MaxEvents: 1 << 62, MaxObjects: 1 << 62, MaxObjectBytes: 1 << 62, MaxAttachmentBytes: 1 << 62, MaxTotalBytes: 1 << 62}
+	clientGitDir := filepath.Join(f.work["A"], ".git")
+	measureClient := func(kind, ref string) ReplicationMeasurements {
+		t.Helper()
+		measured, err := measureQuarantinedSelectionUnderBudgets(clientGitDir, f.hosted, kind, f.localHead("A", ref), f.hostedRef(ref), unbounded, "test")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return measured
+	}
+	type exceeded struct {
+		budgets map[string]int64
+		budget  string
+		limit   int64
+		value   int64
+	}
+	requireFirstExceeded := func(pushedRef, refspec string, cases []exceeded) {
+		t.Helper()
+		for _, tc := range cases {
+			for name, value := range tc.budgets {
+				serveSetBudget(f, name, value)
+			}
+			rejections := f.reject("A", map[string]string{pushedRef: serveReasonOverBudget}, "origin", refspec)
+			requireServeOverBudget(t, rejections[0], tc.budget, tc.limit, tc.value)
+			serveResetBudgets(f)
+		}
+	}
+
+	// Actor ref: largest object before total bytes, objects before both.
+	f.issue("A", strings.Repeat("a long title makes event.json the largest object ", 12))
+	measured := measureServeTestActorPush(f, "A")
+	requireFirstExceeded(ref, ref+":"+ref, []exceeded{
+		{map[string]int64{"max-object-bytes": measured.LargestObjectBytes - 1, "max-total-bytes": 1},
+			"max-object-bytes", measured.LargestObjectBytes - 1, measured.LargestObjectBytes},
+		{map[string]int64{"max-objects": measured.Objects - 1, "max-object-bytes": 1, "max-total-bytes": 1},
+			"max-objects", measured.Objects - 1, measured.Objects},
+	})
+	f.pushOwn("A")
+
+	// Proposal ref: largest object before total bytes.
+	proposal := f.proposal("A", "measured code")
+	f.pushOwn("A")
+	code := proposalRef(proposal.ID)
+	f.git("A", "update-ref", code, proposal.Head)
+	measured = measureClient(replicationProposal, code)
+	requireFirstExceeded(code, proposal.Head+":"+code, []exceeded{
+		{map[string]int64{"max-object-bytes": measured.LargestObjectBytes - 1, "max-total-bytes": 1},
+			"max-object-bytes", measured.LargestObjectBytes - 1, measured.LargestObjectBytes},
+	})
+	f.push("A", "origin", proposal.Head+":"+code)
+
+	// Actor ref with a run log: largest attachment before total bytes. The
+	// log is the largest object and stays within max-object-bytes.
+	chain := newServeTestChain(t, f, "A")
+	chain.run(proposal, bytes.Repeat([]byte("z"), 4096))
+	measured = measureServeTestActorPush(f, "A")
+	if measured.LargestAttachmentBytes != 4096 {
+		t.Fatalf("fixture log measures %d bytes, want 4096", measured.LargestAttachmentBytes)
+	}
+	requireFirstExceeded(ref, ref+":"+ref, []exceeded{
+		{map[string]int64{"max-attachment-bytes": 4095, "max-total-bytes": 1},
+			"max-attachment-bytes", 4095, 4096},
+	})
+	f.pushOwn("A")
+
+	// Memory ref: largest object before total bytes.
+	output := f.hn("A", "memory", "record", "--kind", "observation", "--at", "HEAD", "--applies", "exact",
+		"--topic", "priority", "--content", strings.Repeat("a memory long enough to be the largest object ", 20), "--json")
+	var result memoryCommandResultV0
+	if err := decodeServeTestJSON(output, &result); err != nil {
+		t.Fatalf("hn memory record output %q: %v", output, err)
+	}
+	memory, err := memoryRef(f.actors["A"], result.Stream)
+	if err != nil {
+		t.Fatal(err)
+	}
+	measured = measureClient(replicationMemory, memory)
+	requireFirstExceeded(memory, memory+":"+memory, []exceeded{
+		{map[string]int64{"max-object-bytes": measured.LargestObjectBytes - 1, "max-total-bytes": 1},
+			"max-object-bytes", measured.LargestObjectBytes - 1, measured.LargestObjectBytes},
+	})
+	f.push("A", "origin", memory+":"+memory)
+}
+
+// serveTestHostedUsage counts what the hosted fact reader loads for the
+// actor chains in the current repository: one event per commit and the
+// bytes of each event.json, signature and run log, measured with git.
+func serveTestHostedUsage(t *testing.T) serveFactUsage {
+	t.Helper()
+	commits := strings.Fields(mustGitText(t, "rev-list", "--glob=refs/hn/actors/*"))
+	usage := serveFactUsage{Events: int64(len(commits))}
+	for _, commit := range commits {
+		for _, path := range []string{"event.json", "signature", "log.txt"} {
+			if path == "log.txt" && !strings.Contains(mustGitText(t, "ls-tree", "--name-only", commit), "log.txt") {
+				continue
+			}
+			size, err := strconv.ParseInt(mustGitText(t, "cat-file", "-s", commit+":"+path), 10, 64)
+			if err != nil {
+				t.Fatal(err)
+			}
+			usage.Bytes += size
+		}
+	}
+	return usage
+}
+
+// Review cycle 1, issue 1: the hosted fact ceilings. They are server
+// constants (100,000 events and 256 MiB) too large to reach through real
+// pushes in a test, so this test lowers them on the verdict context and
+// runs evaluateServePush, the function the pre-receive hook calls, on real
+// signed chains of two actors. Appends that bring the hosted facts exactly
+// to a ceiling are accepted and the hosted facts then load under the same
+// ceilings; one event or one byte over is over-budget. Lowering a ceiling
+// by one after acceptance makes the load fail, so the accounting matches
+// the reader exactly, including signature blobs with surrounding
+// whitespace.
+func TestServeFactsHostedFactCeilings(t *testing.T) {
+	inReplicationTestRepository(t)
+	gitDir, err := requireGitRepository()
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, pusher := testIdentity(t, "Other"), testIdentity(t, "Pusher")
+	issue := func(identity *Identity, title string) *StoredEvent {
+		t.Helper()
+		event, err := nextEvent(identity, "issue.open")
+		if err != nil {
+			t.Fatal(err)
+		}
+		event.Title = title
+		stored, err := appendEvent(event, identity)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return stored
+	}
+	issue(other, "hosted by another actor")
+	issue(other, "also hosted by another actor")
+	issue(pusher, "hosted first")
+
+	// The appended event's signature blob carries a trailing newline, which
+	// the reader trims but counts.
+	pusherRef := actorRef(pusher.Actor)
+	oldHead, _, _ := refValue(pusherRef)
+	appended := issue(pusher, "appended by the push")
+	signature := strings.TrimSpace(mustGitText(t, "cat-file", "-p", appended.Commit+":signature")) + "\n"
+	blob := mustGitTextFromInput(t, []byte(signature), "hash-object", "-w", "--stdin")
+	eventBlob := mustGitText(t, "rev-parse", appended.Commit+":event.json")
+	tree := mustGitTextFromInput(t, []byte("100644 blob "+eventBlob+"\tevent.json\n100644 blob "+blob+"\tsignature\n"), "mktree")
+	newHead := mustGitText(t, "commit-tree", tree, "-p", oldHead, "-m", "padded signature")
+	mustGit(t, "update-ref", pusherRef, newHead)
+	full := serveTestHostedUsage(t)
+	mustGit(t, "update-ref", pusherRef, oldHead)
+
+	config, err := newServeRepoConfig("r", []string{"refs/heads/main"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	verdict := func(ceilings serveHostedFactCeilings) []serveRejection {
+		t.Helper()
+		ctx := newServeVerdictContext(gitDir, pusher.Actor, serveTestFingerprint("ceilings"), config, emptyServeBranchOwners())
+		ctx.HostedCeilings = ceilings
+		updates := []serveRefUpdate{{Old: oldHead, New: newHead, Ref: pusherRef}}
+		classifyServeRefUpdates(config, updates)
+		return evaluateServePush(ctx, updates, servePushOptions{})
+	}
+	loads := func(ceilings serveHostedFactCeilings) error {
+		ctx := newServeVerdictContext(gitDir, pusher.Actor, serveTestFingerprint("ceilings"), config, emptyServeBranchOwners())
+		ctx.HostedCeilings = ceilings
+		_, err := ctx.HostedEvents()
+		return err
+	}
+	requireCeiling := func(rejections []serveRejection, budget string, limit, measured int64) {
+		t.Helper()
+		if len(rejections) != 1 {
+			t.Fatalf("rejections %+v, want one", rejections)
+		}
+		requireServeOverBudget(t, rejections[0], budget, limit, measured)
+		renderServeRejections(rejections)
+	}
+
+	exact := serveHostedFactCeilings{Events: full.Events, Bytes: full.Bytes}
+	requireCeiling(verdict(serveHostedFactCeilings{Events: full.Events - 1, Bytes: full.Bytes}),
+		serveHostedFactEventsBudget, full.Events-1, full.Events)
+	requireCeiling(verdict(serveHostedFactCeilings{Events: full.Events, Bytes: full.Bytes - 1}),
+		serveHostedFactBytesBudget, full.Bytes-1, full.Bytes)
+	requireCeiling(verdict(serveHostedFactCeilings{Events: full.Events - 1, Bytes: full.Bytes - 1}),
+		serveHostedFactEventsBudget, full.Events-1, full.Events)
+	if rejections := verdict(exact); len(rejections) != 0 {
+		t.Fatalf("an append to exactly the ceilings was rejected: %+v", rejections)
+	}
+
+	// Git applies the accepted update; the next push reads the facts.
+	mustGit(t, "update-ref", pusherRef, newHead)
+	if err := loads(exact); err != nil {
+		t.Fatalf("hosted facts at exactly the ceilings do not load: %v", err)
+	}
+	for _, lower := range []serveHostedFactCeilings{{Events: full.Events - 1, Bytes: full.Bytes}, {Events: full.Events, Bytes: full.Bytes - 1}} {
+		if err := loads(lower); err == nil {
+			t.Fatalf("hosted facts loaded under %+v, below their measured usage %+v", lower, full)
+		}
+	}
+	if err := loads(defaultServeHostedFactCeilings()); err != nil {
+		t.Fatalf("hosted facts do not load under the default ceilings: %v", err)
 	}
 }
