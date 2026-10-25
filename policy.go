@@ -244,19 +244,27 @@ func actorListed(actor string, actors []string) bool {
 	return false
 }
 
+// pipelineDefinitionError marks a required pipeline whose definition is missing
+// or invalid at the proposal head. Its message is the wrapped error's message,
+// so existing callers see the same text while a destination-policy check can
+// tell this failure apart with errors.As.
+type pipelineDefinitionError struct {
+	Pipeline string
+	err      error
+}
+
+func (e pipelineDefinitionError) Error() string { return e.err.Error() }
+func (e pipelineDefinitionError) Unwrap() error { return e.err }
+
+// proposalCodeState is the candidate's code ref as seen by an evaluation:
+// whether a ref exists and, if so, the commit it names.
+type proposalCodeState struct {
+	Head   string
+	Exists bool
+}
+
 func evaluateProposal(proposal *StoredEvent, events []StoredEvent) (*ProposalEvaluation, error) {
-	if !isProposalKind(proposal.Event.Kind) {
-		return nil, fmt.Errorf("%s is not a proposal", shortID(proposal.ID))
-	}
-	lineage, err := buildLineageIndex(events)
-	if err != nil {
-		return nil, err
-	}
-	lineageState, err := lineage.state(proposal.ID)
-	if err != nil {
-		return nil, err
-	}
-	root, err := lineage.candidate(lineageState.RootID)
+	lineageState, title, err := proposalEvaluationLineage(proposal, events)
 	if err != nil {
 		return nil, err
 	}
@@ -264,13 +272,76 @@ func evaluateProposal(proposal *StoredEvent, events []StoredEvent) (*ProposalEva
 	if err != nil {
 		return nil, err
 	}
-	evaluation := &ProposalEvaluation{Proposal: proposal, DisplayTitle: root.Event.Title, Lineage: lineageState, Policy: policy, PolicyDigest: digest}
-	head, exists, err := proposalHead(proposal.ID)
+	code, err := proposalCodeStateFromRefs(proposal.ID)
 	if err != nil {
 		return nil, err
 	}
-	evaluation.CodeAvailable = exists
-	evaluation.CodeMatches = exists && head == proposal.Event.Head
+	return evaluateProposalEvidence(proposal, events, lineageState, title, policy, digest, code)
+}
+
+// evaluateProposalUnderPolicy evaluates the proposal's signed facts under a
+// caller-supplied policy instead of the policy at the proposal base. The
+// decision digest is a separate parameter because maintainers sign decisions
+// and merge facts against the base policy digest: a destination-policy check
+// passes the base digest together with the destination policy's maintainers,
+// trusted reviewers, trusted runners, pipelines and thresholds.
+func evaluateProposalUnderPolicy(proposal *StoredEvent, events []StoredEvent, policy PolicyDocument, decisionDigest string) (*ProposalEvaluation, error) {
+	lineageState, title, err := proposalEvaluationLineage(proposal, events)
+	if err != nil {
+		return nil, err
+	}
+	code, err := proposalCodeStateFromRefs(proposal.ID)
+	if err != nil {
+		return nil, err
+	}
+	return evaluateProposalEvidence(proposal, events, lineageState, title, policy, decisionDigest, code)
+}
+
+// evaluateProposalWithCode is evaluateProposalUnderPolicy with the candidate's
+// code ref supplied by the caller instead of read from refs/hn/proposals. A
+// server hook uses it when the proposal ref arrives in the same push and is
+// not yet a ref.
+func evaluateProposalWithCode(proposal *StoredEvent, events []StoredEvent, policy PolicyDocument, decisionDigest string, code proposalCodeState) (*ProposalEvaluation, error) {
+	lineageState, title, err := proposalEvaluationLineage(proposal, events)
+	if err != nil {
+		return nil, err
+	}
+	return evaluateProposalEvidence(proposal, events, lineageState, title, policy, decisionDigest, code)
+}
+
+// proposalEvaluationLineage performs the checks every evaluation runs before
+// it looks at policy or code, in the order evaluateProposal has always used.
+func proposalEvaluationLineage(proposal *StoredEvent, events []StoredEvent) (proposalLineageState, string, error) {
+	if !isProposalKind(proposal.Event.Kind) {
+		return proposalLineageState{}, "", fmt.Errorf("%s is not a proposal", shortID(proposal.ID))
+	}
+	lineage, err := buildLineageIndex(events)
+	if err != nil {
+		return proposalLineageState{}, "", err
+	}
+	lineageState, err := lineage.state(proposal.ID)
+	if err != nil {
+		return proposalLineageState{}, "", err
+	}
+	root, err := lineage.candidate(lineageState.RootID)
+	if err != nil {
+		return proposalLineageState{}, "", err
+	}
+	return lineageState, root.Event.Title, nil
+}
+
+func proposalCodeStateFromRefs(proposalID string) (proposalCodeState, error) {
+	head, exists, err := proposalHead(proposalID)
+	if err != nil {
+		return proposalCodeState{}, err
+	}
+	return proposalCodeState{Head: head, Exists: exists}, nil
+}
+
+func evaluateProposalEvidence(proposal *StoredEvent, events []StoredEvent, lineageState proposalLineageState, title string, policy PolicyDocument, decisionDigest string, code proposalCodeState) (*ProposalEvaluation, error) {
+	evaluation := &ProposalEvaluation{Proposal: proposal, DisplayTitle: title, Lineage: lineageState, Policy: policy, PolicyDigest: decisionDigest}
+	evaluation.CodeAvailable = code.Exists
+	evaluation.CodeMatches = code.Exists && code.Head == proposal.Event.Head
 
 	for _, review := range currentReviews(events, proposal.ID) {
 		if !actorListed(review.Event.Actor, policy.Proposals.TrustedReviewers) {
@@ -297,7 +368,7 @@ func evaluateProposal(proposal *StoredEvent, events []StoredEvent) (*ProposalEva
 		if evaluation.CodeMatches {
 			_, _, definition, err := loadPipeline(proposal.Event.Head, name)
 			if err != nil {
-				return nil, fmt.Errorf("required pipeline %q: %w", name, err)
+				return nil, pipelineDefinitionError{Pipeline: name, err: fmt.Errorf("required pipeline %q: %w", name, err)}
 			}
 			expectedDefinition = definition
 		}
@@ -332,7 +403,7 @@ func evaluateProposal(proposal *StoredEvent, events []StoredEvent) (*ProposalEva
 
 	currentDecisions := make(map[string]StoredEvent)
 	for _, stored := range events {
-		if stored.Event.Kind != "proposal.decision" || stored.Event.Subject != proposal.ID || stored.Event.Policy != digest || !actorListed(stored.Event.Actor, policy.Maintainers) {
+		if stored.Event.Kind != "proposal.decision" || stored.Event.Subject != proposal.ID || stored.Event.Policy != decisionDigest || !actorListed(stored.Event.Actor, policy.Maintainers) {
 			continue
 		}
 		previous, exists := currentDecisions[stored.Event.Actor]
@@ -350,7 +421,7 @@ func evaluateProposal(proposal *StoredEvent, events []StoredEvent) (*ProposalEva
 	sortStoredEvents(evaluation.AcceptDecisions)
 	sortStoredEvents(evaluation.RejectDecisions)
 	for _, stored := range events {
-		if stored.Event.Kind == "proposal.merged" && stored.Event.Subject == proposal.ID && stored.Event.Policy == digest {
+		if stored.Event.Kind == "proposal.merged" && stored.Event.Subject == proposal.ID && stored.Event.Policy == decisionDigest {
 			evaluation.MergeEvents = append(evaluation.MergeEvents, stored)
 		}
 	}
