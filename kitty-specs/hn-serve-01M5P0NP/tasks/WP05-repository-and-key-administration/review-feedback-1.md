@@ -1,13 +1,3 @@
----
-affected_files: []
-cycle_number: 1
-mission_slug: hn-serve-01M5P0NP
-reproduction_command:
-reviewed_at: '2026-10-25T07:45:34Z'
-reviewer_agent: user
-wp_id: WP05
----
-
 # WP05 review: changes requested
 
 ## Blocking: unsafe SSH state does not stop administration
