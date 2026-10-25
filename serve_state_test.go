@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
@@ -125,12 +126,39 @@ func removeServeTest(t *testing.T, path string) {
 	}
 }
 
+// serveTestConfig is the contract's default config.json for name.
+func serveTestConfig(name string) string {
+	return strings.Replace(serveTestContractConfig, `"name": "rust-pingpong"`, `"name": "`+name+`"`, 1)
+}
+
 func addServeTestRepo(t *testing.T, layout serveLayout, name string) {
 	t.Helper()
 	mkdirServeTest(t, layout.RepoGitDir(name), 0o700)
 	mkdirServeTest(t, layout.RepoStateDir(name), 0o700)
-	if err := saveServeRepoConfig(layout, newServeRepoConfig(name, nil)); err != nil {
-		t.Fatal(err)
+	writeServeTestFile(t, layout.RepoConfig(name), serveTestConfig(name), 0o600)
+}
+
+func writeServeTestRegistry(t *testing.T, layout serveLayout, registry serveRegistry) {
+	t.Helper()
+	writeServeTestFile(t, layout.Registry, marshalServeTest(t, registry), 0o600)
+}
+
+// runServeTest runs hn in-process and returns its standard output.
+func runServeTest(t *testing.T, args ...string) (string, error) {
+	t.Helper()
+	var err error
+	output := captureStdout(t, func() { err = run(args) })
+	return output, err
+}
+
+func requireServeTestOutput(t *testing.T, want string, args ...string) {
+	t.Helper()
+	output, err := runServeTest(t, args...)
+	if err != nil {
+		t.Fatalf("hn %s: %v", strings.Join(args, " "), err)
+	}
+	if output != want {
+		t.Fatalf("hn %s output:\n%s\nwant:\n%s", strings.Join(args, " "), output, want)
 	}
 }
 
@@ -166,29 +194,12 @@ func requireServeErrorContains(t *testing.T, err error, fragment string) {
 	}
 }
 
-func registerServeProbeRoute(t *testing.T, name string, mode serveValidationMode) *[]serveLayout {
-	t.Helper()
-	calls := &[]serveLayout{}
-	previous := lookupServeRoute
-	lookupServeRoute = func(subcommand string) (serveRoute, bool) {
-		if subcommand == name {
-			return serveRoute{mode: mode, run: func(layout serveLayout, args []string) error {
-				*calls = append(*calls, layout)
-				return nil
-			}}, true
-		}
-		return previous(subcommand)
-	}
-	t.Cleanup(func() { lookupServeRoute = previous })
-	return calls
-}
-
 func serveTestFingerprint(seed string) string {
 	sum := sha256.Sum256([]byte(seed))
 	return "SHA256:" + base64.RawStdEncoding.EncodeToString(sum[:])
 }
 
-func serveTestActor(seed string) string {
+func serveStateTestActor(seed string) string {
 	sum := sha256.Sum256([]byte("actor:" + seed))
 	return hex.EncodeToString(sum[:])
 }
@@ -197,7 +208,7 @@ func serveTestBinding(seed string) serveKeyBinding {
 	return serveKeyBinding{
 		Fingerprint: serveTestFingerprint(seed),
 		PublicKey:   "ssh-ed25519 " + base64.StdEncoding.EncodeToString([]byte("key:"+seed)),
-		Actor:       serveTestActor(seed),
+		Actor:       serveStateTestActor(seed),
 		Added:       "2026-10-24T20:00:00Z",
 	}
 }
@@ -281,39 +292,40 @@ func TestServeStateDispatcherRejectsUnknownSubcommandWithoutState(t *testing.T) 
 func TestServeStateRootRefusalPrecedesEveryStateAccess(t *testing.T) {
 	home := serveTestHome(t)
 	writeServeTestFile(t, filepath.Join(home, "sentinel"), "unchanged\n", 0o600)
-	adminCalls := registerServeProbeRoute(t, "probe-admin", serveAdministrationValidation)
-	sessionCalls := registerServeProbeRoute(t, "probe-session", serveSessionValidation)
 	t.Setenv("HN_INTERNAL_TESTING", "1")
 	t.Setenv("HN_TEST_SERVE_EUID", "0")
 	before := snapshotLegacyPrivateTree(t, home)
 
 	invocations := [][]string{
 		{"serve"},
+		{"serve", "repo"},
 		{"serve", "repo", "list"},
-		{"serve", "key", "add", "--actor", serveTestActor("a"), "-"},
+		{"serve", "repo", "show", "demo"},
+		{"serve", "repo", "lock-exec", "demo", "--", "true"},
+		{"serve", "key"},
+		{"serve", "key", "list"},
+		{"serve", "key", "add", "--actor", serveStateTestActor("a"), "-"},
 		{"serve", "git", "--key", serveTestFingerprint("a")},
 		{"serve", "hook", "pre-receive"},
 		{"serve", "bogus"},
-		{"serve", "probe-admin"},
-		{"serve", "probe-session"},
 	}
 	for _, args := range invocations {
-		err := run(args)
+		output, err := runServeTest(t, args...)
 		if err == nil || err.Error() != "hn serve refuses to run as root; create an unprivileged user for the server" {
 			t.Fatalf("run(%q) = %v, want the root refusal", args, err)
 		}
+		if output != "" {
+			t.Fatalf("run(%q) printed %q before refusing", args, output)
+		}
 	}
 	t.Setenv("HOME", "")
-	if err := run([]string{"serve", "probe-admin"}); err == nil || !strings.Contains(err.Error(), "refuses to run as root") {
+	if err := run([]string{"serve", "repo", "list"}); err == nil || !strings.Contains(err.Error(), "refuses to run as root") {
 		t.Fatalf("root refusal must come before HOME is resolved, got %v", err)
 	}
 	t.Setenv("HOME", home)
 
 	if after := snapshotLegacyPrivateTree(t, home); !reflect.DeepEqual(before, after) {
 		t.Fatalf("root refusal changed HOME:\nbefore %v\nafter  %v", before, after)
-	}
-	if len(*adminCalls) != 0 || len(*sessionCalls) != 0 {
-		t.Fatalf("root refusal dispatched a route: admin %d, session %d", len(*adminCalls), len(*sessionCalls))
 	}
 }
 
@@ -353,26 +365,19 @@ func TestServeStateUsageListsServeCommands(t *testing.T) {
 	}
 }
 
-func TestServeStateDispatcherValidatesBeforeRouting(t *testing.T) {
+// The administration routes are the live hn serve commands in this work
+// package; each one prepares and validates the layout before it runs.
+func TestServeStateAdministrationCommandsPrepareAndValidate(t *testing.T) {
 	home := serveTestHome(t)
-	adminCalls := registerServeProbeRoute(t, "probe-admin", serveAdministrationValidation)
-	sessionCalls := registerServeProbeRoute(t, "probe-session", serveSessionValidation)
 	root := filepath.Join(home, ".hn-serve")
 
-	before := snapshotLegacyPrivateTree(t, home)
-	requireServeDefect(t, run([]string{"serve", "probe-session"}), root, "does not exist")
-	if after := snapshotLegacyPrivateTree(t, home); !reflect.DeepEqual(before, after) {
-		t.Fatalf("session validation wrote to HOME:\nbefore %v\nafter  %v", before, after)
-	}
-	if len(*sessionCalls) != 0 {
-		t.Fatal("session route ran on a missing layout")
-	}
-
-	if err := run([]string{"serve", "probe-admin", "extra"}); err != nil {
-		t.Fatalf("administration route on a fresh HOME: %v", err)
-	}
-	if len(*adminCalls) != 1 || (*adminCalls)[0].Root != root {
-		t.Fatalf("administration route calls = %+v, want one call with root %s", *adminCalls, root)
+	requireServeTestOutput(t, "", "serve", "repo", "list")
+	for _, directory := range []string{"", "hooks", "repositories", "state", "state/tmp", "state/repos"} {
+		path := filepath.Join(root, directory)
+		info, err := os.Lstat(path)
+		if err != nil || !info.IsDir() || info.Mode().Perm() != 0o700 {
+			t.Fatalf("hn serve repo list did not create %s as a 0700 directory: %v (%v)", path, info, err)
+		}
 	}
 	hnPath := serveTestExecutable(t)
 	for _, name := range []string{"pre-receive", "post-receive"} {
@@ -384,19 +389,66 @@ func TestServeStateDispatcherValidatesBeforeRouting(t *testing.T) {
 			t.Fatalf("hook %s = %q", name, contents)
 		}
 	}
+	requireServeTestOutput(t, "", "serve", "key", "list")
 
-	if err := run([]string{"serve", "probe-session"}); err != nil {
-		t.Fatalf("session route on an ensured layout: %v", err)
-	}
-	if len(*sessionCalls) != 1 {
-		t.Fatalf("session route calls = %d, want 1", len(*sessionCalls))
+	// A stale hook is repaired by any administration command.
+	writeServeTestFile(t, filepath.Join(root, "hooks", "pre-receive"), "#!/bin/sh\nexit 0\n", 0o700)
+	requireServeTestOutput(t, "", "serve", "key", "list")
+	if contents, err := os.ReadFile(filepath.Join(root, "hooks", "pre-receive")); err != nil || string(contents) != string(serveHookScript("pre-receive", hnPath)) {
+		t.Fatalf("administration command did not regenerate the hook: %q (%v)", contents, err)
 	}
 
-	writeServeTestFile(t, filepath.Join(root, "state", "stray"), "x", 0o600)
-	requireServeDefect(t, run([]string{"serve", "probe-session"}), filepath.Join(root, "state", "stray"), "unexpected entry")
-	requireServeDefect(t, run([]string{"serve", "probe-admin"}), filepath.Join(root, "state", "stray"), "unexpected entry")
-	if len(*sessionCalls) != 1 || len(*adminCalls) != 1 {
-		t.Fatal("a route ran on a defective layout")
+	stray := filepath.Join(root, "state", "stray")
+	writeServeTestFile(t, stray, "x", 0o600)
+	for _, args := range [][]string{
+		{"serve", "repo", "list"},
+		{"serve", "repo", "show", "demo"},
+		{"serve", "repo", "lock-exec", "demo", "--", "true"},
+		{"serve", "repo", "bogus"},
+		{"serve", "key", "list"},
+	} {
+		output, err := runServeTest(t, args...)
+		requireServeDefect(t, err, stray, "unexpected entry")
+		if output != "" {
+			t.Fatalf("hn %s printed %q on a defective layout", strings.Join(args, " "), output)
+		}
+	}
+	removeServeTest(t, stray)
+
+	for _, tc := range []struct {
+		args []string
+		want string
+	}{
+		{[]string{"serve", "repo"}, "usage: hn serve repo list|show|lock-exec ..."},
+		{[]string{"serve", "repo", "bogus"}, `unknown hn serve repo subcommand "bogus"; run 'hn help'`},
+		{[]string{"serve", "repo", "list", "extra"}, "usage: hn serve repo list"},
+		{[]string{"serve", "repo", "show"}, "usage: hn serve repo show NAME"},
+		{[]string{"serve", "repo", "show", "../x"}, `invalid hosted repository name "../x"`},
+		{[]string{"serve", "repo", "show", "absent"}, "repository absent is not hosted; run 'hn serve repo list'"},
+		{[]string{"serve", "repo", "lock-exec", "absent", "true"}, "usage: hn serve repo lock-exec NAME -- COMMAND [ARG]..."},
+		{[]string{"serve", "repo", "lock-exec", "absent", "--"}, "usage: hn serve repo lock-exec NAME -- COMMAND [ARG]..."},
+		{[]string{"serve", "repo", "lock-exec", "absent", "--", "true"}, "repository absent is not hosted; run 'hn serve repo list'"},
+		{[]string{"serve", "key"}, "usage: hn serve key list"},
+		{[]string{"serve", "key", "list", "extra"}, "usage: hn serve key list"},
+		{[]string{"serve", "key", "bogus"}, `unknown hn serve key subcommand "bogus"; run 'hn help'`},
+	} {
+		_, err := runServeTest(t, tc.args...)
+		if err == nil || err.Error() != tc.want {
+			t.Fatalf("hn %s = %v, want %q", strings.Join(tc.args, " "), err, tc.want)
+		}
+	}
+}
+
+func TestServeStateSessionValidationRefusesMissingLayoutWithoutWriting(t *testing.T) {
+	home := serveTestHome(t)
+	layout, err := resolveServeLayout()
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := snapshotLegacyPrivateTree(t, home)
+	requireServeDefect(t, prepareServeLayout(layout, serveSessionValidation), layout.Root, "does not exist")
+	if after := snapshotLegacyPrivateTree(t, home); !reflect.DeepEqual(before, after) {
+		t.Fatalf("session validation wrote to HOME:\nbefore %v\nafter  %v", before, after)
 	}
 }
 
@@ -479,16 +531,11 @@ func TestServeStatePopulatedLayoutValidates(t *testing.T) {
 	addServeTestRepo(t, layout, "alpha")
 	addServeTestRepo(t, layout, "beta.v2")
 	addServeTestLFS(t, layout, "alpha")
-	if err := saveServeRegistry(layout, serveTestRegistry("a", "b")); err != nil {
-		t.Fatal(err)
-	}
-	owners := serveBranchOwners{Version: 1, Branches: []serveBranchOwner{{Ref: "refs/heads/feature/a", Owner: serveTestActor("a"), Created: "2026-10-24T20:05:00Z"}}}
-	if err := saveServeBranchOwners(layout, "alpha", owners); err != nil {
-		t.Fatal(err)
-	}
-	if err := appendServePushLog(layout, "alpha", servePushLogEntry{Time: "2026-10-24T20:06:00Z", Actor: serveTestActor("a"), Key: serveTestFingerprint("a"), Verdict: "accepted"}); err != nil {
-		t.Fatal(err)
-	}
+	writeServeTestRegistry(t, layout, serveTestRegistry("a", "b"))
+	owners := serveBranchOwners{Version: 1, Branches: []serveBranchOwner{{Ref: "refs/heads/feature/a", Owner: serveStateTestActor("a"), Created: "2026-10-24T20:05:00Z"}}}
+	writeServeTestFile(t, layout.RepoBranches("alpha"), marshalServeTest(t, owners), 0o600)
+	writeServeTestFile(t, layout.RepoBranches("beta.v2"), "{\n  \"version\": 1,\n  \"branches\": []\n}\n", 0o600)
+	writeServeTestFile(t, layout.RepoPushLog("alpha"), `{"time":"2026-10-24T20:06:00Z","verdict":"accepted"}`+"\n", 0o600)
 	for _, lock := range []string{layout.RepoLock("alpha"), layout.RepoLFSLock("alpha")} {
 		release, err := acquireServeLock(lock, 0)
 		if err != nil {
@@ -596,10 +643,23 @@ func TestServeStateValidationRefusesEachLayoutDefect(t *testing.T) {
 		}, false},
 		{"state without repository", func(t *testing.T, l serveLayout) (string, string) {
 			mkdirServeTest(t, l.RepoStateDir("demo"), 0o700)
-			if err := saveServeRepoConfig(l, newServeRepoConfig("demo", nil)); err != nil {
-				t.Fatal(err)
-			}
+			writeServeTestFile(t, l.RepoConfig("demo"), serveTestConfig("demo"), 0o600)
 			return l.RepoStateDir("demo"), "no matching repository"
+		}, false},
+		{"group-readable hosted repository directory", func(t *testing.T, l serveLayout) (string, string) {
+			addServeTestRepo(t, l, "demo")
+			chmodServeTest(t, l.RepoGitDir("demo"), 0o755)
+			return l.RepoGitDir("demo"), "directory mode 0755, want 0700"
+		}, false},
+		{"world-writable hosted repository directory", func(t *testing.T, l serveLayout) (string, string) {
+			addServeTestRepo(t, l, "demo")
+			chmodServeTest(t, l.RepoGitDir("demo"), 0o777)
+			return l.RepoGitDir("demo"), "directory mode 0777, want 0700"
+		}, false},
+		{"group-only hosted repository directory", func(t *testing.T, l serveLayout) (string, string) {
+			addServeTestRepo(t, l, "demo")
+			chmodServeTest(t, l.RepoGitDir("demo"), 0o750)
+			return l.RepoGitDir("demo"), "directory mode 0750, want 0700"
 		}, false},
 		{"repository without state", func(t *testing.T, l serveLayout) (string, string) {
 			mkdirServeTest(t, l.RepoGitDir("demo"), 0o700)
@@ -657,9 +717,7 @@ func TestServeStateValidationRefusesEachLayoutDefect(t *testing.T) {
 			return l.RepoConfig("demo"), "symbolic link"
 		}, false},
 		{"registry mode", func(t *testing.T, l serveLayout) (string, string) {
-			if err := saveServeRegistry(l, serveTestRegistry("a")); err != nil {
-				t.Fatal(err)
-			}
+			writeServeTestRegistry(t, l, serveTestRegistry("a"))
 			chmodServeTest(t, l.Registry, 0o640)
 			return l.Registry, "mode 0640"
 		}, false},
@@ -737,11 +795,25 @@ func TestServeStateValidationRefusesEachLayoutDefect(t *testing.T) {
 			return path, "unexpected entry"
 		}, false},
 	}
+	// ensureServeLayout recreates a missing fixed directory, so the
+	// administration command repairs this defect before validating.
+	ensureRepairs := map[string]bool{"missing tmp directory": true}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			layout := newServeTestLayout(t)
 			path, reason := tc.plant(t, layout)
+			before := snapshotLegacyPrivateTree(t, layout.Home)
 			requireServeDefect(t, validateServeLayout(layout, serveSessionValidation), path, reason)
+			if after := snapshotLegacyPrivateTree(t, layout.Home); !reflect.DeepEqual(before, after) {
+				t.Fatalf("session validation changed the fixture:\nbefore %v\nafter  %v", before, after)
+			}
+			if !tc.repaired && !ensureRepairs[tc.name] {
+				output, err := runServeTest(t, "serve", "repo", "list")
+				requireServeDefect(t, err, path, reason)
+				if output != "" {
+					t.Fatalf("hn serve repo list printed %q on a defective layout", output)
+				}
+			}
 			err := validateServeLayout(layout, serveAdministrationValidation)
 			if tc.repaired {
 				if err != nil {
@@ -777,7 +849,7 @@ func TestServeStateSessionValidationNeverWrites(t *testing.T) {
 	}
 }
 
-func TestServeStateSessionRefusesHostileTransientEntries(t *testing.T) {
+func TestServeStateCommandsRefuseHostileTransientEntries(t *testing.T) {
 	subtrees := []struct {
 		name string
 		dir  func(serveLayout) string
@@ -830,11 +902,26 @@ func TestServeStateSessionRefusesHostileTransientEntries(t *testing.T) {
 				layout := newServeTestLayout(t)
 				addServeTestRepo(t, layout, "demo")
 				addServeTestLFS(t, layout, "demo")
-				calls := registerServeProbeRoute(t, "probe-session", serveSessionValidation)
 				path, reason := plant.plant(t, subtree.dir(layout))
-				requireServeDefect(t, run([]string{"serve", "probe-session"}), path, reason)
-				if len(*calls) != 0 {
-					t.Fatal("session route ran with a hostile transient entry")
+				before := snapshotLegacyPrivateTree(t, layout.Home)
+				requireServeDefect(t, validateServeLayout(layout, serveSessionValidation), path, reason)
+				if after := snapshotLegacyPrivateTree(t, layout.Home); !reflect.DeepEqual(before, after) {
+					t.Fatalf("session validation changed the fixture:\nbefore %v\nafter  %v", before, after)
+				}
+				for _, args := range [][]string{
+					{"serve", "repo", "list"},
+					{"serve", "repo", "show", "demo"},
+					{"serve", "repo", "lock-exec", "demo", "--", "true"},
+					{"serve", "key", "list"},
+				} {
+					output, err := runServeTest(t, args...)
+					requireServeDefect(t, err, path, reason)
+					if output != "" {
+						t.Fatalf("hn %s printed %q with a hostile transient entry", strings.Join(args, " "), output)
+					}
+				}
+				if _, err := os.Lstat(layout.RepoLock("demo")); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("lock-exec took the lock on a defective layout: %v", err)
 				}
 			})
 		}
@@ -857,55 +944,48 @@ func TestServeStateTransientWalkIsBounded(t *testing.T) {
 
 // T003: key registry.
 
-func TestServeStateRegistryRoundTripIsByteStable(t *testing.T) {
-	layout := newServeTestLayout(t)
-	registry := serveTestRegistry("alice", "bob")
-	if err := saveServeRegistry(layout, registry); err != nil {
-		t.Fatal(err)
-	}
-	first, err := os.ReadFile(layout.Registry)
-	if err != nil {
-		t.Fatal(err)
-	}
-	loaded, err := loadServeRegistry(layout)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !reflect.DeepEqual(loaded, registry) {
-		t.Fatalf("loaded registry = %+v, want %+v", loaded, registry)
-	}
-	if err := saveServeRegistry(layout, loaded); err != nil {
-		t.Fatal(err)
-	}
-	second, err := os.ReadFile(layout.Registry)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(first) != string(second) || !strings.HasSuffix(string(first), "}\n") {
-		t.Fatalf("registry bytes changed across a round trip:\n%s\n%s", first, second)
-	}
-	info, err := os.Lstat(layout.Registry)
-	if err != nil || info.Mode().Perm() != 0o600 {
-		t.Fatalf("registry mode = %v (%v), want 0600", info.Mode(), err)
-	}
-}
-
-func TestServeStateRegistryContractExampleRoundTrips(t *testing.T) {
+func TestServeStateRegistryContractExampleDecodes(t *testing.T) {
 	layout := newServeTestLayout(t)
 	writeServeTestFile(t, layout.Registry, serveTestContractRegistry, 0o600)
 	registry, err := loadServeRegistry(layout)
 	if err != nil {
 		t.Fatalf("contract example: %v", err)
 	}
-	if err := saveServeRegistry(layout, registry); err != nil {
+	want := serveRegistry{Version: 1, Keys: []serveKeyBinding{{
+		Fingerprint: "SHA256:Jd8bC8QWw0m0Y4l6m6yZ1gq5q3o9s0Kc2b2f4QwA9eU",
+		PublicKey:   "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExampleOnlyNotARealKeyxxxxxxxxxxxxxxxxxxxxx",
+		Actor:       "4f1c9a6d0d2b7e3a8c5f6e1b9d0a7c3e2f4b6d8a0c1e3f5a7b9d1c3e5f7a9b1c",
+		Added:       "2026-10-24T20:00:00Z",
+	}}}
+	if !reflect.DeepEqual(registry, want) {
+		t.Fatalf("contract registry = %+v, want %+v", registry, want)
+	}
+	if err := validateServeLayout(layout, serveSessionValidation); err != nil {
 		t.Fatal(err)
 	}
-	contents, err := os.ReadFile(layout.Registry)
-	if err != nil {
-		t.Fatal(err)
+}
+
+func TestServeStateKeyListPrintsBindings(t *testing.T) {
+	layout := newServeTestLayout(t)
+	registry := serveTestRegistry("alice", "bob", "carol")
+	registry.Keys[1].PublicKey = "ecdsa-sha2-nistp256 " + base64.StdEncoding.EncodeToString([]byte("key:p256"))
+	writeServeTestRegistry(t, layout, registry)
+	want := ""
+	for index, binding := range registry.Keys {
+		keyType := "ssh-ed25519"
+		if index == 1 {
+			keyType = "ecdsa-sha2-nistp256"
+		}
+		want += binding.Fingerprint + " " + binding.Actor + " " + keyType + "\n"
 	}
-	if string(contents) != serveTestContractRegistry {
-		t.Fatalf("registry encoding differs from the contract:\n%s", contents)
+	requireServeTestOutput(t, want, "serve", "key", "list")
+
+	// The registry is read only after validation; a malformed one refuses.
+	writeServeTestFile(t, layout.Registry, `{"version":1,"keys":[],"extra":1}`, 0o600)
+	output, err := runServeTest(t, "serve", "key", "list")
+	requireServeDefect(t, err, layout.Registry, "unknown field")
+	if output != "" {
+		t.Fatalf("key list printed %q for a malformed registry", output)
 	}
 }
 
@@ -975,15 +1055,6 @@ func TestServeStateRegistryRefusesInvalidContent(t *testing.T) {
 		_, err := loadServeRegistry(layout)
 		requireServeErrorContains(t, err, "too large")
 	})
-	t.Run("save refuses an invalid registry", func(t *testing.T) {
-		layout := newServeTestLayout(t)
-		invalid := serveTestRegistry("alice", "bob")
-		invalid.Keys[0], invalid.Keys[1] = invalid.Keys[1], invalid.Keys[0]
-		requireServeErrorContains(t, saveServeRegistry(layout, invalid), "not sorted")
-		if _, err := os.Lstat(layout.Registry); !errors.Is(err, os.ErrNotExist) {
-			t.Fatalf("an invalid registry was written: %v", err)
-		}
-	})
 }
 
 func TestServeStateFingerprintShape(t *testing.T) {
@@ -1011,81 +1082,83 @@ func TestServeStateFingerprintShape(t *testing.T) {
 	}
 }
 
-func TestServeStateLookupKey(t *testing.T) {
-	registry := serveTestRegistry("alice", "bob", "carol")
-	for _, binding := range registry.Keys {
-		got, ok := lookupServeKey(registry, binding.Fingerprint)
-		if !ok || got != binding {
-			t.Fatalf("lookupServeKey(%s) = %+v, %v", binding.Fingerprint, got, ok)
-		}
-	}
-	if _, ok := lookupServeKey(registry, serveTestFingerprint("mallory")); ok {
-		t.Fatal("lookupServeKey found an unbound fingerprint")
-	}
-	if _, ok := lookupServeKey(serveRegistry{Version: 1}, serveTestFingerprint("alice")); ok {
-		t.Fatal("lookupServeKey found a key in an empty registry")
-	}
-}
-
 // T004: repository configuration and branch owners.
 
-func TestServeStateRepoConfigDefaultsMatchContract(t *testing.T) {
+func TestServeStateRepoConfigContractExampleDecodes(t *testing.T) {
 	layout := newServeTestLayout(t)
-	addServeTestRepo(t, layout, "rust-pingpong")
-	contents, err := os.ReadFile(layout.RepoConfig("rust-pingpong"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(contents) != serveTestContractConfig {
-		t.Fatalf("default config differs from the contract:\n%s", contents)
-	}
+	mkdirServeTest(t, layout.RepoGitDir("rust-pingpong"), 0o700)
+	mkdirServeTest(t, layout.RepoStateDir("rust-pingpong"), 0o700)
+	writeServeTestFile(t, layout.RepoConfig("rust-pingpong"), serveTestContractConfig, 0o600)
 	config, err := loadServeRepoConfig(layout, "rust-pingpong")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(config, newServeRepoConfig("rust-pingpong", nil)) {
-		t.Fatalf("loaded config = %+v", config)
+	want := serveRepoConfig{
+		Version:       1,
+		Name:          "rust-pingpong",
+		Protected:     []string{"refs/heads/main"},
+		LFSQuotaBytes: 1073741824,
+		Budgets:       defaultReplicationBudgets(),
 	}
-	info, err := os.Lstat(layout.RepoConfig("rust-pingpong"))
-	if err != nil || info.Mode().Perm() != 0o600 {
-		t.Fatalf("config mode = %v (%v), want 0600", info.Mode(), err)
+	if !reflect.DeepEqual(config, want) {
+		t.Fatalf("contract config = %+v, want %+v", config, want)
 	}
+	requireServeTestOutput(t, "name: rust-pingpong\n"+
+		"path: "+layout.RepoGitDir("rust-pingpong")+"\n"+
+		"protected: refs/heads/main\n"+
+		"lfs-quota: 1073741824\n"+
+		"lfs-stored: 0\n"+
+		"max-events: 10000\n"+
+		"max-objects: 100000\n"+
+		"max-object-bytes: 67108864\n"+
+		"max-attachment-bytes: 16777216\n"+
+		"max-total-bytes: 1073741824\n",
+		"serve", "repo", "show", "rust-pingpong")
 }
 
 func TestServeStateRepoConfigKeepsDefaultBranchFirst(t *testing.T) {
-	config := newServeRepoConfig("demo", []string{"refs/heads/trunk", "refs/heads/release", "refs/heads/alpha", "refs/heads/release", "refs/heads/trunk"})
+	layout := newServeTestLayout(t)
+	addServeTestRepo(t, layout, "demo")
+	ordered := strings.Replace(serveTestConfig("demo"), `"protected": ["refs/heads/main"]`,
+		`"protected": ["refs/heads/trunk", "refs/heads/alpha", "refs/heads/release"]`, 1)
+	writeServeTestFile(t, layout.RepoConfig("demo"), ordered, 0o600)
+	config, err := loadServeRepoConfig(layout, "demo")
+	if err != nil {
+		t.Fatalf("default-first protected list: %v", err)
+	}
 	want := []string{"refs/heads/trunk", "refs/heads/alpha", "refs/heads/release"}
 	if !reflect.DeepEqual(config.Protected, want) {
 		t.Fatalf("protected = %v, want %v", config.Protected, want)
 	}
-	if config.LFSQuotaBytes != 1073741824 || config.Budgets != defaultReplicationBudgets() || config.Version != 1 {
-		t.Fatalf("defaults = %+v", config)
+	output, err := runServeTest(t, "serve", "repo", "show", "demo")
+	if err != nil {
+		t.Fatal(err)
 	}
+	if !strings.Contains(output, "protected: refs/heads/trunk\nprotected: refs/heads/alpha\nprotected: refs/heads/release\n") {
+		t.Fatalf("repo show does not keep the default branch first:\n%s", output)
+	}
+}
+
+func TestServeStateRepoListAndShow(t *testing.T) {
 	layout := newServeTestLayout(t)
-	mkdirServeTest(t, layout.RepoStateDir("demo"), 0o700)
-	if err := saveServeRepoConfig(layout, config); err != nil {
-		t.Fatal(err)
+	for _, name := range []string{"beta", "Alpha", "alpha-2", "0day"} {
+		addServeTestRepo(t, layout, name)
 	}
-	first, err := os.ReadFile(layout.RepoConfig("demo"))
+	requireServeTestOutput(t, "0day\nAlpha\nalpha-2\nbeta\n", "serve", "repo", "list")
+
+	addServeTestLFS(t, layout, "beta")
+	objects := filepath.Join(layout.RepoLFSObjects("beta"), "ab", "cd")
+	mkdirServeTest(t, filepath.Dir(objects), 0o700)
+	mkdirServeTest(t, objects, 0o700)
+	writeServeTestFile(t, filepath.Join(objects, "abcd"+strings.Repeat("1", 60)), "12345", 0o600)
+	writeServeTestFile(t, filepath.Join(objects, "abcd"+strings.Repeat("2", 60)), "1234567", 0o600)
+	writeServeTestFile(t, filepath.Join(layout.RepoLFSIncoming("beta"), ".staged"), "not counted", 0o600)
+	output, err := runServeTest(t, "serve", "repo", "show", "beta")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(first), `"protected": ["refs/heads/trunk", "refs/heads/alpha", "refs/heads/release"],`) {
-		t.Fatalf("protected list encoding:\n%s", first)
-	}
-	loaded, err := loadServeRepoConfig(layout, "demo")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := saveServeRepoConfig(layout, loaded); err != nil {
-		t.Fatal(err)
-	}
-	second, err := os.ReadFile(layout.RepoConfig("demo"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(first) != string(second) {
-		t.Fatalf("config bytes changed across a round trip:\n%s\n%s", first, second)
+	if !strings.Contains(output, "\nlfs-quota: 1073741824\nlfs-stored: 12\n") {
+		t.Fatalf("repo show lfs-stored:\n%s", output)
 	}
 }
 
@@ -1120,7 +1193,13 @@ func TestServeStateRepositoryNameGrammar(t *testing.T) {
 }
 
 func TestServeStateRepoConfigRefusesInvalidContent(t *testing.T) {
-	valid := newServeRepoConfig("demo", []string{"refs/heads/main", "refs/heads/release"})
+	valid := serveRepoConfig{
+		Version:       1,
+		Name:          "demo",
+		Protected:     []string{"refs/heads/main", "refs/heads/release"},
+		LFSQuotaBytes: 1073741824,
+		Budgets:       defaultReplicationBudgets(),
+	}
 	mutate := func(change func(*serveRepoConfig)) func(t *testing.T) string {
 		return func(t *testing.T) string {
 			config := valid
@@ -1188,67 +1267,38 @@ func TestServeStateRepoConfigRefusesInvalidContent(t *testing.T) {
 			t.Fatalf("missing config error = %v, want os.ErrNotExist", err)
 		}
 	})
-	t.Run("save refuses an invalid config", func(t *testing.T) {
-		layout := newServeTestLayout(t)
-		mkdirServeTest(t, layout.RepoStateDir("demo"), 0o700)
-		config := newServeRepoConfig("demo", nil)
-		config.LFSQuotaBytes = 0
-		requireServeErrorContains(t, saveServeRepoConfig(layout, config), "lfsQuotaBytes")
-		if _, err := os.Lstat(layout.RepoConfig("demo")); !errors.Is(err, os.ErrNotExist) {
-			t.Fatalf("an invalid config was written: %v", err)
-		}
-	})
 }
 
-func TestServeStateBranchOwnersRoundTrip(t *testing.T) {
-	layout := newServeTestLayout(t)
-	addServeTestRepo(t, layout, "demo")
-	owners, err := loadServeBranchOwners(layout, "demo")
+func TestServeStateBranchOwnersDecode(t *testing.T) {
+	owners := serveBranchOwners{Version: 1, Branches: []serveBranchOwner{
+		{Ref: "refs/heads/feature/a", Owner: serveStateTestActor("alice"), Created: "2026-10-24T20:05:00Z"},
+		{Ref: "refs/heads/feature/b", Owner: serveStateTestActor("bob"), Created: "2026-10-24T20:06:00.5Z"},
+	}}
+	decoded, err := decodeServeBranchOwners([]byte(marshalServeTest(t, owners)))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if owners.Version != 1 || len(owners.Branches) != 0 {
-		t.Fatalf("missing branch owners = %+v, want an empty version 1 record", owners)
+	if !reflect.DeepEqual(decoded, owners) {
+		t.Fatalf("decoded owners = %+v, want %+v", decoded, owners)
 	}
-	owners.Branches = []serveBranchOwner{
-		{Ref: "refs/heads/feature/a", Owner: serveTestActor("alice"), Created: "2026-10-24T20:05:00Z"},
-		{Ref: "refs/heads/feature/b", Owner: serveTestActor("bob"), Created: "2026-10-24T20:06:00.5Z"},
-	}
-	if err := saveServeBranchOwners(layout, "demo", owners); err != nil {
-		t.Fatal(err)
-	}
-	loaded, err := loadServeBranchOwners(layout, "demo")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !reflect.DeepEqual(loaded, owners) {
-		t.Fatalf("loaded owners = %+v, want %+v", loaded, owners)
+	empty, err := decodeServeBranchOwners([]byte(`{"version":1,"branches":[]}`))
+	if err != nil || empty.Branches == nil || len(empty.Branches) != 0 {
+		t.Fatalf("empty branch owners = %+v (%v), want an empty list", empty, err)
 	}
 
-	// An emptied list is written as an empty record; the file is kept.
-	if err := saveServeBranchOwners(layout, "demo", serveBranchOwners{Version: 1}); err != nil {
-		t.Fatal(err)
-	}
-	contents, err := os.ReadFile(layout.RepoBranches("demo"))
-	if err != nil {
-		t.Fatalf("emptied branch owners file: %v", err)
-	}
-	if string(contents) != "{\n  \"version\": 1,\n  \"branches\": []\n}\n" {
-		t.Fatalf("empty branch owners encoding = %q", contents)
-	}
-	info, err := os.Lstat(layout.RepoBranches("demo"))
-	if err != nil || info.Mode().Perm() != 0o600 {
-		t.Fatalf("branch owners mode = %v (%v), want 0600", info.Mode(), err)
-	}
+	layout := newServeTestLayout(t)
+	addServeTestRepo(t, layout, "demo")
+	writeServeTestFile(t, layout.RepoBranches("demo"), marshalServeTest(t, owners), 0o600)
 	if err := validateServeLayout(layout, serveSessionValidation); err != nil {
 		t.Fatal(err)
 	}
+	requireServeTestOutput(t, "demo\n", "serve", "repo", "list")
 }
 
 func TestServeStateBranchOwnersRefuseInvalidContent(t *testing.T) {
 	valid := serveBranchOwners{Version: 1, Branches: []serveBranchOwner{
-		{Ref: "refs/heads/a", Owner: serveTestActor("alice"), Created: "2026-10-24T20:05:00Z"},
-		{Ref: "refs/heads/b", Owner: serveTestActor("bob"), Created: "2026-10-24T20:05:00Z"},
+		{Ref: "refs/heads/a", Owner: serveStateTestActor("alice"), Created: "2026-10-24T20:05:00Z"},
+		{Ref: "refs/heads/b", Owner: serveStateTestActor("bob"), Created: "2026-10-24T20:05:00Z"},
 	}}
 	mutate := func(change func(*serveBranchOwners)) func(t *testing.T) string {
 		return func(t *testing.T) string {
@@ -1277,9 +1327,11 @@ func TestServeStateBranchOwnersRefuseInvalidContent(t *testing.T) {
 			layout := newServeTestLayout(t)
 			addServeTestRepo(t, layout, "demo")
 			writeServeTestFile(t, layout.RepoBranches("demo"), tc.contents(t), 0o600)
-			_, err := loadServeBranchOwners(layout, "demo")
+			_, err := decodeServeBranchOwners([]byte(tc.contents(t)))
 			requireServeErrorContains(t, err, tc.fragment)
 			requireServeDefect(t, validateServeLayout(layout, serveSessionValidation), layout.RepoBranches("demo"), tc.fragment)
+			_, err = runServeTest(t, "serve", "repo", "list")
+			requireServeDefect(t, err, layout.RepoBranches("demo"), tc.fragment)
 		})
 	}
 }
@@ -1383,65 +1435,235 @@ func TestServeStateLockWait(t *testing.T) {
 	}
 }
 
-func TestServeStatePushLogAppendsOrderedLines(t *testing.T) {
+func TestServeStateLockExecRunsInRepository(t *testing.T) {
 	layout := newServeTestLayout(t)
 	addServeTestRepo(t, layout, "demo")
-	oldID := strings.Repeat("1", 40)
-	newID := strings.Repeat("2", 40)
-	first := servePushLogEntry{
-		Time:    "2026-10-24T20:06:00Z",
-		Actor:   serveTestActor("alice"),
-		Key:     serveTestFingerprint("alice"),
-		Verdict: "rejected",
-		Updates: []servePushLogUpdate{{Ref: "refs/heads/main", Old: oldID, New: newID}},
-		Codes:   []string{"protected-no-proposal"},
-	}
-	second := servePushLogEntry{Time: "2026-10-24T20:07:00Z", Actor: serveTestActor("bob"), Key: serveTestFingerprint("bob"), Verdict: "accepted"}
-	for _, entry := range []servePushLogEntry{first, second} {
-		if err := appendServePushLog(layout, "demo", entry); err != nil {
-			t.Fatal(err)
-		}
-	}
-	contents, err := os.ReadFile(layout.RepoPushLog("demo"))
+	t.Setenv("GIT_DIR", "/elsewhere")
+	gitDir := layout.RepoGitDir("demo")
+	physical, err := filepath.EvalSymlinks(gitDir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	lines := strings.Split(strings.TrimSuffix(string(contents), "\n"), "\n")
-	if len(lines) != 2 || !strings.HasSuffix(string(contents), "\n") {
-		t.Fatalf("push log = %q, want two newline-terminated lines", contents)
+	requireServeTestOutput(t, physical+"\n"+gitDir+"\n",
+		"serve", "repo", "lock-exec", "demo", "--", "sh", "-c", `pwd -P; printf '%s\n' "$GIT_DIR"`)
+	info, err := os.Lstat(layout.RepoLock("demo"))
+	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 {
+		t.Fatalf("lock-exec lock file = %v (%v), want a 0600 regular file", info, err)
 	}
-	wantFirst := `{"time":"2026-10-24T20:06:00Z","actor":"` + first.Actor + `","key":"` + first.Key +
-		`","verdict":"rejected","updates":[{"ref":"refs/heads/main","old":"` + oldID + `","new":"` + newID +
-		`"}],"codes":["protected-no-proposal"]}`
-	if lines[0] != wantFirst {
-		t.Fatalf("first line = %s\nwant         %s", lines[0], wantFirst)
+	release, err := acquireServeLock(layout.RepoLock("demo"), 0)
+	if err != nil {
+		t.Fatalf("lock-exec did not release the repository lock: %v", err)
 	}
-	if !strings.Contains(lines[1], `"verdict":"accepted","updates":[],"codes":[]`) {
-		t.Fatalf("second line = %s, want empty lists", lines[1])
+	if err := release(); err != nil {
+		t.Fatal(err)
 	}
-	var decoded servePushLogEntry
-	if err := json.Unmarshal([]byte(lines[1]), &decoded); err != nil || decoded.Actor != second.Actor {
-		t.Fatalf("second line decode = %+v (%v)", decoded, err)
+	if err := validateServeLayout(layout, serveSessionValidation); err != nil {
+		t.Fatalf("layout after lock-exec: %v", err)
 	}
-	info, err := os.Lstat(layout.RepoPushLog("demo"))
-	if err != nil || info.Mode().Perm() != 0o600 {
-		t.Fatalf("push log mode = %v (%v), want 0600", info.Mode(), err)
+
+	_, err = runServeTest(t, "serve", "repo", "lock-exec", "demo", "--", filepath.Join(layout.Home, "missing-command"))
+	requireServeErrorContains(t, err, "cannot run")
+	_, err = runServeTest(t, "serve", "repo", "lock-exec", "demo", "--", "sh", "-c", "kill -TERM $$")
+	requireServeErrorContains(t, err, "did not exit normally")
+}
+
+func TestServeStateLockExecRefusesWhileLocked(t *testing.T) {
+	layout := newServeTestLayout(t)
+	addServeTestRepo(t, layout, "demo")
+	release, err := acquireServeLock(layout.RepoLock("demo"), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	t.Setenv("HN_INTERNAL_TESTING", "1")
+	t.Setenv("HN_TEST_SERVE_LOCK_WAIT", "100ms")
+	marker := filepath.Join(layout.Home, "ran")
+	output, err := runServeTest(t, "serve", "repo", "lock-exec", "demo", "--", "touch", marker)
+	requireServeErrorContains(t, err, "repository-busy")
+	requireServeErrorContains(t, err, "demo")
+	if output != "" {
+		t.Fatalf("busy lock-exec printed %q", output)
+	}
+	if _, err := os.Lstat(marker); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("lock-exec ran its command without the lock: %v", err)
 	}
 }
 
-func TestServeStatePushLogRefusesUnsafeAppends(t *testing.T) {
-	layout := newServeTestLayout(t)
-	addServeTestRepo(t, layout, "demo")
-	entry := servePushLogEntry{Time: "2026-10-24T20:06:00Z", Actor: serveTestActor("alice"), Key: serveTestFingerprint("alice"), Verdict: "maybe"}
-	requireServeErrorContains(t, appendServePushLog(layout, "demo", entry), "verdict")
-	entry.Verdict = "accepted"
-	requireServeErrorContains(t, appendServePushLog(layout, "../demo", entry), "repository name")
-	target := filepath.Join(t.TempDir(), "elsewhere.log")
-	symlinkServeTest(t, target, layout.RepoPushLog("demo"))
-	requireServeErrorContains(t, appendServePushLog(layout, "demo", entry), "symbolic link")
-	if _, err := os.Lstat(target); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("push log append followed a symlink: %v", err)
+// Black-box checks through the built hn binary, including behavior that
+// in-process tests cannot observe: lock-exec's exit status passthrough and a
+// lock held by another process.
+func TestServeStateBinaryCommands(t *testing.T) {
+	serveTestHome(t)
+	binary := buildOperationalBinary(t)
+	if _, err := checkServeExecutablePath(binary); err != nil {
+		t.Skipf("temporary directory is not usable as an hn install path: %v", err)
 	}
+	newHome := func(t *testing.T) string {
+		home := filepath.Join(t.TempDir(), "home")
+		mkdirServeTest(t, home, 0o700)
+		return home
+	}
+	runHN := func(t *testing.T, home string, extra []string, args ...string) (string, int) {
+		t.Helper()
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+		command := exec.CommandContext(ctx, binary, args...)
+		command.Dir = home
+		command.Env = append([]string{"HOME=" + home, "PATH=" + os.Getenv("PATH"), "LANG=C"}, extra...)
+		output, err := command.CombinedOutput()
+		if ctx.Err() != nil {
+			t.Fatalf("hn %s timed out: %s", strings.Join(args, " "), output)
+		}
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			return string(output), exitErr.ExitCode()
+		}
+		if err != nil {
+			t.Fatalf("hn %s: %v", strings.Join(args, " "), err)
+		}
+		return string(output), 0
+	}
+	addRepo := func(t *testing.T, home string) serveLayout {
+		t.Helper()
+		if output, status := runHN(t, home, nil, "serve", "repo", "list"); status != 0 || output != "" {
+			t.Fatalf("hn serve repo list on a fresh home = %d %q", status, output)
+		}
+		layout := serveLayout{Home: home, Root: filepath.Join(home, ".hn-serve")}
+		layout.Repositories = filepath.Join(layout.Root, "repositories")
+		layout.Repos = filepath.Join(layout.Root, "state", "repos")
+		addServeTestRepo(t, layout, "demo")
+		return layout
+	}
+
+	t.Run("symlinked server root", func(t *testing.T) {
+		home := newHome(t)
+		target := filepath.Join(home, "missing-target")
+		symlinkServeTest(t, target, filepath.Join(home, ".hn-serve"))
+		want := "hn: hn serve state defect: " + filepath.Join(home, ".hn-serve") + ": is a symbolic link\n"
+		for _, args := range [][]string{{"serve", "repo", "list"}, {"serve", "key", "list"}} {
+			output, status := runHN(t, home, []string{"HN_INTERNAL_TESTING=0"}, args...)
+			if status != 1 || output != want {
+				t.Fatalf("hn %s = %d %q, want 1 %q", strings.Join(args, " "), status, output, want)
+			}
+		}
+		if _, err := os.Lstat(target); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("hn serve wrote through the symlinked root: %v", err)
+		}
+	})
+
+	t.Run("hosted repository directory mode", func(t *testing.T) {
+		home := newHome(t)
+		layout := addRepo(t, home)
+		chmodServeTest(t, layout.RepoGitDir("demo"), 0o755)
+		output, status := runHN(t, home, nil, "serve", "repo", "list")
+		want := "hn: hn serve state defect: " + layout.RepoGitDir("demo") + ": directory mode 0755, want 0700\n"
+		if status != 1 || output != want {
+			t.Fatalf("hn serve repo list = %d %q, want 1 %q", status, output, want)
+		}
+	})
+
+	t.Run("root refusal", func(t *testing.T) {
+		home := newHome(t)
+		before := snapshotLegacyPrivateTree(t, home)
+		for _, args := range [][]string{{"serve"}, {"serve", "repo", "list"}, {"serve", "key", "list"}, {"serve", "git", "--key", "x"}} {
+			output, status := runHN(t, home, []string{"HN_INTERNAL_TESTING=1", "HN_TEST_SERVE_EUID=0"}, args...)
+			if status != 1 || output != "hn: "+serveRootRefusal+"\n" {
+				t.Fatalf("hn %s as root = %d %q", strings.Join(args, " "), status, output)
+			}
+		}
+		if after := snapshotLegacyPrivateTree(t, home); !reflect.DeepEqual(before, after) {
+			t.Fatalf("root refusal changed HOME:\nbefore %v\nafter  %v", before, after)
+		}
+		output, status := runHN(t, home, []string{"HN_TEST_SERVE_EUID=0"}, "serve")
+		if status != 1 || output != "hn: usage: hn serve repo|key|git|hook ...\n" {
+			t.Fatalf("ungated EUID override = %d %q, want the usage error", status, output)
+		}
+	})
+
+	t.Run("generated hooks name the binary", func(t *testing.T) {
+		home := newHome(t)
+		addRepo(t, home)
+		contents, err := os.ReadFile(filepath.Join(home, ".hn-serve", "hooks", "pre-receive"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(contents) != "#!/bin/sh\nexec "+binary+" serve hook pre-receive\n" {
+			t.Fatalf("pre-receive = %q", contents)
+		}
+	})
+
+	t.Run("lock-exec passes the exit status through", func(t *testing.T) {
+		home := newHome(t)
+		layout := addRepo(t, home)
+		output, status := runHN(t, home, nil, "serve", "repo", "lock-exec", "demo", "--", "sh", "-c", "echo held; exit 7")
+		if status != 7 || output != "held\n" {
+			t.Fatalf("lock-exec exit = %d %q, want 7 %q", status, output, "held\n")
+		}
+		release, err := acquireServeLock(layout.RepoLock("demo"), 0)
+		if err != nil {
+			t.Fatalf("lock-exec left the lock held after exiting 7: %v", err)
+		}
+		_ = release()
+		if output, status := runHN(t, home, nil, "serve", "repo", "lock-exec", "demo", "--", "true"); status != 0 || output != "" {
+			t.Fatalf("lock-exec true = %d %q", status, output)
+		}
+	})
+
+	t.Run("lock-exec holds the lock against another process", func(t *testing.T) {
+		home := newHome(t)
+		layout := addRepo(t, home)
+		release := filepath.Join(home, "release")
+		holder := exec.Command(binary, "serve", "repo", "lock-exec", "demo", "--", "sh", "-c",
+			`while [ ! -e "$1" ]; do sleep 0.05; done`, "sh", release)
+		holder.Dir = home
+		holder.Env = []string{"HOME=" + home, "PATH=" + os.Getenv("PATH"), "LANG=C"}
+		if err := holder.Start(); err != nil {
+			t.Fatal(err)
+		}
+		done := make(chan error, 1)
+		go func() { done <- holder.Wait() }()
+		finished := false
+		defer func() {
+			if !finished {
+				writeServeTestFile(t, release, "", 0o600)
+				<-done
+			}
+		}()
+
+		// Wait until the holder has the lock: our own non-blocking attempt
+		// starts failing as busy.
+		deadline := time.Now().Add(20 * time.Second)
+		for {
+			ours, err := acquireServeLock(layout.RepoLock("demo"), 0)
+			if errors.Is(err, errServeLockBusy) {
+				break
+			}
+			if err == nil {
+				_ = ours()
+			} else if !errors.Is(err, os.ErrNotExist) {
+				t.Fatal(err)
+			}
+			if time.Now().After(deadline) {
+				t.Fatal("lock-exec never took the repository lock")
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+
+		marker := filepath.Join(home, "second-ran")
+		output, status := runHN(t, home, []string{"HN_INTERNAL_TESTING=1", "HN_TEST_SERVE_LOCK_WAIT=200ms"},
+			"serve", "repo", "lock-exec", "demo", "--", "touch", marker)
+		if status != 1 || !strings.HasPrefix(output, "hn: repository-busy: ") {
+			t.Fatalf("contended lock-exec = %d %q, want a repository-busy refusal", status, output)
+		}
+		if _, err := os.Lstat(marker); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("contended lock-exec ran its command: %v", err)
+		}
+		writeServeTestFile(t, release, "", 0o600)
+		finished = true
+		if err := <-done; err != nil {
+			t.Fatalf("holder lock-exec: %v", err)
+		}
+	})
 }
 
 // T006: hook scripts.
@@ -1500,7 +1722,7 @@ func TestServeStateEnsureHooksWritesExecutableScripts(t *testing.T) {
 
 func TestServeStateEnsureHooksRefusesUnsafeTargets(t *testing.T) {
 	layout := newServeTestLayout(t)
-	requireServeErrorContains(t, ensureServeHooks(layout, "/usr/local/bin/my hn"), "whitespace")
+	requireServeErrorContains(t, ensureServeHooks(layout, "/usr/local/bin/my hn"), "cannot use unquoted")
 	elsewhere := t.TempDir()
 	removeServeTest(t, layout.Hooks)
 	symlinkServeTest(t, elsewhere, layout.Hooks)
@@ -1510,17 +1732,31 @@ func TestServeStateEnsureHooksRefusesUnsafeTargets(t *testing.T) {
 	}
 }
 
+// serveTestUnsafeExecutableNames are file names a /bin/sh word would expand,
+// split, redirect, glob or otherwise not use literally.
+var serveTestUnsafeExecutableNames = []string{
+	`h"n`, "h'n", `h\n`, "h n", "h\tn", "h\nn", "h\u00a0n", "caf\u00e9",
+	"hn$HOME", "hn${IFS}x", "hn$(id)", "hn`id`", "hn;id", "hn|id", "hn&id", "hn&&id",
+	"hn<x", "hn>x", "hn*", "hn?", "hn[ab]", "hn]", "hn(x)", "hn{a,b}", "hn}", "hn~", "~hn",
+	"hn#x", "#hn", "hn!", "hn%", "hn=x", "hn^id", "hn\x00x", "hn\x7f",
+}
+
 func TestServeStateExecutablePathRules(t *testing.T) {
-	for _, path := range []string{
-		`/usr/local/bin/h"n`, "/usr/local/bin/h'n", `/usr/local/bin/h\n`, "/usr/local/bin/h n",
-		"/usr/local/bin/h\tn", "/usr/local/bin/h\nn", "/usr/local/bin/h\u00a0n", "relative/hn",
-	} {
-		if _, err := checkServeExecutablePath(path); err == nil {
-			t.Errorf("checkServeExecutablePath(%q) accepted an unsafe path", path)
+	for _, name := range serveTestUnsafeExecutableNames {
+		path := "/usr/local/bin/" + name
+		if _, err := checkServeExecutablePath(path); err == nil || !strings.Contains(err.Error(), "cannot use unquoted") {
+			t.Errorf("checkServeExecutablePath(%q) = %v, want a refusal", path, err)
 		}
 	}
-	if got, err := checkServeExecutablePath("/usr/local/bin/hn-0.1_x"); err != nil || got != "/usr/local/bin/hn-0.1_x" {
-		t.Fatalf("safe path = %q, %v", got, err)
+	for _, path := range []string{"relative/hn", "/usr/local//bin/hn", "/usr/local/bin/../hn", "/usr/local/bin/./hn", "/usr/local/bin/"} {
+		if _, err := checkServeExecutablePath(path); err == nil {
+			t.Errorf("checkServeExecutablePath(%q) accepted a relative or unclean path", path)
+		}
+	}
+	for _, path := range []string{"/usr/local/bin/hn-0.1_x", "/opt/hn+tools/v1@2,3:4/hn", "/nix/store/abc123-hn-0.0.1/bin/hn"} {
+		if got, err := checkServeExecutablePath(path); err != nil || got != path {
+			t.Fatalf("safe path %q = %q, %v", path, got, err)
+		}
 	}
 	if runtime.GOOS == "windows" {
 		return
@@ -1534,5 +1770,84 @@ func TestServeStateExecutablePathRules(t *testing.T) {
 	}
 	if resolved, err := filepath.EvalSymlinks(path); err != nil || resolved != path {
 		t.Fatalf("serveExecutablePath = %q, want the symlink-resolved path %q (%v)", path, resolved, err)
+	}
+}
+
+// Generated hooks run the hn path as one literal word. For each unsafe name
+// an executable really exists at that path, so a hook that embedded it would
+// run shell expansions; generation must refuse before any side effect.
+func TestServeStateUnsafeExecutablePathsNeverReachAHook(t *testing.T) {
+	layout := newServeTestLayout(t)
+	marker := filepath.Join(layout.Home, "shell-expansion-ran")
+	t.Setenv("HN_SERVE_TEST_MARKER", marker)
+	before := map[string]string{}
+	for _, name := range serveHookNames {
+		contents, err := os.ReadFile(filepath.Join(layout.Hooks, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		before[name] = string(contents)
+	}
+	names := []string{
+		"hn$(touch${IFS}${HN_SERVE_TEST_MARKER})",
+		"hn`touch ${HN_SERVE_TEST_MARKER}`",
+		"hn;touch${IFS}${HN_SERVE_TEST_MARKER}",
+		"hn|touch${IFS}${HN_SERVE_TEST_MARKER}",
+		"hn&touch${IFS}${HN_SERVE_TEST_MARKER}",
+		"hn>${HN_SERVE_TEST_MARKER}",
+		"hn$HN_SERVE_TEST_MARKER",
+		"hn*",
+		"hn{a,b}",
+		"hn(x)",
+	}
+	directory := filepath.Join(layout.Home, "bin")
+	mkdirServeTest(t, directory, 0o700)
+	for _, name := range names {
+		path := filepath.Join(directory, name)
+		writeServeTestFile(t, path, "#!/bin/sh\nexit 0\n", 0o700)
+		requireServeErrorContains(t, ensureServeHooks(layout, path), "cannot use unquoted")
+		for _, hook := range serveHookNames {
+			contents, err := os.ReadFile(filepath.Join(layout.Hooks, hook))
+			if err != nil || string(contents) != before[hook] {
+				t.Fatalf("refused path %q changed hook %s to %q (%v)", path, hook, contents, err)
+			}
+		}
+		if _, err := os.Lstat(marker); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("path %q caused a shell side effect: %v", path, err)
+		}
+	}
+	if entries, err := os.ReadDir(layout.Hooks); err != nil || len(entries) != 2 {
+		t.Fatalf("refused hook writes left entries in hooks/: %v (%v)", entries, err)
+	}
+}
+
+func TestServeStateGeneratedHooksExecuteTheLiteralPath(t *testing.T) {
+	layout := newServeTestLayout(t)
+	directory := filepath.Join(layout.Home, "opt", "hn+tools", "v1@2,3:4")
+	if err := os.MkdirAll(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	record := filepath.Join(layout.Home, "arguments")
+	hnPath := filepath.Join(directory, "hn-0.1_x")
+	if _, err := checkServeExecutablePath(hnPath); err != nil {
+		t.Skipf("temporary directory is not usable as an hn install path: %v", err)
+	}
+	writeServeTestFile(t, hnPath, "#!/bin/sh\nprintf '%s|' \"$0\" \"$@\" > \""+record+"\"\n", 0o700)
+	if err := ensureServeHooks(layout, hnPath); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range serveHookNames {
+		hook := filepath.Join(layout.Hooks, name)
+		if output, err := exec.Command("/bin/sh", hook).CombinedOutput(); err != nil {
+			t.Fatalf("hook %s: %v: %s", name, err, output)
+		}
+		contents, err := os.ReadFile(record)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want := hnPath + "|serve|hook|" + name + "|"; string(contents) != want {
+			t.Fatalf("hook %s ran %q, want %q", name, contents, want)
+		}
+		removeServeTest(t, record)
 	}
 }

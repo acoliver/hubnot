@@ -3,10 +3,8 @@ package main
 import (
 	"bytes"
 	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -31,14 +29,10 @@ const (
 	serveRepoConfigVersion     = 1
 	serveBranchOwnersVersion   = 1
 	serveRepositoryNameMaximum = 100
-	serveDefaultProtectedRef   = "refs/heads/main"
-	serveDefaultLFSQuotaBytes  = 1 << 30
 	serveDefaultLockWait       = 120 * time.Second
 	serveLockPollInterval      = 10 * time.Millisecond
 	serveFingerprintPrefix     = "SHA256:"
 	serveBranchRefPrefix       = "refs/heads/"
-	serveVerdictAccepted       = "accepted"
-	serveVerdictRejected       = "rejected"
 )
 
 // serveHookNames lists the generated hook scripts in byte order, which is
@@ -46,7 +40,8 @@ const (
 var serveHookNames = []string{"post-receive", "pre-receive"}
 
 // errServeLockBusy reports that a repository lock stayed held for the whole
-// wait. WP06 maps it to the repository-busy refusal.
+// wait. hn serve repo lock-exec and pushes (WP06) report it as
+// repository-busy.
 var errServeLockBusy = errors.New("hn serve repository lock is busy")
 
 // serveValidationMode selects what validateServeLayout may do. The zero value
@@ -281,11 +276,10 @@ func checkServeRepositories(layout serveLayout) (map[string]bool, error) {
 		if err != nil {
 			return nil, serveDefect(path, "cannot inspect: %v", err)
 		}
-		if info.Mode()&os.ModeSymlink != 0 {
-			return nil, serveDefect(path, "is a symbolic link")
-		}
-		if !info.IsDir() {
-			return nil, serveDefect(path, "is not a directory")
+		// The bare repository's own directory follows the 0700 rule; its
+		// contents belong to Git and are not inspected.
+		if err := checkServeDirectoryInfo(path, info); err != nil {
+			return nil, err
 		}
 		names[name] = true
 	}
@@ -581,14 +575,6 @@ func sortedServeNames(set map[string]bool) []string {
 	return names
 }
 
-func encodeServeJSON(value any) ([]byte, error) {
-	contents, err := json.MarshalIndent(value, "", "  ")
-	if err != nil {
-		return nil, err
-	}
-	return append(contents, '\n'), nil
-}
-
 // validServeTimestamp accepts RFC 3339 timestamps in UTC written with Z.
 func validServeTimestamp(value string) bool {
 	if !strings.HasSuffix(value, "Z") {
@@ -716,31 +702,11 @@ func loadServeRegistry(layout serveLayout) (serveRegistry, error) {
 	return registry, nil
 }
 
-func saveServeRegistry(layout serveLayout, registry serveRegistry) error {
-	if registry.Keys == nil {
-		registry.Keys = []serveKeyBinding{}
-	}
-	if err := validateServeRegistry(registry); err != nil {
-		return serveStateError(layout.Registry, err)
-	}
-	contents, err := encodeServeJSON(registry)
-	if err != nil {
-		return serveStateError(layout.Registry, err)
-	}
-	if err := replacePrivateFileAtomic(layout.Registry, contents); err != nil {
-		return serveStateError(layout.Registry, err)
-	}
-	return nil
-}
-
-func lookupServeKey(registry serveRegistry, fingerprint string) (serveKeyBinding, bool) {
-	index := sort.Search(len(registry.Keys), func(i int) bool {
-		return registry.Keys[i].Fingerprint >= fingerprint
-	})
-	if index < len(registry.Keys) && registry.Keys[index].Fingerprint == fingerprint {
-		return registry.Keys[index], true
-	}
-	return serveKeyBinding{}, false
+// serveKeyType is the key type field of a stored public key line, which
+// validServePublicKeyLine has already checked.
+func serveKeyType(binding serveKeyBinding) string {
+	keyType, _, _ := strings.Cut(binding.PublicKey, " ")
+	return keyType
 }
 
 // Repository names and branch refs.
@@ -800,39 +766,11 @@ type serveRepoConfig struct {
 	Budgets       ReplicationBudgets `json:"budgets"`
 }
 
-// newServeRepoConfig returns the default configuration. The protected list
-// keeps its first entry first because entry 0 is the default protected
-// branch and HEAD points to it; the remaining entries are sorted and
-// deduplicated. data-model.md calls the list both sorted and default-first;
-// this ordering is how both statements hold when the default is not
-// alphabetically first.
-func newServeRepoConfig(name string, protected []string) serveRepoConfig {
-	return serveRepoConfig{
-		Version:       serveRepoConfigVersion,
-		Name:          name,
-		Protected:     normalizeServeProtectedRefs(protected),
-		LFSQuotaBytes: serveDefaultLFSQuotaBytes,
-		Budgets:       defaultReplicationBudgets(),
-	}
-}
-
-func normalizeServeProtectedRefs(protected []string) []string {
-	if len(protected) == 0 {
-		return []string{serveDefaultProtectedRef}
-	}
-	refs := []string{protected[0]}
-	seen := map[string]bool{protected[0]: true}
-	var rest []string
-	for _, ref := range protected[1:] {
-		if !seen[ref] {
-			seen[ref] = true
-			rest = append(rest, ref)
-		}
-	}
-	sort.Strings(rest)
-	return append(refs, rest...)
-}
-
+// validateServeRepoConfig keeps the first protected entry first because
+// entry 0 is the default protected branch and HEAD points to it; the
+// remaining entries must be sorted and unique. data-model.md calls the list
+// both sorted and default-first; this ordering is how both statements hold
+// when the default is not alphabetically first.
 func validateServeRepoConfig(config serveRepoConfig, name string) error {
 	if config.Version != serveRepoConfigVersion {
 		return fmt.Errorf("unsupported repository configuration version %d", config.Version)
@@ -886,31 +824,6 @@ func decodeServeRepoConfig(contents []byte, name string) (serveRepoConfig, error
 	return config, nil
 }
 
-// encodeServeRepoConfig writes the layout shown in the server-state
-// contract, with the protected list on one line.
-func encodeServeRepoConfig(config serveRepoConfig) ([]byte, error) {
-	name, err := json.Marshal(config.Name)
-	if err != nil {
-		return nil, err
-	}
-	protected := make([]string, len(config.Protected))
-	for index, ref := range config.Protected {
-		encoded, err := json.Marshal(ref)
-		if err != nil {
-			return nil, err
-		}
-		protected[index] = string(encoded)
-	}
-	budgets, err := json.MarshalIndent(config.Budgets, "  ", "  ")
-	if err != nil {
-		return nil, err
-	}
-	var buffer bytes.Buffer
-	fmt.Fprintf(&buffer, "{\n  \"version\": %d,\n  \"name\": %s,\n  \"protected\": [%s],\n  \"lfsQuotaBytes\": %d,\n  \"budgets\": %s\n}\n",
-		config.Version, name, strings.Join(protected, ", "), config.LFSQuotaBytes, budgets)
-	return buffer.Bytes(), nil
-}
-
 // loadServeRepoConfig requires the configuration to exist. A missing file
 // keeps os.ErrNotExist in the chain so callers can report an unhosted
 // repository.
@@ -928,24 +841,6 @@ func loadServeRepoConfig(layout serveLayout, name string) (serveRepoConfig, erro
 		return serveRepoConfig{}, serveStateError(path, err)
 	}
 	return config, nil
-}
-
-func saveServeRepoConfig(layout serveLayout, config serveRepoConfig) error {
-	if !validServeRepositoryName(config.Name) {
-		return fmt.Errorf("invalid repository name %q", config.Name)
-	}
-	path := layout.RepoConfig(config.Name)
-	if err := validateServeRepoConfig(config, config.Name); err != nil {
-		return serveStateError(path, err)
-	}
-	contents, err := encodeServeRepoConfig(config)
-	if err != nil {
-		return serveStateError(path, err)
-	}
-	if err := replacePrivateFileAtomic(path, contents); err != nil {
-		return serveStateError(path, err)
-	}
-	return nil
 }
 
 // Branch owners (state/repos/NAME/branches.json).
@@ -1002,112 +897,14 @@ func decodeServeBranchOwners(contents []byte) (serveBranchOwners, error) {
 	return owners, nil
 }
 
-// loadServeBranchOwners treats a missing file as no recorded owners.
-func loadServeBranchOwners(layout serveLayout, name string) (serveBranchOwners, error) {
-	if !validServeRepositoryName(name) {
-		return serveBranchOwners{}, fmt.Errorf("invalid repository name %q", name)
-	}
-	path := layout.RepoBranches(name)
-	contents, err := readPrivateFileBounded(path, serveStateFileLimit)
-	if errors.Is(err, os.ErrNotExist) {
-		return serveBranchOwners{Version: serveBranchOwnersVersion, Branches: []serveBranchOwner{}}, nil
-	}
-	if err != nil {
-		return serveBranchOwners{}, serveStateError(path, err)
-	}
-	owners, err := decodeServeBranchOwners(contents)
-	if err != nil {
-		return serveBranchOwners{}, serveStateError(path, err)
-	}
-	return owners, nil
-}
+// Repository locks (state/repos/NAME/lock and lfs.lock).
 
-// saveServeBranchOwners always writes the file, including an empty list, so
-// the record never disappears between a read and a write.
-func saveServeBranchOwners(layout serveLayout, name string, owners serveBranchOwners) error {
-	if !validServeRepositoryName(name) {
-		return fmt.Errorf("invalid repository name %q", name)
-	}
-	path := layout.RepoBranches(name)
-	if owners.Branches == nil {
-		owners.Branches = []serveBranchOwner{}
-	}
-	if err := validateServeBranchOwners(owners); err != nil {
-		return serveStateError(path, err)
-	}
-	contents, err := encodeServeJSON(owners)
-	if err != nil {
-		return serveStateError(path, err)
-	}
-	if err := replacePrivateFileAtomic(path, contents); err != nil {
-		return serveStateError(path, err)
-	}
-	return nil
-}
-
-// Push log (state/repos/NAME/push.log) and repository locks.
-
-type servePushLogUpdate struct {
-	Ref string `json:"ref"`
-	Old string `json:"old"`
-	New string `json:"new"`
-}
-
-type servePushLogEntry struct {
-	Time    string               `json:"time"`
-	Actor   string               `json:"actor"`
-	Key     string               `json:"key"`
-	Verdict string               `json:"verdict"`
-	Updates []servePushLogUpdate `json:"updates"`
-	Codes   []string             `json:"codes"`
-}
-
-// appendServePushLog appends one JSON line with a single write. The caller
-// holds the repository lock. The server never reads the log back.
-func appendServePushLog(layout serveLayout, name string, entry servePushLogEntry) error {
-	if !validServeRepositoryName(name) {
-		return fmt.Errorf("invalid repository name %q", name)
-	}
-	path := layout.RepoPushLog(name)
-	if entry.Verdict != serveVerdictAccepted && entry.Verdict != serveVerdictRejected {
-		return serveStateError(path, fmt.Errorf("push log verdict %q must be accepted or rejected", entry.Verdict))
-	}
-	if entry.Updates == nil {
-		entry.Updates = []servePushLogUpdate{}
-	}
-	if entry.Codes == nil {
-		entry.Codes = []string{}
-	}
-	line, err := json.Marshal(entry)
-	if err != nil {
-		return serveStateError(path, err)
-	}
-	line = append(line, '\n')
-	file, err := openServeStateFile(path, os.O_WRONLY|os.O_APPEND)
-	if err != nil {
-		return err
-	}
-	written, err := file.Write(line)
-	if err == nil && written != len(line) {
-		err = io.ErrShortWrite
-	}
-	if err == nil {
-		err = file.Sync()
-	}
-	if closeErr := file.Close(); err == nil {
-		err = closeErr
-	}
-	if err != nil {
-		return serveStateError(path, err)
-	}
-	return nil
-}
-
-// openServeStateFile opens or creates a 0600 regular state file without
+// openServeLockFile opens or creates a 0600 regular lock file without
 // following a symlink at the final path component: an existing file is
 // checked with Lstat before the open and compared with Fstat after it, and a
 // new file is created with O_EXCL.
-func openServeStateFile(path string, flag int) (*os.File, error) {
+func openServeLockFile(path string) (*os.File, error) {
+	const flag = os.O_RDWR
 	for attempt := 0; attempt < 3; attempt++ {
 		before, err := os.Lstat(path)
 		if errors.Is(err, os.ErrNotExist) {
@@ -1127,7 +924,7 @@ func openServeStateFile(path string, flag int) (*os.File, error) {
 		if err != nil {
 			return nil, serveStateError(path, err)
 		}
-		if err := checkServeRegularInfo(path, before, 0o600, servePushLogLimit); err != nil {
+		if err := checkServeRegularInfo(path, before, 0o600, serveStateFileLimit); err != nil {
 			return nil, err
 		}
 		file, err := os.OpenFile(path, flag, 0)
@@ -1153,7 +950,7 @@ func openServeStateFile(path string, flag int) (*os.File, error) {
 // the descriptor, which release does once, releases the lock. Go opens files
 // close-on-exec, so child processes do not inherit the lock.
 func acquireServeLock(path string, wait time.Duration) (func() error, error) {
-	file, err := openServeStateFile(path, os.O_RDWR)
+	file, err := openServeLockFile(path)
 	if err != nil {
 		return nil, err
 	}
@@ -1200,8 +997,9 @@ func serveLockWait() time.Duration {
 // Hook scripts ($HOME/.hn-serve/hooks).
 
 // serveExecutablePath returns the absolute, symlink-resolved path of the
-// running hn binary. WP02 embeds the same path in authorized_keys, so a path
-// that would need quoting is refused.
+// running hn binary. The generated hook scripts embed it unquoted in a
+// /bin/sh command and WP02 embeds it in authorized_keys, so only a path that
+// the shell reads as one literal word is accepted.
 func serveExecutablePath() (string, error) {
 	path, err := os.Executable()
 	if err != nil {
@@ -1214,15 +1012,23 @@ func serveExecutablePath() (string, error) {
 	return checkServeExecutablePath(resolved)
 }
 
+// serveExecutablePathCharacters is the allowlist for the hn path. None of
+// these bytes is special to /bin/sh inside a word: no expansion, quoting,
+// globbing, redirection, separator, grouping or comment character, and no
+// whitespace or non-ASCII byte.
+const serveExecutablePathCharacters = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789/._-+@,:"
+
 func checkServeExecutablePath(path string) (string, error) {
 	if !filepath.IsAbs(path) {
 		return "", fmt.Errorf("hn serve executable path %q is not absolute", path)
 	}
-	unsafe := strings.IndexFunc(path, func(character rune) bool {
-		return character == '"' || character == '\'' || character == '\\' || unicode.IsSpace(character) || unicode.IsControl(character)
-	})
-	if unsafe >= 0 {
-		return "", fmt.Errorf("hn serve executable path %q contains a quote, backslash, whitespace or control character; install hn at a path without them", path)
+	if filepath.Clean(path) != path {
+		return "", fmt.Errorf("hn serve executable path %q is not a clean path", path)
+	}
+	for i := 0; i < len(path); i++ {
+		if strings.IndexByte(serveExecutablePathCharacters, path[i]) < 0 {
+			return "", fmt.Errorf("hn serve executable path %q contains %q, which the generated hook scripts cannot use unquoted; install hn at a path made only of ASCII letters, digits and / . _ - + @ , :", path, path[i:i+1])
+		}
 	}
 	return path, nil
 }

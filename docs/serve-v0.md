@@ -75,7 +75,9 @@ to run when it finds any of the following:
 - a symbolic link anywhere in the layout, including a symlinked `.ssh`
   directory or a symlinked `repositories/NAME.git`;
 - a directory whose mode is not 0700, or a state file whose mode is not 0600
-  (hook scripts must be 0700); the message reports the observed mode;
+  (hook scripts must be 0700); the message reports the observed mode. This
+  includes each `repositories/NAME.git` directory itself. Validation does not
+  look inside a bare repository, but its top directory must be 0700;
 - an entry the layout does not define in `.hn-serve/`, `hooks/`, `state/`,
   `state/repos/`, `state/repos/NAME/` or `lfs/`, or an entry in
   `repositories/` that is not `NAME.git` for a valid name;
@@ -105,7 +107,10 @@ or truncate it before it reaches 64 MiB.
 
 Administration commands (`hn serve repo ...` and `hn serve key ...`) create any
 missing directory in the layout with mode 0700, then rewrite both hook scripts
-for the `hn` binary that is running, then validate. Session commands
+for the `hn` binary that is running, then validate. Every one of them does this,
+including the read-only `hn serve repo list`, `hn serve repo show NAME` and
+`hn serve key list`, so running `hn serve repo list` is a quick way to prepare a
+new server account and to check an existing one. Session commands
 (`hn serve git` and the internal `hn serve hook`) only read: a missing directory
 or a stale hook script makes them refuse.
 
@@ -119,10 +124,15 @@ exec /usr/local/bin/hn serve hook pre-receive
 
 After you move or upgrade `hn`, run any `hn serve repo` or `hn serve key`
 command to regenerate the hooks and the `authorized_keys` block. Until then,
-every fetch and push refuses with a hook-script defect. `hn` refuses to write hooks when its
-own path contains a quote, a backslash, whitespace or a control character,
-because the same path is written unquoted into `authorized_keys`; install `hn`
-at a path without them.
+every fetch and push refuses with a hook-script defect.
+
+The hook scripts and `authorized_keys` contain the `hn` path without quotes, and
+`/bin/sh` runs the hooks. `hn` therefore accepts only a clean absolute path made
+of ASCII letters, digits and the characters `/ . _ - + @ , :`, none of which the
+shell expands or splits. Any other character, such as `$`, a backtick, `;`, `*`,
+a quote, a backslash, whitespace or a non-ASCII letter, makes every
+administration command refuse before it writes a hook. Install `hn` at a path
+such as `/usr/local/bin/hn` or `/home/hn/bin/hn`.
 
 ### Protected branch order in config.json
 
@@ -136,7 +146,11 @@ and which also protects `alpha` and `release` stores
 ### Locks and filesystems
 
 Pushes to one repository are serialized with `flock(2)` on
-`state/repos/NAME/lock`, and a push waits up to 120 seconds for it. `flock` is
+`state/repos/NAME/lock`, and a push waits up to 120 seconds for it.
+`hn serve repo lock-exec NAME -- COMMAND [ARG]...` takes the same lock, runs
+`COMMAND` without a shell in the bare repository with `GIT_DIR` set to it,
+releases the lock and exits with the command's status. When the lock stays busy
+for the whole wait it exits 1 with a `repository-busy` message. `flock` is
 not reliable on every network filesystem, so keep the server home on a local
 filesystem.
 
