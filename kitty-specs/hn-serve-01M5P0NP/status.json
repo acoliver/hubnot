@@ -1,20 +1,436 @@
 {
-  "event_count": 0,
-  "last_event_id": null,
-  "materialized_at": "",
+  "event_count": 116,
+  "last_event_id": "01M5SP3NGTV8BFAR1S1YA3A7GS",
+  "materialized_at": "2026-10-25T14:05:54.067480+00:00",
   "mission_number": "",
-  "mission_slug": "",
+  "mission_slug": "hn-serve-01M5P0NP",
   "mission_type": "software-dev",
   "summary": {
-    "approved": 0,
+    "approved": 11,
     "blocked": 0,
     "canceled": 0,
     "claimed": 0,
     "done": 0,
     "for_review": 0,
-    "in_progress": 0,
+    "in_progress": 1,
     "in_review": 0,
-    "planned": 0
+    "planned": 2
   },
-  "work_packages": {}
+  "work_packages": {
+    "WP01": {
+      "actor": "user",
+      "agent": "llxprt",
+      "agent_profile": "__resolved_profile_absent__",
+      "agent_profile_version": "__resolved_profile_version_absent__",
+      "force_count": 2,
+      "lane": "approved",
+      "last_event_id": "01M5RVQCMQ58D8YNQDF9PSJFQ3",
+      "last_transition_at": "2026-10-25T06:24:48.791597+00:00",
+      "model": "__resolved_model_absent__",
+      "notes": [
+        "WP01 implementation in lane-a commit f0029d1; 4a211ed resyncs the lane's kitty-specs to mission/hn-serve as the move-task pre-flight required (no code change). T001: cmdServe (serve_commands.go) refuses euid 0 as its first statement, before HOME or any state is read (HN_TEST_SERVE_EUID honored only with HN_INTERNAL_TESTING=1, strict decimal parse); main.go routes serve and adds the three usage lines after hn merge. Routes go through serveRouteFor (one case per later WP) and cmdServe validates the layout in the route's mode before the handler runs. T002-T006 (serve_state.go): fixed layout, fail-closed validation of every server-state.md rule with sorted, path-naming defects; transient tmp/lfs walk bounded at 100k; registry, repo config (entry 0 is the default branch, rest sorted, documented), branch owners (an empty list is written as an empty record, file kept), push log, flock locks with errServeLockBusy, 0700 hook scripts (session mode read-only, admin mode regenerates). Out-of-map: serve_lock_unix.go/serve_lock_other.go so Windows builds still compile (rationale in history). T007: serve_state_test.go has 153 tests and subtests, written red-first; 6 manual mutations were all caught. docs/serve-v0.md has the skeleton plus the state layout section. Live path today: hn serve -> root refusal, usage, unknown-subcommand; serveRouteFor is empty until WP05/06/07, so the validation and state APIs run only through in-process probe routes for now. Gates: gofmt -l empty; go vet and go build pass (also GOOS=windows/darwin); git diff --check clean; go.mod unchanged; git grep cmdServe finds only main.go and serve_commands.go; go test -race ./... pass (280.7s), baseline before changes also passed, no pre-existing test modified.",
+        "Cycle 2 (code commit f6109bb) addresses all review-cycle-1 items. R1: cmdServe now routes real administration commands hn serve repo list|show|lock-exec and hn serve key list, so layout validation, hook regeneration, registry/config decoding, LFS size walk and the flock lock run from the live binary; the lookupServeRoute test seam is gone; writers with no caller yet (saveServeRegistry, lookupServeKey, newServeRepoConfig, saveServeRepoConfig, load/saveServeBranchOwners, appendServePushLog) were removed for WP05/06/07 to add beside their first use (see Activity Log). A dead-code grep finds a non-test caller for every function in serve_state.go/serve_commands.go/serve_lock_unix.go; cmdServe appears only in main.go and serve_commands.go. R2: repositories/NAME.git must be a 0700 directory (tests for 0755, 0777, 0750, session read-only, plus a built-binary check). R3: the hn path must be clean, absolute, and use only [A-Za-z0-9/._-+@,:]; tests cover shell metacharacters, create real executables at unsafe paths and assert refusal with no side effect, and execute generated hooks to show the literal path runs. The reviewer's own overlay tests (R2, R3) pass, and the symlinked-root binary reproduction now reports the state defect. Defect-table and hostile-transient fixtures run through live hn serve commands. Also fixed a vet break at lane HEAD (WP03 serveTestActor collision) by renaming my helper, and resynced lane kitty-specs to mission/hn-serve (74567b6). Gates: gofmt -l empty; go vet, go build, git diff --check, and a GOOS=windows build pass; go test -race -run TestServeState passes (165 test/subtest results, no skips). go test -race -timeout 60m ./...: every test passes except TestMemoryIndexTenThousandRecordsPerformanceAndRecovery (wall-clock p95 2.3s vs 1s limit). It fails identically on the unmodified mission base (p95 2.8s), and no memory_* file changed. Host load average was 15 to 70 from unrelated builds, so this is environmental. No pre-existing test modified; go.mod unchanged.",
+        "Cycle-2 review fix (concurrent hook regeneration rejected valid commands) is in 2ad1b0f, kept from the interrupted session and re-verified: hook regeneration and whole-layout validation run under flock(2) on .hn-serve itself (exclusive for admin, shared and read-only for session); staging files seen under the lock are reported as abandoned-hook defects (fail-closed kept); concurrent cold-start mkdir race tolerated; guide documents coordination and remedy. Tests added: deterministic validation-during-staged-write regression (both modes wait, then pass), abandoned staging defect, shared/exclusive/busy lock tests, built-CLI 32 concurrent cold starts and 160 mixed admin commands alongside session validation. 142ed91 adds a seam comment: later staged state writers (WP05) must hold the layout lock exclusively. Reviewer repro: 0/160 failures (was 154/160), cold start 0/32. Gates: gofmt -l . empty; go vet, go build, windows/amd64 build, git diff --check pass; cmdServe only in main.go/serve_commands.go; go.mod unchanged; no pre-existing test modified. go test -race -run TestServeState ./... ok. Full go test -race -timeout 40m ./...: everything passes except pre-existing TestMemoryIndexTenThousandRecordsPerformanceAndRecovery (fixed p95<1s threshold). It fails identically under -race on mission base kitty/mission-hn-serve-01M5P0NP with no serve files (p95 1.41s) and passes without -race on HEAD (p95 345ms), so race overhead causes it, not WP01; left unmodified.",
+        "Review passed (independent reviewer gpt-sol-high, cycle 3): APPROVE, no blocking findings; see tasks/WP01-server-state-foundation/review-evidence-3.md. Approval recorded by the orchestrator after removing planning-artifact status files from the lane branch, which blocked the reviewer's own move-task."
+      ],
+      "provider": "__resolved_provider_absent__",
+      "review": null,
+      "review_result": {
+        "feedback_path": "/home/acoliver/projects/appaday/gitium/hubnot/kitty-specs/hn-serve-01M5P0NP/tasks/WP01-server-state-foundation/review-cycle-3.md",
+        "reference": "review-cycle://hn-serve-01M5P0NP/WP01-server-state-foundation/review-cycle-3.md",
+        "reviewer": "user",
+        "verdict": "approved"
+      },
+      "role": "reviewer",
+      "shell_pid": 2068861,
+      "shell_pid_created_at": "1792905091.85",
+      "subtasks": {
+        "T001": "done",
+        "T002": "done",
+        "T003": "done",
+        "T004": "done",
+        "T005": "done",
+        "T006": "done",
+        "T007": "done"
+      }
+    },
+    "WP02": {
+      "actor": "user",
+      "agent": "llxprt",
+      "agent_profile": "__resolved_profile_absent__",
+      "agent_profile_version": "__resolved_profile_version_absent__",
+      "force_count": 0,
+      "lane": "approved",
+      "last_event_id": "01M5RXMQ7QPQBN8ZVXEB7K8M75",
+      "last_transition_at": "2026-10-25T06:58:18.487521+00:00",
+      "model": "__resolved_model_absent__",
+      "notes": [
+        "Implemented serve_keys.go: parseServePublicKey (7 supported types, options field with quoted spaces and \\\" skipped, strict padded base64, blob type match plus per-type length-prefixed field count so truncation and trailing bytes are refused, 16 KiB and control-byte limits), serveFingerprint (SHA256 unpadded base64; every output passes WP01 validServeFingerprint), renderServeAuthorizedKeysBlock (restrict,command=\"ABS_HN serve git --key FP\" CANONICAL hn-serve:ACTOR12, sorted, empty registry renders markers, hn path via checkServeExecutablePath, re-parse fingerprint check catches tampered registry, options/comments never copied), mergeServeAuthorizedKeys (terminator-preserving, all four marker defects refused with line numbers, append adds one newline only when needed), writeServeAuthorizedKeys (renders and checks before any write, creates .ssh 0700, refuses symlinked/non-dir/group-or-other-writable .ssh and symlinked/non-regular/group-or-other-writable/over-4MiB authorized_keys without repairing, atomic 0600 replace via replacePrivateFileAtomic with fsync and dir fsync). serve_keys_test.go: 18 TestServeKeys tests incl. newServeTestKey helper, ssh-keygen known answers and live cross-check (ed25519, ecdsa 256/384/521, rsa, sk-ed25519, sk-ecdsa), golden merge cases plus a 500-iteration random outside-bytes property, unchanged-target snapshots after every refusal, and a guide test that renders the documented block. docs/serve-v0.md Key bindings section written. Not yet called from a live command: WP05 (hn serve key/repo) wires parseServePublicKey and writeServeAuthorizedKeys per its prompt. No pre-existing test modified; stdlib only. Gate: gofmt -l empty; go vet ./... ok; go build ./... ok; git diff --check ok; go test -race -count=1 -timeout 60m -skip ^TestMemoryIndexTenThousandRecordsPerformanceAndRecovery$ ./... ok (399s); go test -count=1 -run ^TestMemoryIndexTenThousandRecordsPerformanceAndRecovery$ . ok (36s). Planning-artifact cleanup commit made as move-task instructed.",
+        "Review passed: independent review checked T008-T013, C-002, C-003, FR-003 and FR-004; changed-Go formatting, vet, build, full race suite and separate non-race performance test passed; existing test assertions unchanged. All eight anti-pattern checks PASS using the scheduled-library allowance. Coordination: WP02 edits only the Key bindings and authorized_keys section of shared docs/serve-v0.md in sequential lane-a ownership WP01 -> WP02 -> WP05; WP05 T027 is the scheduled parser/writer caller and owns the administration lock; WP06 T038-T039 consumes the forced-command format. Authorized planning-only cleanup committed as 536d1d5; runtime code unchanged. Non-blocking guide escape formatting and unsupported-type diagnostic observations are recorded in the WP02 scratch gate summary."
+      ],
+      "provider": "__resolved_provider_absent__",
+      "review_result": {
+        "feedback_path": "/home/acoliver/projects/appaday/gitium/hubnot/kitty-specs/hn-serve-01M5P0NP/tasks/WP02-ssh-keys-authorized-keys/review-cycle-1.md",
+        "reference": "review-cycle://hn-serve-01M5P0NP/WP02-ssh-keys-authorized-keys/review-cycle-1.md",
+        "reviewer": "user",
+        "verdict": "approved"
+      },
+      "role": "reviewer",
+      "shell_pid": 2894132,
+      "shell_pid_created_at": "1792910963.38",
+      "subtasks": {
+        "T008": "done",
+        "T009": "done",
+        "T010": "done",
+        "T011": "done",
+        "T012": "done",
+        "T013": "done"
+      }
+    },
+    "WP03": {
+      "actor": "user",
+      "agent": "llxprt",
+      "agent_profile": "__resolved_profile_absent__",
+      "agent_profile_version": "__resolved_profile_version_absent__",
+      "force_count": 2,
+      "lane": "approved",
+      "last_event_id": "01M5RXKKP5WWTAEG765115KCNM",
+      "last_transition_at": "2026-10-25T06:57:42.085852+00:00",
+      "model": "__resolved_model_absent__",
+      "notes": [
+        "WP03 done in commit 8bbcf14 on lane-b. Added serve_reasons.go: 27-code catalogue in contract order, serveReasonKnown and serveReasonDefaultNext; renderServeRejection/renderServeRejections (two lines, ref byte order, byte-wise ? sanitization, panics on unknown code, unknown missing kind, budget fields on codes other than over-budget/lfs-quota, or negative numbers); strict parseServeRejectionLine; extractServeRejections (strips remote: prefix, padding, ESC[K, CR/CRLF, pairs sentences). Added serve_wire.go: marker ref/content, push option names, serveMarkerObjectID (hash-object --stdin, no -w), serveRemoteIdentifies (ls-remote --refs -- REMOTE, exactly one line, local-format OID; false plus diagnostic otherwise). Added docs/protocol-v0.md \"hn serve wire surface\" section before Known limits, with a test that keeps its table equal to the catalogue (codes, meanings, next actions). Tests: 18 TestServeReasons/TestServeWire tests, including SHA-1 and SHA-256 bare remotes, a cross-format negative and an option-injection remote. Manual mutations (OID compare, line count, docs row, sort, comma sanitizing, budget guard) each fail tests. Gate: gofmt -l empty; go vet ./... ok; go build ./... ok; git diff --check ok; go test -race -count=1 ./... ok (hubnot 298.6s), baseline before the change also ok. No pre-existing test changed. Wiring: no live hn command calls these functions yet. That is by design: the callers are WP05 (repo create), WP07 (hook), WP10 (merge --remote) and WP11 (all-trusted), and their files are outside WP03 ownership. Lane setup: implement failed on a planning-commit merge conflict in status.events.jsonl (add/add). I resolved it in lane-b (e5ba8f6) and re-ran implement. Following the move-task guard, I then restored kitty-specs/ on the lane to mission/hn-serve (commit \"chore: remove planning artifacts from lane branch\"), so the lane diff against mission/hn-serve now holds only the 4 WP03 files. ls-remote has no timeout, the same as the existing resolveReplicationRequests call.",
+        "Cycle 2 remediation (commit 717d110). Finding 1 (dead code): hn sync publishLocalFacts now pushes through servePushRef (serve_wire.go). On a failed push whose stderr carries hn-serve/1 lines from a remote that identifies as hn serve, the error appends the parsed rejections re-rendered by renderServeRejections (sanitized, never echoed). Ordinary remotes keep the exact prior message. Live callers: extractServeRejections, parseServeRejectionLine, renderServeRejections/renderServeRejection, serveRemoteIdentifies, serveMarkerObjectID. serveRejectedPushError (errors.As) is ready for WP10, which flagged that publishLocalFacts hides stderr. Non-owned file touched: commands.go (3 one-line call-site swaps), needed by the review. Finding 2: docs name the double quote (0x22) and backslash (0x5c) for next=; a new test checks this and rejects empty code spans. Review adversarial failures fixed: sort by original ref bytes; identification compares raw ls-remote bytes. Tests: run([sync origin]) against a hooked bare remote, identified and unidentified plus unparseable and no-line cases; ls-remote shim with 14 advertisement shapes; parse/render fuzz (9.7M execs clean). 6/6 targeted mutants killed. The two reviewer adversarial tests now pass. hn binary checked end to end. Gate: gofmt -l empty, go vet ok, go build ok, git diff --check ok, go test -race -count=1 ./... ok (361s). No pre-existing test modified. Lane kitty-specs realigned to mission/hn-serve as the tool prescribed (368a1bd). Reviewer artifacts in .review-wp03/ are preserved and kept untracked through .git/info/exclude.",
+        "Review cycle 3 remediation. No lane code changed this cycle; implementation commits remain 8bbcf14 and 717d110 (0cb95de only re-syncs lane kitty-specs to mission/hn-serve).\n\nCycle 2 issue 1 (commands.go ownership): resolved by an explicit coordination record under delegated maintainer authority. commands.go is co-owned by WP03 then WP11 in dependency order (WP11 depends on WP03, lane-c depends on lane-b, WP04 does not own commands.go, WP04 and WP11 have not started). WP03 scope is limited to the three git push calls in publishLocalFacts routed through servePushRef; WP11 keeps all other commands.go changes. Updated WP03 owned_files and Ownership table, the tasks.md File ownership row, and lanes.json lane-b write_scope (7495ff3 and faec209 on mission/hn-serve, 342e8a3 and 142c56a on the coordination branch), plus an Activity Log entry. spec-kitty validate_no_overlap over all 14 WPs with dependencies: no errors. validate-workflow WP03: passed. Lane-c owner: rebase onto kitty/mission-hn-serve-01M5P0NP-lane-b.\n\nCycle 2 issue 2 (full race gate): investigated, reproducible cause documented. Host load average stayed 12 to 67 on 16 cores from unrelated workloads for the whole session. Plain go test -race -count=1 ./... hit the 10m package timeout twice, both times inside TestMemoryIndexTenThousandRecordsPerformanceAndRecovery. go test -race -count=1 -timeout 60m -v ./... (no assertion or time limit changed): 303 PASS, 1 FAIL, the same test, p95 1.92s against its 1s limit; all 23 WP03 tests passed. A/B of that test alone under the same load: lane p95 2.28s and 2.03s, base kitty/mission-hn-serve-01M5P0NP p95 2.19s and 1.46s, so the base fails identically. WP03 does not touch memory_index.go, memory_index_test.go or memory_store.go. Waited 15 more minutes for a quiet window (load stayed 25 to 45); none came. Re-run the gate on an idle host to confirm.\n\nOther gates: gofmt -l on all tracked .go files prints nothing; go vet ./... ok; go build ./... ok; go test -race -run 'TestServeReasons|TestServeWire' ./... ok. Live path: main, run(sync), cmdSync, publishLocalFacts, servePushRef, extractServeRejections/parseServeRejectionLine, serveRemoteIdentifies, serveMarkerObjectID; errors render through renderServeRejections. Covered by TestServeWireSync* through run(). No pre-existing test file changed; no keys or binaries in the diff.",
+        "Review passed: FR-013, FR-017 and C-008 verified; fresh formatting, vet, build, race suite and standalone performance gate passed at 897a91a8e92c7da4820bb4bc13a8be06f05b4412; pre-existing tests unchanged. Checklist: dead code PASS (named dependent-WP consumers allowed), synthetic-fixture PASS, silent empty return PASS, FR coverage PASS, frozen surface PASS, locked decision PASS, shared-file ownership PASS, production fragility PASS. Coordination: commands.go is co-owned WP03 then WP11 in dependency order per WP03 Activity Log; WP03 only routes the three publishLocalFacts pushes through servePushRef, WP11 owns all other changes. Fresh gate evidence: /home/acoliver/projects/appaday/gitium/.scratch/wp/hn-serve-01M5P0NP/WP03/fresh-gates-20261025.log"
+      ],
+      "provider": "__resolved_provider_absent__",
+      "review": null,
+      "review_result": {
+        "feedback_path": "/home/acoliver/projects/appaday/gitium/hubnot/kitty-specs/hn-serve-01M5P0NP/tasks/WP03-rejection-protocol-and-marker/review-cycle-3.md",
+        "reference": "review-cycle://hn-serve-01M5P0NP/WP03-rejection-protocol-and-marker/review-cycle-3.md",
+        "reviewer": "user",
+        "verdict": "approved"
+      },
+      "role": "reviewer",
+      "shell_pid": 1480820,
+      "shell_pid_created_at": "1792902146.95",
+      "subtasks": {
+        "T014": "done",
+        "T015": "done",
+        "T016": "done",
+        "T017": "done",
+        "T018": "done",
+        "T019": "done"
+      }
+    },
+    "WP04": {
+      "actor": "user",
+      "agent": "llxprt",
+      "agent_profile": "__resolved_profile_absent__",
+      "agent_profile_version": "__resolved_profile_version_absent__",
+      "force_count": 1,
+      "lane": "approved",
+      "last_event_id": "01M5S0XAPG6GHYSX2PYBWCEDYA",
+      "last_transition_at": "2026-10-25T07:55:26.289112+00:00",
+      "model": "__resolved_model_absent__",
+      "notes": [
+        "WP04 done (T020-T026). policy.go: evaluateProposal split into shared lineage/code/evidence steps with unchanged error precedence; new evaluateProposalUnderPolicy, evaluateProposalWithCode(proposalCodeState) and pipelineDefinitionError (same text). quarantine.go: validateQuarantinedActorRange and replicationEventDependencyWithOptions{AllowAbsentProposalCode}; zero option keeps the original check byte-identical. Consumers: WP08 (range validator, dependency option) and WP09 (destination evaluation); evaluateProposal (live hn proposal status/merge path) now runs through the shared evidence step. validation_seams_test.go covers equivalence, destination semantics, range defects, dependency option, and FR-015: a proposal.merged fact with commit==head validates locally and through replication with no validation change. docs/governance-v0.md gained two sections. No pre-existing test changed. Lane setup: resolved planning-commit and lane-b merge conflicts in kitty-specs only, then ran the authorized planning-artifact cleanup. Gate: gofmt clean; go vet/build ok; git diff --check ok; go test -race -count=1 -timeout 60m -skip perf ./... ok (384s); perf test without -race ok (31s).",
+        "Review cycle 2. Addressed the single blocking review-cycle-1 item (T021 destination acceptance threshold): added TestValidationSeamsDestinationAcceptanceThreshold in validation_seams_test.go (commit 1886305). It evaluates one qualifying base-digest acceptance under the base policy (RequiredAccepts 1, Accepted true), then under a validatePolicy-valid destination policy with maintainers alice+carol and RequiredAccepts 2 via evaluateProposalUnderPolicy with the base digest, asserting exactly that one decision counts, Ready stays true, Accepted is false, status is \"ready for decision\". Mutation check (overlay hard-coding the threshold to 1) makes the new test fail. No production code changed this cycle; pre-existing tests untouched (only validation_seams_test.go is a WP04 test change). Wiring: evaluateProposal and replicationEventDependency route live hn paths through the extracted cores; remaining seams are consumed by WP08 T048/T051 and WP09 T055/T056. Gate at 1886305: gofmt -l on changed .go files empty; go vet ./... PASS; go build ./... PASS; go test -race -count=1 -timeout 60m -skip ^TestMemoryIndexTenThousandRecordsPerformanceAndRecovery ./... PASS (386s); go test -count=1 -run ^TestMemoryIndexTenThousandRecordsPerformanceAndRecovery . PASS (39.4s), so no base comparison needed. Planning-artifact cleanup committed as d2247ce (test-free). Logs: .scratch/wp/hn-serve-01M5P0NP/WP04/gate-*-cycle2.log.",
+        "Review passed: T020-T026 and C-004/C-006/FR-007/FR-008/FR-015 verified at 6112cce; pre-existing tests unchanged; owned files and documented WP04-to-WP11 quarantine.go coordination verified; live paths and named WP08/WP09 library consumers verified. Checklist PASS: dead code, synthetic fixtures, silent empty returns, FR coverage, frozen surface, locked decisions, shared-file ownership, production fragility. Independent gofmt/vet/build/race/performance gates passed; race 442.903s, performance 40.496s. Authorized planning-only cleanup committed as 70d923f. Evidence: /home/acoliver/projects/appaday/gitium/.scratch/wp/hn-serve-01M5P0NP/WP04/review-summary.md"
+      ],
+      "provider": "__resolved_provider_absent__",
+      "review": null,
+      "review_result": {
+        "feedback_path": "/home/acoliver/projects/appaday/gitium/hubnot/kitty-specs/hn-serve-01M5P0NP/tasks/WP04-validation-seams/review-cycle-2.md",
+        "reference": "review-cycle://hn-serve-01M5P0NP/WP04-validation-seams/review-cycle-2.md",
+        "reviewer": "user",
+        "verdict": "approved"
+      },
+      "role": "reviewer",
+      "shell_pid": 3717380,
+      "shell_pid_created_at": "1792914307.29",
+      "subtasks": {
+        "T020": "done",
+        "T021": "done",
+        "T022": "done",
+        "T023": "done",
+        "T024": "done",
+        "T025": "done",
+        "T026": "done"
+      }
+    },
+    "WP05": {
+      "actor": "user",
+      "agent": "llxprt",
+      "agent_profile": "__resolved_profile_absent__",
+      "agent_profile_version": "__resolved_profile_version_absent__",
+      "force_count": 1,
+      "lane": "approved",
+      "last_event_id": "01M5S2Z6QNBJYBEHEQC91EAS3B",
+      "last_transition_at": "2026-10-25T08:31:24.917698+00:00",
+      "model": "__resolved_model_absent__",
+      "notes": [
+        "Implemented T027-T033 in commit 4d66428 (lane-a), followed by the authorized planning-artifact cleanup commit 1db34e7. New serve_admin.go: an administration preamble (state/tmp/admin.lock, abandoned create-staging cleanup, validation with hook regeneration, authorized_keys rewrite), repo create (staged under state/tmp with the layout lock held exclusively, refs/heads+refs/tags only, fetch.fsckObjects, marker, HEAD, protected-tip policy check, rename only after every check passes), repo set (protected-tip rule under the repo lock, default promotion, HEAD follows), key add/remove (render, save registry, rewrite block, lag message). WP01 list/show/lock-exec/key list reused; lock-exec now releases the admin lock before the repo lock. serve_state.go: atomic saveServeRegistry/saveServeRepoConfig/newServeRepoConfig that hold the layout lock while staging. New serve_harness_test.go and serve_admin_test.go (13 TestServeAdmin tests: import scope, sha256, refusals leave nothing incl. fsck-hostile source, CRLF/no-final-newline preservation, two keys per actor, concurrent admins, set, lock-exec passthrough and busy, NFR-008, uid 0, staging cleanup, byte-stable writers, documented examples). Mutation checks (import refs/hn, fsck off, no admin lock) are all caught. Guide admin section and README link added. All code is reached from hn serve. Gate: (1) gofmt -l clean on all changed .go files; (2) go vet and go build pass; (3) go test -race -count=1 -timeout 60m -skip ^TestMemoryIndexTenThousandRecordsPerformanceAndRecovery$ ./... ok (353.6s); (4) the perf test without -race passes (32.3s). No pre-existing test modified. Reviewer notes: bare hn serve repo/key usage strings kept as WP01 tests pin them; read-only commands warn instead of failing on authorized_keys errors because TestServeStateKeyListPrintsBindings uses fake key blobs; one sentence in the WP01 Concurrent commands section was amended so the lock description stays accurate; WP02 guide lines 273-276 have a pre-existing broken CRLF code span (not touched). Lane-c merge into lane-a was resolved by taking the lane-c status.json (planning bookkeeping only).",
+        "Blocking NFR-008: unsafe SSH state is warned away; propagate errors and refuse lock-exec before child launch. All reviewer gates passed. WP06: rebase onto corrected WP05 before extending the harness or SSH session paths.",
+        "Review cycle 1 addressed in ba944bd. (1) Read-only routes (repo list/show, key list) and lock-exec now call refreshAuthorizedKeys, which checks .ssh, authorized_keys and markers first and returns every SSH-state/write error naming the path (exit 1). (2) lock-exec refuses before its child starts (still releases admin lock before the repo-lock wait). (3) Wrong-expectation test replaced: TestServeAdminRefusesUnsafeAuthorizedKeys covers .ssh 0777, .ssh symlink, authorized_keys 0660, authorized_keys symlink, duplicate begin, duplicate end, begin without end, end without begin, each across all 8 admin commands, with no writes, no repair, lock-exec child not started, and recovery after the fix. Non-vacuity: fails on the old code. (4) docs/serve-v0.md coordination section rewritten. (5) No pre-existing test changed. Only tolerated case: a registry binding whose stored key does not parse or match. Read-only commands warn and run (WP01 TestServeStateKeyListPrintsBindings needs key list to succeed with synthetic keys); mutating commands refuse; changeKeys now checks SSH state rather than rewriting from the current registry, so key remove repairs it (TestServeAdminRegistryBindingDefect). Known limit: two broken bindings need a hand edit. Gates: gofmt -l clean; go vet/build pass; race suite ok hubnot 711.6s; perf test ok 60.4s (no base comparison needed). Logs: .scratch/wp/hn-serve-01M5P0NP/WP05/gate3-race.log, gate4-perf.log.",
+        "Review passed: T027-T033 and FR-002/003/004/023 plus NFR-008 verified at 6061d87; all eight anti-pattern checks PASS within WP05 scope; live CLI reachability, unchanged pre-existing test assertions, and behavior documentation verified. Shared serve_state.go writers and serve_commands.go dispatch are authorized by the WP05 maintainer note and recorded lane ownership. All changed Go files gofmt-clean; go vet ./... and go build ./... passed; exact required race suite passed (665.460s), isolated non-race performance test passed (36.369s). Authorized planning-only cleanup committed as 612779b; implementation unchanged. Evidence and logs: /home/acoliver/projects/appaday/gitium/.scratch/wp/hn-serve-01M5P0NP/WP05/review-2-evidence.md. No blocking issues."
+      ],
+      "provider": "__resolved_provider_absent__",
+      "review": null,
+      "review_result": {
+        "feedback_path": "/home/acoliver/projects/appaday/gitium/hubnot/kitty-specs/hn-serve-01M5P0NP/tasks/WP05-repository-and-key-administration/review-cycle-2.md",
+        "reference": "review-cycle://hn-serve-01M5P0NP/WP05-repository-and-key-administration/review-cycle-2.md",
+        "reviewer": "user",
+        "verdict": "approved"
+      },
+      "role": "reviewer",
+      "shell_pid": 4020347,
+      "shell_pid_created_at": "1792916014.02",
+      "subtasks": {
+        "T027": "done",
+        "T028": "done",
+        "T029": "done",
+        "T030": "done",
+        "T031": "done",
+        "T032": "done",
+        "T033": "done"
+      }
+    },
+    "WP06": {
+      "actor": "user",
+      "agent": "llxprt",
+      "agent_profile": "__resolved_profile_absent__",
+      "agent_profile_version": "__resolved_profile_version_absent__",
+      "force_count": 0,
+      "lane": "approved",
+      "last_event_id": "01M5S6NZ55G3M90E2EVEYVGN19",
+      "last_transition_at": "2026-10-25T09:36:16.549938+00:00",
+      "model": "__resolved_model_absent__",
+      "notes": [
+        "WP06 implemented in 672fcca (planning-artifact cleanup in ae13e65). hn serve git --key: closed SSH_ORIGINAL_COMMAND grammar (no shell), checks in contract order (unknown-key, unsupported-command, unhosted-repository, repository-busy) with one hn-serve/1 ref=- line on stderr, empty stdout, exit 1; Git started with env built from scratch (HN_INTERNAL_TESTING test exception documented), upload-pack --strict without lock, receive-pack under the repo lock with -c core.hooksPath/receive.fsckObjects/receive.advertisePushOptions; Git exit status passes through; LFS refused in isolated serveLFSSession arm guarded by serveLFSEnabled (WP14). Route wired in serveRouteFor(git). lookupServeKey added to serve_state.go (WP01 maintainer note). Harness: sshd-like shim running the exact command= value under env -i, client Git/GitFailure/Hn/HnFailure helpers. Tests: grammar tables, env builder, US2-1..5 via real git through the shim (v0 and v2, packet-trace verified), LFS seam, lock busy plus concurrent clone, fake-git check of exact argv/env/lock hold, exit status and usage; lock and protocol mutations confirmed caught. Docs: serve guide Connecting over SSH, threat-model hn serve trust boundary. WP07 activity log got the hooks-never-take-RepoLock note. Gate: gofmt -l clean; go vet ./... and go build ./... pass; git diff --check clean; go test -race -count=1 -timeout 60m -skip ^TestMemoryIndexTenThousandRecordsPerformanceAndRecovery$ ./... ok (518.9s); go test -count=1 -run ^TestMemoryIndexTenThousandRecordsPerformanceAndRecovery$ . ok (44.1s). Pre-existing tests unmodified.",
+        "Review passed: T034-T040 and all assigned requirement refs verified; live hn command paths and named later-WP integration confirmed; existing test assertions preserved; documentation updated. All eight anti-pattern checks PASS. gofmt clean, go vet ./... and go build ./... pass; full race suite excluding isolated performance test passes (714.371s); isolated non-race performance/recovery test passes (54.119s). Coordination: serve_commands.go adds git routing; serve_harness_test.go appends helpers after unchanged WP05 code; docs/serve-v0.md changes Connecting over SSH only; docs/threat-model.md adds trust boundary for WP13/WP14; serve_state.go lookup is authorized by WP01 maintainer note; WP14 replaces isolated LFS arm. WP07 hooks must never acquire RepoLock because wrapper holds it throughout receive-pack. Authorized planning-only cleanup committed as c465770. Evidence: /home/acoliver/projects/appaday/gitium/.scratch/wp/hn-serve-01M5P0NP/WP06/review.md"
+      ],
+      "provider": "__resolved_provider_absent__",
+      "review_result": {
+        "feedback_path": "/home/acoliver/projects/appaday/gitium/hubnot/kitty-specs/hn-serve-01M5P0NP/tasks/WP06-forced-command-session/review-cycle-1.md",
+        "reference": "review-cycle://hn-serve-01M5P0NP/WP06-forced-command-session/review-cycle-1.md",
+        "reviewer": "user",
+        "verdict": "approved"
+      },
+      "role": "reviewer",
+      "shell_pid": 496223,
+      "shell_pid_created_at": "1792919769.4",
+      "subtasks": {
+        "T034": "done",
+        "T035": "done",
+        "T036": "done",
+        "T037": "done",
+        "T038": "done",
+        "T039": "done",
+        "T040": "done"
+      }
+    },
+    "WP07": {
+      "actor": "user",
+      "agent": "llxprt",
+      "agent_profile": "__resolved_profile_absent__",
+      "agent_profile_version": "__resolved_profile_version_absent__",
+      "force_count": 1,
+      "lane": "approved",
+      "last_event_id": "01M5SAYRRBGQ5CH358AG6FS3R9",
+      "last_transition_at": "2026-10-25T10:50:59.211289+00:00",
+      "model": "__resolved_model_absent__",
+      "notes": [
+        "WP07 implemented in 8515202 (planning artifacts cleaned in 86f1517). T041: hn serve hook route (session validation) with entry checks for HN_SERVE_ACTOR/KEY/REPOSITORY, GIT_DIR resolved with symlinks against the hosted repo, and a live registry binding; failures print hn: hn serve hook: REASON and exit 1. T042: bounded stdin parser (10,000 lines, 4 MiB; over-budget is one ref=- line with budget=ref-updates or ref-update-bytes, a deviation from the single budget name in the prompt so each limit has its own unit), object-format OID length, strict push options, hn-advance shape check. T043/T044 in serve_verdict.go: seven classes, evaluateServePush in contract order with lines sorted by ref, lazy HostedEvents (scheduled for WP08) and maintainer set from the default protected tip (an invalid policy means no maintainers), create-only tags, branch ownership, reserved refs, and fail-closed placeholder arms checkServeActor/Proposal/Memory/ProtectedUpdate for WP08/WP09. T045: post-receive records owners and the accepted push log, never fails; pre-receive logs rejections. Per the maintainer note, loadServeBranchOwners, saveServeBranchOwners (empty save writes an empty list) and appendServePushLog (O_APPEND, no symlink follow, refuses to grow past 64 MiB) live in serve_state.go. Hooks never take RepoLock. T046: black-box pushes through the shim cover US1-6, unowned and invalid-policy cases, tags, reserved refs, all-or-nothing with and without --atomic, quarantine discard, push options, core.hooksPath override, attribution, push log, removed key; mutation checks confirmed the tests fail when the rules are disabled. T047: guide section plus TestServePushDocumentedExample. Gate: gofmt -l clean; go vet and go build pass; go test -race -count=1 -timeout 60m -skip perf ./... ok (251.7s); perf test without -race ok (11.7s). No pre-existing test modified.",
+        "Cycle 2 (commit b7409b4) fixes both review-cycle-1 blockers. Issue 1: a push past 10,000 ref updates or 4 MiB now gets one over-budget pair per ref update, in ref order, attributed to the pusher, with budget=ref-updates and the exceeded limit and measurement. The push log lists every update with one over-budget code each. Memory stays bounded: updates spill to a private state/tmp directory (bounded sorted runs, fan-in 64 merge), the push log line is streamed, and the scratch is removed. Issue 2: ordinary-branch classification and branch owner records use validServeGitBranchRef, which matches git check-ref-format, so refs/heads/@ is a branch; protected refs keep the stricter subset. New tests: a real 10,001-ref push, a hook-level push over 4 MiB with unsorted input, a real push of refs/heads/@ covering ownership and the log, a check-ref-format corpus, spill/reader/stream unit tests. Guide updated. Pre-existing tests unchanged (0 lines removed). Gates: gofmt clean; vet and build pass; race suite ok (225s); perf test ok (11.1s). Logs in .scratch/wp/hn-serve-01M5P0NP/WP07/cycle2.",
+        "Review passed: T041-T047; FR-006/010/011/012/013 and NFR-003 verified. Full formatting/vet/build/race/performance gates pass. Pre-existing assertions unchanged; docs and executable example verified; live hooks and named WP08/WP09 callers verified. Coordination: serve_state.go writers authorized by WP07 carry-over; shared files follow tasks.md dependency ownership and recorded WP06 lock handoff/WP08 rebase note. All eight anti-pattern checks PASS. Authorized planning-artifact cleanup committed as 4160383. Evidence: /home/acoliver/projects/appaday/gitium/.scratch/wp/hn-serve-01M5P0NP/WP07/review-verdict.md"
+      ],
+      "provider": "__resolved_provider_absent__",
+      "review": null,
+      "review_result": {
+        "feedback_path": "/home/acoliver/projects/appaday/gitium/hubnot/kitty-specs/hn-serve-01M5P0NP/tasks/WP07-hook-and-verdict-framework/review-cycle-2.md",
+        "reference": "review-cycle://hn-serve-01M5P0NP/WP07-hook-and-verdict-framework/review-cycle-2.md",
+        "reviewer": "user",
+        "verdict": "approved"
+      },
+      "role": "reviewer",
+      "shell_pid": 1601215,
+      "shell_pid_created_at": "1792924957.34",
+      "subtasks": {
+        "T041": "done",
+        "T042": "done",
+        "T043": "done",
+        "T044": "done",
+        "T045": "done",
+        "T046": "done",
+        "T047": "done"
+      }
+    },
+    "WP08": {
+      "actor": "user",
+      "agent": "llxprt",
+      "agent_profile": "__resolved_profile_absent__",
+      "agent_profile_version": "__resolved_profile_version_absent__",
+      "force_count": 2,
+      "lane": "approved",
+      "last_event_id": "01M5SGBC9YT2RPT89E8TDAGGHY",
+      "last_transition_at": "2026-10-25T12:25:15.326857+00:00",
+      "model": "__resolved_model_absent__",
+      "notes": [
+        "Implemented T048-T053 in commit 010d99f. serve_verdict_facts.go: actor rule (rewrite, key mismatch, budgets via measureServeActorRangeUnderBudgets over OLD..NEW plus the batched hosted prefix, validateQuarantinedActorRange with a diagnostic walk naming the full event ID even for broken signatures, replicationEventDependencyWithOptions with AllowAbsentProposalCode, closure/issue/identity projection, accepted events added to PushFacts); proposal rule (immutable, dependency-missing, signed head, base ancestry, budgets); memory rule (append-only, owner, budgets, loadMemoryStreamAt); over-budget mapping in contract order; hosted-load failure rejects every fact and protected update. serve_verdict.go: placeholders removed, protected placeholder kept for WP09. Range helper lives in serve_verdict_facts.go (owned file) and a unit test asserts identical totals and inclusive limits vs measureQuarantinedSelectionUnderBudgets, including repeated run logs. serve_facts_test.go covers US1-1, code-ref ordering, rejected actor events not leaking, US1-3, US1-4, US1-5, dependency-missing, proposal and memory rules, all five budgets at limit and one over, and the documented example. docs/serve-v0.md section written. Gate: gofmt -l clean; go vet and go build pass; go test -race -count=1 -timeout 60m -skip TestMemoryIndexTenThousandRecordsPerformanceAndRecovery ./... pass (230s); perf test without -race pass (11s).",
+        "Review cycle 1 addressed in 732a8a9 (only the 4 owned files). Issue 1: hosted facts now load under explicit server ceilings (100,000 events, 256 MiB of event.json+signature+log bytes, the client reader's aggregate limits) with the per-object limit equal to the byte ceiling, so anything the 5 budgets admit stays readable and the 16 MiB attachment allowance holds. The actor rule refuses appends past a ceiling with over-budget budget=hosted-fact-events|hosted-fact-bytes, counted exactly like the reader (signature blob sizes included). Corrupt history still fails closed. Issue 2: actor range measurement stops early only on events/objects and measures all byte dimensions before checking; proposal/memory use an adapter around the unchanged client helper (byte limits lifted, then real budgets applied). New tests: AdmittedRunLogsStayReadable (8 MiB+1 and exactly 16 MiB logs then ordinary appends accepted, 16 MiB+1 rejected), BudgetPriorityWithSeveralExceeded (actor/proposal/memory, object vs total, attachment vs total, objects vs bytes, real pushes, refs unchanged), HostedFactCeilings (in-process evaluateServePush with lowered ceilings: at-limit accepted and reloadable, one over rejected, reader fails one below). Both real-push tests fail on 010d99f with the reviewer's exact symptoms. Live path: serve_hooks.go:744-749. Gate: gofmt -l empty; go vet/build pass; go test -race (skip perf) ./... ok 287.9s; perf test without race ok 11.1s. Follow-up for the WP03 owner: docs/protocol-v0.md budget-name list omits hosted-fact-* (and WP07's ref-updates); serve-v0.md documents them.",
+        "Cycle 3 addresses review-feedback-2 (hosted signature blob reuse). Commit df51b76: the actor range measurement now discounts every object a hosted event reaches (tree, event.json, signature, log.txt) by the object IDs Git stored, read in one cat-file batch per hook run and shared with the hosted-ceiling signature-size accounting; padded signature blobs are covered because no ID is derived from decoded content; content hashing helper removed. Client helper and proposal/memory paths unchanged; budget precedence and inclusive limits preserved. New tests: TestServeFactsRangeMeasurementDiscountsReusedHostedBlobs (parity with measureQuarantinedSelectionUnderBudgets for signature, padded signature, event.json and log reuse, 16 objects; at-limit and one-over for max-objects and max-total-bytes) and TestServeFactsReusedHostedSignatureBlobAtLimits (real pushes through the shim, plain and padded hosted signature as a later run log: one below max-objects and max-total-bytes rejected with client-measured values and unchanged refs, exact limits accepted). Red check on the cycle-2 code: both fail (18 vs 16 objects; 9 vs 8). Reviewer probe passes. Docs: Budgets section states hosted objects are not counted again. Gate from lane workspace: gofmt -l on changed Go files empty; go vet ./... ok; go build ./... ok; go test -race -count=1 -timeout 60m -skip ^TestMemoryIndexTenThousandRecordsPerformanceAndRecovery ./... ok (289.452s); go test -count=1 -run ^TestMemoryIndexTenThousandRecordsPerformanceAndRecovery . ok (10.976s); all 19 TestServeFacts pass with -race. Lane cleanup commit 02c0c67 removed planning artifacts. Logs: .scratch/wp/hn-serve-01M5P0NP/WP08/cycle3.",
+        "Review passed: independent review of 345a8a0 checked C-007 FR-007 FR-010 FR-012 NFR-002 NFR-003 and T048-T053; no blocking findings. All eight anti-pattern checks PASS: dead code, synthetic fixtures, silent empty returns, FR coverage, frozen surface, locked decisions, shared ownership, production fragility. Owned-file and recorded coordination boundaries respected; pre-existing test assertions unchanged; live hn hook reachability verified and protected rules assigned to WP09. gofmt clean; go vet ./... and go build ./... pass; full race suite excluding named performance test passes (290.611s); isolated non-race performance test passes (11.069s). Authorized planning-only lane cleanup committed as e1ab035; no executable source changes after gates. Evidence: /home/acoliver/projects/appaday/gitium/.scratch/wp/hn-serve-01M5P0NP/WP08/review-summary.md."
+      ],
+      "provider": "__resolved_provider_absent__",
+      "review": null,
+      "review_result": {
+        "feedback_path": "/home/acoliver/projects/appaday/gitium/hubnot/kitty-specs/hn-serve-01M5P0NP/tasks/WP08-hubnot-fact-ref-rules/review-cycle-3.md",
+        "reference": "review-cycle://hn-serve-01M5P0NP/WP08-hubnot-fact-ref-rules/review-cycle-3.md",
+        "reviewer": "user",
+        "verdict": "approved"
+      },
+      "role": "reviewer",
+      "shell_pid": 2593644,
+      "shell_pid_created_at": "1792930400.38",
+      "subtasks": {
+        "T048": "done",
+        "T049": "done",
+        "T050": "done",
+        "T051": "done",
+        "T052": "done",
+        "T053": "done"
+      }
+    },
+    "WP09": {
+      "actor": "llxprt",
+      "agent": "llxprt",
+      "agent_profile": "__resolved_profile_absent__",
+      "agent_profile_version": "__resolved_profile_version_absent__",
+      "force_count": 0,
+      "lane": "approved",
+      "last_event_id": "01M5SK6M2J3VRGQYJZA9P9P2JC",
+      "last_transition_at": "2026-10-25T13:15:05.170272+00:00",
+      "model": "__resolved_model_absent__",
+      "notes": [
+        "Implemented T054-T060 in d307580 (planning-artifact cleanup in 5379c2d). serve_protected.go runs the twelve protected-branch checks of contracts/push-verdict.md in order (deletion, creation, stale expected tip before any policy or candidate check, destination policy at T, fast-forward, candidates with signed head H or the hn-advance candidate, base policy, hosted or same-push code ref, blocked lineage/merged/rejected, base readiness, destination readiness with base-digest decisions and destination-only pipelines loaded at H, maintainer under both policies for hn-advance) plus the multi-candidate rule (latest failing step, lowest event ID, ids list every candidate). serve_verdict.go: only checkServeProtectedUpdate changed (placeholder removed); live path is cmdServeHook -> preReceive -> evaluateServePush -> checkServeRefUpdate -> checkServeProtectedUpdate. serve_protected_test.go: reusable newServeGovernedFixture (A/R/U/M clones, explicit --all selection, OpenProposal/Approve/RequestCI/RunCI/Accept/Reject/Revise/ReadyProposal, PushMain/RejectMain/AcceptMain, ServerTip/ServerRefs, SetMainForTest, VerifyAccepted SC-003 check) and black-box tests for US1-2 (field for field vs contract golden), accepted direct push with no new commit, US3-5 (ci,acceptance and ci-only after a failed rerun), US3-4, removed reviewer, destination-only lint pipeline, blocked (superseded, rejected, merged), policy invalid at tip/base plus documented recovery, creation and deletion, not-fast-forward, stale tip vs reject-stale-advance, code ref missing vs same push, same-push acceptance, advance-not-maintainer, multiple candidates. docs/serve-v0.md: Protected branches and Recovering a protected branch sections with reject-direct-main example executed by TestServeProtectedDocumentedExample. Notes: hn proposal open refuses a base without policy, so the step-7 test signs that candidate in-process; the destination-policy link uses the real anchor governance-v0.md#destination-policy-on-a-protected-branch. Gate: gofmt -l clean; go vet ./... and go build ./... pass; go test -race -count=1 -timeout 60m -skip '^TestMemoryIndexTenThousandRecordsPerformanceAndRecovery$' ./... ok (332s); go test -count=1 -run '^TestMemoryIndexTenThousandRecordsPerformanceAndRecovery$' . ok (10.9s). No pre-existing test modified.",
+        "Review passed: all T054-T060 and requirement_refs checked; live protected hook path, owned files and coordination, unchanged pre-existing assertions, docs and all eight anti-pattern checks PASS. Reviewer-rerun gofmt, vet, build, focused race, full race (397.839s), isolated non-race performance (11.099s) PASS. Authorized planning-only cleanup c619c6c leaves implementation unchanged. Evidence: /home/acoliver/projects/appaday/gitium/.scratch/wp/hn-serve-01M5P0NP/WP09/review-aaba82fe94c94fa4ae5adf89ab9aee6c/review-verdict.md"
+      ],
+      "provider": "__resolved_provider_absent__",
+      "review_result": {
+        "feedback_path": "/home/acoliver/projects/appaday/gitium/hubnot/kitty-specs/hn-serve-01M5P0NP/tasks/WP09-protected-branch-governance/review-cycle-1.md",
+        "reference": "review-cycle://hn-serve-01M5P0NP/WP09-protected-branch-governance/review-cycle-1.md",
+        "reviewer": "llxprt",
+        "verdict": "approved"
+      },
+      "role": "reviewer",
+      "shell_pid": 3203008,
+      "shell_pid_created_at": "1792932927.4",
+      "subtasks": {
+        "T054": "done",
+        "T055": "done",
+        "T056": "done",
+        "T057": "done",
+        "T058": "done",
+        "T059": "done",
+        "T060": "done"
+      }
+    },
+    "WP10": {
+      "actor": "user",
+      "agent": "llxprt",
+      "agent_profile": "__resolved_profile_absent__",
+      "agent_profile_version": "__resolved_profile_version_absent__",
+      "force_count": 0,
+      "lane": "approved",
+      "last_event_id": "01M5SP2Z7MPQD8PP2DRVZTYVTX",
+      "last_transition_at": "2026-10-25T14:05:31.252040+00:00",
+      "model": "__resolved_model_absent__",
+      "notes": [
+        "Implemented hn merge PROPOSAL --remote REMOTE [--branch BRANCH] in serve_client.go (nine steps of contracts/advancement.md, test-only interruption points publish/push/record/republish gated by HN_INTERNAL_TESTING), early dispatch at the top of cmdMerge (no-flag path byte-identical below it), usage line in main.go, 'Advancing a protected branch' in docs/serve-v0.md with executed advance and reject-stale-advance examples, and serve_advance_test.go (US3-1..US3-6, NFR-006 fresh identity-less verifier, interruption table, step 3/9 publication refusals, second maintainer, FR-016, parsing, NFR-005 50x10 race in about 52s). Decisions: step 3 surfaces the server's hn-serve/1 lines through the existing serveRejectedPushError text from publishLocalFacts (no new push helper); step 1 uses the 'proposal status' shallow scope because the 'proposal merge' scope checks checkout ancestry; step 4 fetches with a forced refspec into refs/remotes/REMOTE/NAME; usage line placed directly BEFORE 'hn merge PROPOSAL' because pre-existing TestServeStateUsageListsServeCommands requires 'hn merge PROPOSAL' to be followed by the hn serve lines; the 'step 6 before server applied' table row shares the publish row's observable state and is covered by it. findProposalMergeCommit is not called in remote mode. Gate: gofmt -l clean; go vet ./... and go build ./... pass; go test -race -count=1 -timeout 60m -skip '^TestMemoryIndexTenThousandRecordsPerformanceAndRecovery$' ./... ok (502s); go test -count=1 -run '^TestMemoryIndexTenThousandRecordsPerformanceAndRecovery$' . ok (11s). No pre-existing tests modified.",
+        "Review passed: T061-T067 and C-005/FR-014/FR-015/FR-016/NFR-005/NFR-006 verified; formatting, vet, build, full race gate, isolated performance and all interruption rows passed; existing tests unchanged. Coordination: in shared sequential lane-a, WP10 main.go adds only the remote-merge usage line and preserves WP01 usage; docs/serve-v0.md changes only the WP10-owned advancement section and preserves earlier WP sections; governance.go adds only early remote dispatch, preserving the no-flag body. All changes remain in WP10 owned files. Anti-patterns 1-7 PASS, 8 N/A. Reviewed implementation 9aee99f at HEAD c4a2cf3; authorized planning-only cleanup f5a0826 leaves implementation unchanged."
+      ],
+      "provider": "__resolved_provider_absent__",
+      "review_result": {
+        "feedback_path": "/home/acoliver/projects/appaday/gitium/hubnot/kitty-specs/hn-serve-01M5P0NP/tasks/WP10-advancement-and-merge-fact/review-cycle-1.md",
+        "reference": "review-cycle://hn-serve-01M5P0NP/WP10-advancement-and-merge-fact/review-cycle-1.md",
+        "reviewer": "user",
+        "verdict": "approved"
+      },
+      "role": "reviewer",
+      "shell_pid": 4059356,
+      "shell_pid_created_at": "1792936106.04",
+      "subtasks": {
+        "T061": "done",
+        "T062": "done",
+        "T063": "done",
+        "T064": "done",
+        "T065": "done",
+        "T066": "done",
+        "T067": "done"
+      }
+    },
+    "WP11": {
+      "actor": "user",
+      "agent": "llxprt",
+      "agent_profile": "__resolved_profile_absent__",
+      "agent_profile_version": "__resolved_profile_version_absent__",
+      "force_count": 0,
+      "lane": "approved",
+      "last_event_id": "01M5S3RMQ1REFYFDDG0CKFQ1YA",
+      "last_transition_at": "2026-10-25T08:45:18.433756+00:00",
+      "model": "__resolved_model_absent__",
+      "notes": [
+        "Implemented --all-trusted selection (T068-T073) in commit a50d1bd (planning-artifact cleanup in eafe873). replication.go: AllTrusted field (omitempty), --all mutual exclusion, select-time serveRemoteIdentifies check after local validation, show line, usage string. quarantine.go: AllTrusted request branch (advertised actors and proposals only, sorted, exact selectors deduplicated by key), not-advertised status ignored by hasFailures, memoryReplicationRecovery treats actors/proposals as selected; exact memory loop extracted unchanged into appendExactMemoryRequests. commands.go: cmdSync rechecks identification only for all-trusted, skips import and keeps publication, prints not advertised yet. shallow.go untouched (documented). docs/replication-v0.md: all-trusted section, trust boundary paragraph, executed example. New replication_all_trusted_test.go covers US4-1..4, mutual exclusion before network, identification loss, broken-signature chain on a marked remote, FR-019 parity for exact/--all/no-selection, golden files and show output, shallow recovery, documented example; 7 scratch mutants all killed. Old vs new binary: exact and --all files and show output byte-identical; old binary rejects allTrusted with unknown field. Gate: gofmt -l empty; go vet and go build pass; go test -race -count=1 -timeout 60m -skip ^TestMemoryIndexTenThousandRecordsPerformanceAndRecovery$ ./... ok (699s); perf test without -race PASS (46.9s). No pre-existing test changed. README synopsis not owned by WP11, left for a later docs WP.",
+        "Review passed: C-008, FR-017, FR-018, FR-019, NFR-006 and T068-T073 checked; live hn paths reachable and hosted integration assigned to WP12. No pre-existing tests changed; owned files respected. Shared-file coordination: commands.go WP03 -> WP11 and quarantine.go WP04 -> WP11 recorded in tasks/lane metadata and transition notes; prerequisite additions preserved. All eight anti-pattern checks PASS. gofmt clean, go vet ./... and go build ./... pass; full race gate passes (750.252s), separate non-race performance/recovery test passes (65.255s); old/new binaries produce byte-identical exact/--all selections and identical select/show output. Authorized planning-only lane cleanup committed as 2731ffd; implementation unchanged from reviewed HEAD 27d5b2e. Evidence: /home/acoliver/projects/appaday/gitium/.scratch/wp/hn-serve-01M5P0NP/WP11/review-evidence.md"
+      ],
+      "provider": "__resolved_provider_absent__",
+      "review_result": {
+        "feedback_path": "/home/acoliver/projects/appaday/gitium/hubnot/kitty-specs/hn-serve-01M5P0NP/tasks/WP11-all-trusted-selection/review-cycle-1.md",
+        "reference": "review-cycle://hn-serve-01M5P0NP/WP11-all-trusted-selection/review-cycle-1.md",
+        "reviewer": "user",
+        "verdict": "approved"
+      },
+      "role": "reviewer",
+      "shell_pid": 89202,
+      "shell_pid_created_at": "1792917053.8",
+      "subtasks": {
+        "T068": "done",
+        "T069": "done",
+        "T070": "done",
+        "T071": "done",
+        "T072": "done",
+        "T073": "done"
+      }
+    },
+    "WP12": {
+      "actor": "llxprt",
+      "agent": "llxprt",
+      "agent_profile": "__resolved_profile_absent__",
+      "agent_profile_version": "__resolved_profile_version_absent__",
+      "force_count": 0,
+      "lane": "in_progress",
+      "last_event_id": "01M5SP3NGTV8BFAR1S1YA3A7GS",
+      "last_transition_at": "2026-10-25T14:05:54.067480+00:00",
+      "model": "__resolved_model_absent__",
+      "provider": "__resolved_provider_absent__",
+      "role": "implementer",
+      "shell_pid": 228126,
+      "shell_pid_created_at": "1792937151.84"
+    },
+    "WP13": {
+      "actor": "finalize-tasks",
+      "force_count": 0,
+      "lane": "planned",
+      "last_event_id": "01M5R806TK2T8B3E89XFY4C2WT",
+      "last_transition_at": "2026-10-25T00:40:06.227214+00:00"
+    },
+    "WP14": {
+      "actor": "finalize-tasks",
+      "force_count": 0,
+      "lane": "planned",
+      "last_event_id": "01M5R806X4HJPWH79FV4BMPAFY",
+      "last_transition_at": "2026-10-25T00:40:06.308955+00:00"
+    }
+  }
 }
