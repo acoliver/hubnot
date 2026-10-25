@@ -1,13 +1,3 @@
----
-affected_files: []
-cycle_number: 1
-mission_slug: hn-serve-01M5P0NP
-reproduction_command:
-reviewed_at: '2026-10-25T16:34:10Z'
-reviewer_agent: user
-wp_id: WP14
----
-
 # WP14 review: changes requested
 
 Reviewed WP14 implementation commit `0c29ad5132a7e48edf6d91a463a0b5a44eff1dd0` against its parent, at lane HEAD `1d16ce0fba4eb6340efccc12f104902d7394953b`.
