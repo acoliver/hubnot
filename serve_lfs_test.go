@@ -950,6 +950,195 @@ func TestServeLFSQuotaRecheckedBeforeStoring(t *testing.T) {
 	}
 }
 
+// serveLFSStagingProbe serves a scripted session input and, before every
+// read, records what lfs/incoming holds, so a test sees any file the server
+// staged while it was still reading the upload. It counts the object data
+// bytes the server reads apart from the framing, and at the end of the
+// script it reports io.EOF, as a lost connection would.
+type serveLFSStagingProbe struct {
+	t        *testing.T
+	incoming string
+	segments []serveLFSSegment
+	bodyRead int
+	staged   []string
+}
+
+func (p *serveLFSStagingProbe) Read(b []byte) (int, error) {
+	p.staged = append(p.staged, serveHarnessEntries(p.t, p.incoming)...)
+	for len(p.segments) > 0 && len(p.segments[0].data) == 0 {
+		p.segments = p.segments[1:]
+	}
+	if len(p.segments) == 0 {
+		return 0, io.EOF
+	}
+	segment := &p.segments[0]
+	n := copy(b, segment.data)
+	segment.data = segment.data[n:]
+	if segment.body {
+		p.bodyRead += n
+	}
+	return n, nil
+}
+
+// T088 and FR-021: a put-object for an object that is already stored never
+// creates a staged file, whatever size it declares, so knowing a stored OID
+// does not let a mapped actor write data outside the quota. The server reads
+// at most the smaller of the declared and stored sizes plus one byte. A retry
+// with the stored content succeeds at the quota limit and costs nothing; any
+// other data gets lfs-object-mismatch; the stored objects stay unchanged.
+func TestServeLFSStoredObjectRetryStagesNothing(t *testing.T) {
+	f := newServeLFSFixture(t, newServeHarness(t))
+	layout := f.h.Layout()
+	incoming := layout.RepoLFSIncoming("r")
+	small, large := []byte("x"), serveLFSRandom(t, 1000)
+	smallOID, largeOID := f.upload("A", small), f.upload("A", large)
+	const quota = 1001
+	f.h.Serve("serve", "repo", "set", "r", "--lfs-quota", strconv.Itoa(quota))
+	before := map[string]os.FileInfo{}
+	for _, oid := range []string{smallOID, largeOID} {
+		info, err := os.Lstat(filepath.Join(layout.RepoLFSObjects("r"), oid[0:2], oid[2:4], oid))
+		if err != nil {
+			t.Fatal(err)
+		}
+		before[oid] = info
+	}
+	packet := func(content []byte) []serveLFSSegment {
+		return []serveLFSSegment{{data: []byte(fmt.Sprintf("%04x", len(content)+4))}, {data: content, body: true}}
+	}
+	for _, test := range []struct {
+		name     string
+		oid      string
+		declared int
+		body     []serveLFSSegment
+		finished bool
+		status   int
+		maxBody  int
+	}{
+		// The review-cycle-3 reproduction: a stored one-byte object, a
+		// declared size far above the quota and a full packet of other data
+		// that never finishes.
+		{"stored OID declared above the quota, body unfinished", smallOID, 1 << 20, packet(bytes.Repeat([]byte("z"), serveLFSMaxPayload)), false, 422, 2},
+		{"stored OID declared at its size, body unfinished", largeOID, 1000, packet(large[:500]), false, 0, 500},
+		{"stored OID declared smaller than stored", largeOID, 10, packet(large[:10]), true, 422, 11},
+		{"stored OID with other content of the stored size", largeOID, 1000, packet(serveLFSRandom(t, 1000)), true, 422, 1000},
+		{"stored OID retried with its content at the quota", largeOID, 1000, packet(large), true, 200, 1000},
+	} {
+		var requests bytes.Buffer
+		requests.Write(serveLFSRequestBytes("version 1", nil, nil))
+		requests.Write(serveLFSWireText("put-object " + test.oid))
+		requests.Write(serveLFSWireText("size=" + strconv.Itoa(test.declared)))
+		requests.WriteString(serveLFSWireDelim)
+		segments := append([]serveLFSSegment{{data: requests.Bytes()}}, test.body...)
+		if test.finished {
+			segments = append(segments, serveLFSSegment{data: []byte(serveLFSWireFlush)}, serveLFSSegment{data: serveLFSRequestBytes("quit", nil, nil)})
+		}
+		input := &serveLFSStagingProbe{t: t, incoming: incoming, segments: segments}
+
+		var output bytes.Buffer
+		status, err := runServeLFSSession(layout, serveKeyBinding{Actor: f.actors["A"]}, "r", serveLFSOperationUpload, input, &output)
+		if len(input.staged) != 0 {
+			t.Fatalf("%s: lfs/incoming held %q while the upload was read", test.name, input.staged)
+		}
+		if staged := serveHarnessEntries(t, incoming); len(staged) != 0 {
+			t.Fatalf("%s: lfs/incoming holds %q after the session", test.name, staged)
+		}
+		if input.bodyRead > test.maxBody {
+			t.Fatalf("%s: the session read %d bytes of object data, want at most %d", test.name, input.bodyRead, test.maxBody)
+		}
+		wantExit := 1
+		if test.finished {
+			wantExit = 0
+		}
+		if err != nil || status != wantExit {
+			t.Fatalf("%s: session returned %d, %v; want exit %d without an internal error", test.name, status, err, wantExit)
+		}
+		conn := &serveLFSConn{t: t, stdout: bufio.NewReader(&output), stderr: &bytes.Buffer{}}
+		if capabilities := conn.readPackets(); !equalStrings(capabilities, []string{"version=1"}) {
+			t.Fatalf("%s: capability advertisement %q", test.name, capabilities)
+		}
+		if response := conn.read(); response.Status != 200 {
+			t.Fatalf("%s: version 1 answered %+v", test.name, response)
+		}
+		switch test.status {
+		case 422:
+			rejection := serveLFSRequireRejection(t, test.name, conn.read(), 422, serveReasonLFSObjectMismatch, f.actors["A"])
+			if !equalStrings(rejection.IDs, []string{test.oid}) {
+				t.Fatalf("%s: ids %q, want the stored OID", test.name, rejection.IDs)
+			}
+		case 200:
+			if response := conn.read(); response.Status != 200 || response.Delim || len(response.Args) > 0 {
+				t.Fatalf("%s: put-object answered %+v, want a bare status 200", test.name, response)
+			}
+		}
+		if test.finished {
+			if response := conn.read(); response.Status != 200 {
+				t.Fatalf("%s: quit answered %+v", test.name, response)
+			}
+		}
+		if rest, _ := io.ReadAll(conn.stdout); len(rest) != 0 {
+			t.Fatalf("%s: the session wrote %q after its last answer", test.name, rest)
+		}
+	}
+
+	download := openServeLFS(t, f.h, f.keys["B"], "download")
+	for oid, content := range map[string][]byte{smallOID: small, largeOID: large} {
+		info, err := os.Lstat(filepath.Join(layout.RepoLFSObjects("r"), oid[0:2], oid[2:4], oid))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !os.SameFile(info, before[oid]) || !info.ModTime().Equal(before[oid].ModTime()) {
+			t.Fatalf("stored object %s was replaced or rewritten", oid)
+		}
+		download.send(serveLFSRequestBytes("get-object "+oid, nil, nil))
+		if response := download.read(); response.Status != 200 || !bytes.Equal(response.Data, content) {
+			t.Fatalf("get-object %s answered status %d with %d bytes, want the original content", oid, response.Status, len(response.Data))
+		}
+	}
+	download.quit()
+	if stored := f.lfsStored(); stored != quota {
+		t.Fatalf("lfs-stored = %d, want %d", stored, quota)
+	}
+	if stored := serveLFSEntries(t, layout.RepoLFSObjects("r")); len(stored) != 2 {
+		t.Fatalf("lfs/objects holds %q, want the two original objects", stored)
+	}
+}
+
+// T088 through the forced command: hn serve git, as sshd runs it, answers a
+// put-object for a stored OID that declares a size far above the quota and
+// sends other data with lfs-object-mismatch and ends the session, and no
+// staged file appears while the client still holds the upload open.
+func TestServeLFSStoredObjectOversizedRetryEndsSession(t *testing.T) {
+	f := newServeLFSFixture(t, newServeHarness(t))
+	incoming := f.h.Layout().RepoLFSIncoming("r")
+	small := []byte("x")
+	smallOID := f.upload("A", small)
+	f.h.Serve("serve", "repo", "set", "r", "--lfs-quota", "100")
+
+	conn := openServeLFS(t, f.h, f.keys["A"], "upload")
+	conn.send(serveLFSWireText("put-object "+smallOID), serveLFSWireText("size=1048576"), []byte(serveLFSWireDelim), serveLFSWireData(bytes.Repeat([]byte("z"), 1000)))
+	rejection := serveLFSRequireRejection(t, "oversized retry of a stored OID", conn.read(), 422, serveReasonLFSObjectMismatch, f.actors["A"])
+	if !equalStrings(rejection.IDs, []string{smallOID}) {
+		t.Fatalf("ids %q, want the stored OID", rejection.IDs)
+	}
+	conn.requireEnded("oversized retry of a stored OID")
+	if staged := serveHarnessEntries(t, incoming); len(staged) != 0 {
+		t.Fatalf("lfs/incoming holds %q while the client holds the upload open", staged)
+	}
+	if status, _ := conn.finish(); status != 1 {
+		t.Fatalf("the session exited %d, want 1", status)
+	}
+
+	download := openServeLFS(t, f.h, f.keys["B"], "download")
+	download.send(serveLFSRequestBytes("get-object "+smallOID, nil, nil))
+	if response := download.read(); response.Status != 200 || !bytes.Equal(response.Data, small) {
+		t.Fatalf("get-object of the stored object answered %+v", response)
+	}
+	download.quit()
+	if stored := f.lfsStored(); stored != int64(len(small)) {
+		t.Fatalf("lfs-stored = %d, want %d", stored, len(small))
+	}
+}
+
 // US5-4 and FR-021: lock, unlock and list-lock answer 501 in both kinds of
 // session, the advertisement never offers locking (openServeLFS requires it
 // to be exactly version=1), and the Git LFS 3.7.1 client reports the

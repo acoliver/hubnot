@@ -646,24 +646,51 @@ func (s *serveLFSTransfer) putObject(oid string) error {
 		// Without a valid size the data has no bound, so it is not read.
 		return serveLFSMalformed("put-object needs a 64-hex lowercase OID and one decimal size= argument")
 	}
-	present, err := s.objectStored(oid)
+	stored, present, err := s.storedObject(oid)
 	if err != nil {
 		return err
 	}
-	if !present {
-		limit, measured, err := s.quotaAfter(size)
-		if err != nil {
-			return err
-		}
-		if measured > limit {
-			return s.discardData(oid, size, limit, measured)
-		}
+	if present {
+		return s.recheckStored(oid, size, stored.Size())
+	}
+	limit, measured, err := s.quotaAfter(size)
+	if err != nil {
+		return err
+	}
+	if measured > limit {
+		return s.discardData(oid, size, limit, measured)
 	}
 	staged, err := s.receiveStaged(oid, size)
 	if err != nil || staged == "" {
 		return err
 	}
 	return s.commitStaged(staged, oid, size)
+}
+
+// recheckStored answers a put-object for an object that is already stored.
+// The stored object is never replaced and nothing is staged: the data is
+// hashed in memory and dropped, so a known OID cannot make the server write
+// a declared size of the client's choosing to disk outside the quota. The
+// server reads at most the smaller of the declared and stored sizes plus one
+// byte, because data of any other size cannot hash to oid. A retry that
+// matches the stored object answers status 200 and costs no quota; any
+// other data gets the lfs-object-mismatch answer, and data past that bound
+// also ends the session.
+func (s *serveLFSTransfer) recheckStored(oid string, size, storedSize int64) error {
+	hash := sha256.New()
+	received, overran, err := s.readObjectData(min(size, storedSize), func(payload []byte) error {
+		_, err := hash.Write(payload)
+		return err
+	})
+	switch {
+	case err != nil:
+		return err
+	case overran:
+		return s.respondOverran(oid)
+	case size != storedSize || received != size || hex.EncodeToString(hash.Sum(nil)) != oid:
+		return s.respondMismatch(oid)
+	}
+	return s.respond(200, nil, nil)
 }
 
 // readObjectData passes the data packets of one put-object request, up to

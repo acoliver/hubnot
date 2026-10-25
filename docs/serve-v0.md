@@ -1653,7 +1653,7 @@ git diff --check
 | FR-018 | All-trusted selection | `TestServeReplicationRunnerDiscoversNewWork`, `TestReplicationAllTrustedRefusesUnmarkedRemote`, `TestReplicationAllTrustedMutualExclusionBeforeNetwork`, `TestReplicationAllTrustedForgedMarkerGrantsNoTrust` |
 | FR-019 | Existing selections unchanged | `TestServeReplicationSelectionsMatchOrdinaryRemote`, `TestReplicationAllTrustedExistingModesIgnoreMarker`, `TestReplicationAllTrustedSelectionFilesAndShowOutput` |
 | FR-020 | LFS transfer | `TestServeLFSRoundTrip`, `TestServeLFSObjectMismatch`, `TestServeLFSSessionChecksKeyAndRepository`, `TestServeLFSInterruptedUploadNeverStored`, `TestServeLFSBatchActions`, `TestServeLFSFramingRefusals`, `TestServeLFSPacketReaderChecksLengthBeforeReading`, `TestServeLFSOversizedUploadEndsSession`, `TestServeLFSUploadReadsNoFurtherThanDeclaredSize`, `TestServeLFSUploadBodyReadCappedAtDeclaredSizePlusOne` |
-| FR-021 | LFS quota | `TestServeLFSQuotaBoundary`, `TestServeLFSQuotaRecheckedBeforeStoring`, `TestServeLFSDocumentedExample`, `TestServeLFSLockingUnsupported` |
+| FR-021 | LFS quota | `TestServeLFSQuotaBoundary`, `TestServeLFSQuotaRecheckedBeforeStoring`, `TestServeLFSStoredObjectRetryStagesNothing`, `TestServeLFSStoredObjectOversizedRetryEndsSession`, `TestServeLFSDocumentedExample`, `TestServeLFSLockingUnsupported` |
 | FR-022 | Protected-update serialization | `TestServeSessionPushWaitsForLockAndFetchDoesNot`, `TestServeProtectedNotFastForwardAndStaleTip`, `TestServeAdvanceConcurrentMaintainers` |
 | FR-023 | Documentation with tested examples | `TestServeQualityDocumentedExamplesAreExecuted`, `TestServeQualityTraceabilityTestsExist`, `TestServeReasonsDocsTableMatchesCatalogue` |
 | NFR-001 | Push verdict time | `TestServeQualityPushVerdictTimeNFR001` |
@@ -1814,8 +1814,13 @@ that the byte count equals the size the client declared and that the SHA-256
 of the content equals the object ID. Only then, and only after the quota check
 described below, does it rename the file into `lfs/objects/` and `fsync` the
 file and its directories. A download can therefore only ever return verified
-content. A stored object is never replaced: uploading an object that is
-already stored succeeds and discards the second copy.
+content. A stored object is never replaced, and the server writes nothing to
+disk for an upload of an object that is already stored. It hashes that
+upload's data in memory and drops it, reading at most the smaller of the
+declared size and the stored size plus one byte. When the data matches the
+stored object, the upload succeeds and costs no quota. Any other data gets the
+`lfs-object-mismatch` answer described below, and data past that bound also
+ends the session.
 
 When the content does not match, the server removes the staged file and
 answers status 422 with an `lfs-object-mismatch` rejection line naming the
@@ -1854,7 +1859,8 @@ would exceed it never becomes downloadable:
    exceed the quota, it refuses the whole request with status 507.
 2. Before it reads an object's data, it checks the declared size the same way,
    and on refusal reads and discards the data, up to the declared size plus
-   one byte.
+   one byte. An object that is already stored skips this check, because its
+   upload is never staged or stored again.
 3. After verifying the content, it takes the repository's `lfs.lock`, counts
    the stored bytes again and renames the object into place only if it still
    fits. Two uploads that each fit alone cannot exceed the quota together.

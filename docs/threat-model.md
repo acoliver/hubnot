@@ -374,6 +374,14 @@ bounded by its quota, 1 GiB unless the administrator sets another value. The
 server checks the quota before an upload starts and again under `lfs.lock`
 right before the rename, so concurrent uploads cannot exceed it together
 (`TestServeLFSQuotaBoundary`, `TestServeLFSQuotaRecheckedBeforeStoring`).
+An upload of an object that is already stored skips the quota check because
+the server writes none of it to disk. It hashes that data in memory, reads at
+most the smaller of the declared size and the stored size plus one byte, and
+answers `lfs-object-mismatch` to anything other than the stored content. An
+actor who knows a stored object ID therefore cannot use it to stage data
+beyond the quota by declaring a large size
+(`TestServeLFSStoredObjectRetryStagesNothing`,
+`TestServeLFSStoredObjectOversizedRetryEndsSession`).
 Requests are bounded too: a pkt-line length header above 65519 is refused
 before the server reads the packet, and one request may carry at most 64
 arguments, 10,000 object lines and 4 MiB of text (`TestServeLFSFramingRefusals`,
@@ -413,9 +421,10 @@ and `TestServeLFSWrittenPathsAndModes` checks the paths and modes by snapshot.
 arbitrary verified objects, after which uploads to that repository fail with
 `lfs-quota` until the administrator raises the quota or removes objects by
 hand. Objects that no ref points to any longer are not collected. Uploads in
-progress do not count against the quota while they are written: each staged
-file is capped at its declared size plus one byte, and that size must fit in
-the quota when the upload starts, but several concurrent uploads can together
+progress do not count against the quota while they are written: only an
+object that is not stored yet is staged, each staged file is capped at its
+declared size plus one byte, and that size must fit in the quota when the
+upload starts, but several concurrent uploads can together
 occupy more disk than the quota until they finish or are cleaned up. An actor
 can also keep a connection open while it sends object data slowly; this holds
 no lock, and connection limits belong to `sshd` and the host.
