@@ -563,8 +563,7 @@ valid policy is in
 Clients reach a hosted repository through the server account's OpenSSH
 login. Each key in the managed `authorized_keys` block runs
 `hn serve git --key FINGERPRINT` as a forced command, so a connection can only
-fetch from a hosted repository, push to it, or transfer its Git LFS objects
-once LFS transfer is enabled.
+fetch from a hosted repository, push to it, or transfer its Git LFS objects.
 
 ### OpenSSH settings on the server
 
@@ -617,7 +616,7 @@ URL as usual, for example `ssh://hn@server.example:2222/demo.git`.
 |----|----|----|
 | `git clone`, `git fetch`, `git pull`, `git ls-remote` | `git-upload-pack 'demo.git'` | Runs `git upload-pack --strict` on the hosted repository |
 | `git push` | `git-receive-pack 'demo.git'` | Takes the repository lock and runs `git receive-pack` with the server's hooks |
-| `git lfs` transfers | `git-lfs-transfer 'demo.git' upload` or `download` | Described in [Large files with Git LFS](#large-files-with-git-lfs); refused while LFS transfer is not enabled |
+| `git lfs` transfers | `git-lfs-transfer 'demo.git' upload` or `download` | Serves the repository's LFS objects, as described in [Large files with Git LFS](#large-files-with-git-lfs) |
 
 The server also accepts the older spellings `git upload-pack` and
 `git receive-pack`. It refuses every other request, including interactive
@@ -1615,10 +1614,10 @@ therefore breaks the gate until this section follows it.
 anywhere in `docs/`, an HTML comment of the form `example: NAME`, has no test
 that contains the same complete marker as its search key.
 
-The Git LFS rows (FR-020, FR-021 and US5-1 to US5-4) name the tests that the
-LFS work package plans and carry the marker `pending WP14` while
-`serve_lfs_test.go` does not exist. Once that file exists, the check refuses
-the marker on every row and requires every named LFS test to be declared.
+The Git LFS rows (FR-020, FR-021 and US5-1 to US5-4) name tests in
+`serve_lfs_test.go`. Because that file exists, the check requires every named
+LFS test to be declared and refuses the markers that stood in for them before
+LFS transfer landed.
 
 The regression gate for the mission is:
 
@@ -1653,18 +1652,18 @@ git diff --check
 | FR-017 | Fact advertisement | `TestServeReplicationAdvertisesAcceptedFacts`, `TestServeWireRemoteIdentification` |
 | FR-018 | All-trusted selection | `TestServeReplicationRunnerDiscoversNewWork`, `TestReplicationAllTrustedRefusesUnmarkedRemote`, `TestReplicationAllTrustedMutualExclusionBeforeNetwork`, `TestReplicationAllTrustedForgedMarkerGrantsNoTrust` |
 | FR-019 | Existing selections unchanged | `TestServeReplicationSelectionsMatchOrdinaryRemote`, `TestReplicationAllTrustedExistingModesIgnoreMarker`, `TestReplicationAllTrustedSelectionFilesAndShowOutput` |
-| FR-020 | LFS transfer | `TestServeLFSRoundTrip`, `TestServeLFSObjectMismatch` (pending WP14) |
-| FR-021 | LFS quota | `TestServeLFSQuotaBoundary`, `TestServeLFSLockingUnsupported` (pending WP14) |
+| FR-020 | LFS transfer | `TestServeLFSRoundTrip`, `TestServeLFSObjectMismatch`, `TestServeLFSSessionChecksKeyAndRepository`, `TestServeLFSInterruptedUploadNeverStored`, `TestServeLFSBatchActions`, `TestServeLFSFramingRefusals`, `TestServeLFSPacketReaderChecksLengthBeforeReading` |
+| FR-021 | LFS quota | `TestServeLFSQuotaBoundary`, `TestServeLFSQuotaRecheckedBeforeStoring`, `TestServeLFSDocumentedExample`, `TestServeLFSLockingUnsupported` |
 | FR-022 | Protected-update serialization | `TestServeSessionPushWaitsForLockAndFetchDoesNot`, `TestServeProtectedNotFastForwardAndStaleTip`, `TestServeAdvanceConcurrentMaintainers` |
 | FR-023 | Documentation with tested examples | `TestServeQualityDocumentedExamplesAreExecuted`, `TestServeQualityTraceabilityTestsExist`, `TestServeReasonsDocsTableMatchesCatalogue` |
 | NFR-001 | Push verdict time | `TestServeQualityPushVerdictTimeNFR001` |
 | NFR-002 | Bounded incoming data | `TestServeFactsBudgetsAreInclusive`, `TestServeFactsBudgetPriorityWithSeveralExceeded`, `TestServePushOverRefUpdateBudgetRejectsEveryRef` |
 | NFR-003 | Fail-closed handling | `TestServeSessionUnknownKeyRefused`, `TestServeStateValidationRefusesEachLayoutDefect`, `TestServeSessionUnsafeAndUnhostedPathsRefused`, `TestServeFactsAlteredEventIsInvalid`, `TestServeFactsDependencyMissing`, `TestServeProtectedPolicyInvalid` |
-| NFR-004 | Least privilege | `TestServeQualityEnforcedWriteBoundary`, `TestServeQualityWrittenPathsAndModes`, `TestServeAdminRefusesRoot`, `TestServeStateRootRefusalPrecedesEveryStateAccess` |
+| NFR-004 | Least privilege | `TestServeQualityEnforcedWriteBoundary`, `TestServeQualityWrittenPathsAndModes`, `TestServeLFSEnforcedWriteBoundary`, `TestServeLFSWrittenPathsAndModes`, `TestServeAdminRefusesRoot`, `TestServeStateRootRefusalPrecedesEveryStateAccess` |
 | NFR-005 | Race safety | `TestServeAdvanceRaceNFR005` |
 | NFR-006 | Client independence | `TestServeAdvanceFastForwardsAndVerifies`, `TestServeReplicationPhaseZeroFlow`, `TestReplicationAllTrustedForgedMarkerGrantsNoTrust` |
 | NFR-007 | Regression gate | The full gate above, plus the tests that pin earlier behavior: `TestValidationSeamsBaseEvaluationEquivalence`, `TestServeAdvanceKeepsLocalMerge`, `TestReplicationAllTrustedSelectionFilesAndShowOutput` |
-| NFR-008 | Private server state | `TestServeQualityWrittenPathsAndModes`, `TestServeAdminRefusesUnsafeState`, `TestServeStateValidationRefusesEachLayoutDefect`, `TestServeStateRegistryRefusesInvalidContent` |
+| NFR-008 | Private server state | `TestServeQualityWrittenPathsAndModes`, `TestServeLFSWrittenPathsAndModes`, `TestServeAdminRefusesUnsafeState`, `TestServeStateValidationRefusesEachLayoutDefect`, `TestServeStateRegistryRefusesInvalidContent` |
 | SC-001 | Brief acceptance examples pass | The six tests in [Acceptance examples of the brief](#acceptance-examples-of-the-brief), checked by `TestServeQualityTraceabilityTestsExist` |
 | SC-002 | Rejected pushes change no ref | `TestServePushAllOrNothing`, `TestServeProtectedRejectsDirectPushWithoutProposal`, `TestServeReasonsParserRejectsMalformedLines` |
 | SC-003 | Protected tips carry CI and both acceptances | `TestServeProtectedAcceptsGovernedDirectPush`, `TestServeProtectedDestinationPolicy`, `TestServeProtectedNotReady` |
@@ -1699,10 +1698,10 @@ git diff --check
 | US4-4 | All-trusted selection refused for an ordinary remote | `TestReplicationAllTrustedRefusesUnmarkedRemote` |
 | US4-5 | Existing selections behave as against an ordinary remote | `TestServeReplicationSelectionsMatchOrdinaryRemote`, `TestReplicationAllTrustedExistingModesIgnoreMarker` |
 | US4-6 | Phase 0 flow without selections or direct main pushes | `TestServeReplicationPhaseZeroFlow` |
-| US5-1 | LFS file reaches a second clone byte for byte | `TestServeLFSRoundTrip` (pending WP14) |
-| US5-2 | Upload that does not match its object ID discarded | `TestServeLFSObjectMismatch` (pending WP14) |
-| US5-3 | Quota is inclusive at the limit | `TestServeLFSQuotaBoundary` (pending WP14) |
-| US5-4 | Locking answered as unsupported | `TestServeLFSLockingUnsupported` (pending WP14) |
+| US5-1 | LFS file reaches a second clone byte for byte | `TestServeLFSRoundTrip`, `TestServeLFSEnforcedWriteBoundary` |
+| US5-2 | Upload that does not match its object ID discarded | `TestServeLFSObjectMismatch` |
+| US5-3 | Quota is inclusive at the limit | `TestServeLFSQuotaBoundary`, `TestServeLFSQuotaRecheckedBeforeStoring`, `TestServeLFSDocumentedExample` |
+| US5-4 | Locking answered as unsupported | `TestServeLFSLockingUnsupported` |
 
 ### Acceptance examples of the brief
 
@@ -1748,5 +1747,165 @@ each one logs what it saw:
   `ssh` or `ssh-keygen` is missing, when it runs as uid 0, or when `sshd` does
   not start, and it includes the `sshd` log in the skip message.
 
+The LFS tests that drive the real Git LFS client (`TestServeLFSRoundTrip`,
+`TestServeLFSDocumentedExample`, `TestServeLFSWrittenPathsAndModes`,
+`TestServeLFSEnforcedWriteBoundary` and the client part of
+`TestServeLFSLockingUnsupported`) skip with the reason when `git lfs version`
+fails. `TestServeLFSEnforcedWriteBoundary` also skips under the same conditions
+as `TestServeQualityEnforcedWriteBoundary`. The other LFS tests speak the
+protocol directly and need no client.
+
 ## Large files with Git LFS
-<!-- section owned by WP14 -->
+
+A hosted repository can store Git LFS objects next to its Git history. Clients
+transfer them over the same SSH login and forced command as `git fetch` and
+`git push`, using the `git-lfs-transfer` protocol, version 1, from the Git LFS
+[SSH adapter proposal](https://github.com/git-lfs/git-lfs/blob/main/docs/proposals/ssh_adapter.md).
+The server opens no HTTP port, and LFS sessions check the key and the
+repository name exactly as Git sessions do.
+
+### What a client needs
+
+Each participant needs Git LFS 3.0 or later. Since 3.0, Git LFS tries
+`git-lfs-transfer` over SSH first for an SSH remote
+([Git LFS changelog, 3.0.0](https://github.com/git-lfs/git-lfs/blob/main/CHANGELOG.md#300-24-sep-2021)).
+The client behavior this section describes is that of Git LFS 3.7.1, the
+version the tests ran against. A clone of a hosted repository uses LFS the
+usual way:
+
+```sh
+git clone hn@server.example:demo.git
+cd demo
+git lfs install --local
+git lfs track '*.bin'
+git add .gitattributes model.bin
+git commit -m 'Add the model'
+git push origin HEAD:refs/heads/feature/model
+```
+
+Git LFS starts its own SSH connection with `git-lfs-transfer 'demo.git' upload`
+or `download`. By default it asks OpenSSH to multiplex its connections. When
+that causes problems, for example with a wrapper around `ssh` that does not
+support multiplexing, turn it off in the clone:
+
+```sh
+git config lfs.ssh.automultiplex false
+```
+
+Without multiplexing, Git LFS transfers one object at a time over one
+connection
+([`tq/manifest.go`](https://github.com/git-lfs/git-lfs/blob/v3.7.1/tq/manifest.go)).
+A second participant who clones before configuring LFS receives pointer files;
+`git lfs install --local` followed by `git lfs pull` downloads the content.
+
+### What the server stores
+
+Each repository's objects live below `state/repos/NAME/lfs/`, which the first
+LFS session creates with mode 0700:
+
+- `lfs/incoming/` holds uploads in progress, one file per upload with a random
+  name and mode 0600.
+- `lfs/objects/OID[0:2]/OID[2:4]/OID` holds each stored object with mode 0600.
+  The object ID is the SHA-256 of the content, as 64 lowercase hexadecimal
+  digits.
+
+An upload streams into `lfs/incoming/`. After the last byte, the server checks
+that the byte count equals the size the client declared and that the SHA-256
+of the content equals the object ID. Only then, and only after the quota check
+described below, does it rename the file into `lfs/objects/` and `fsync` the
+file and its directories. A download can therefore only ever return verified
+content. A stored object is never replaced: uploading an object that is
+already stored succeeds and discards the second copy.
+
+When the content does not match, the server removes the staged file and
+answers status 422 with an `lfs-object-mismatch` rejection line naming the
+object ID, which the client shows as the reason for the failed upload:
+
+<!-- example: lfs-object-mismatch -->
+```text
+hn-serve/1 reject ref=- actor=4f1c9a6d0d2b7e3a8c5f6e1b9d0a7c3e2f4b6d8a0c1e3f5a7b9d1c3e5f7a9b1c code=lfs-object-mismatch ids=6a1e5e2f0c9d4b3a8f7e6d5c4b3a2f1e0d9c8b7a6f5e4d3c2b1a0f9e8d7c6b5a next="retry the upload"
+```
+
+### The LFS quota
+
+Every repository has an LFS quota in bytes, set with `--lfs-quota` on
+`hn serve repo create` or `hn serve repo set` and 1073741824 bytes (1 GiB) by
+default. Stored bytes are the sum of the object sizes in `lfs/objects/`, which
+`hn serve repo show NAME` prints as `lfs-stored:`. Uploads in progress never
+count. The quota is inclusive: with a quota of 1010 bytes and 1000 bytes
+stored, a 10-byte object is accepted and an 11-byte object is refused.
+
+The server checks the quota three times for each upload, so an object that
+would exceed it never becomes downloadable:
+
+1. When the client asks which objects to upload, the server adds the declared
+   sizes of every requested object that is not stored yet. If the total would
+   exceed the quota, it refuses the whole request with status 507.
+2. Before it reads an object's data, it checks the declared size the same way,
+   and on refusal reads and discards the data.
+3. After verifying the content, it takes the repository's `lfs.lock`, counts
+   the stored bytes again and renames the object into place only if it still
+   fits. Two uploads that each fit alone cannot exceed the quota together.
+
+LFS sessions never take the repository lock that pushes hold. They take
+`lfs.lock` only for that last step, so a long upload does not hold up other
+uploads or any push. A refusal
+carries an `lfs-quota` rejection line with `budget=lfs-quota`, the quota as
+`limit` and, as `measured`, the stored bytes the upload would have produced.
+Git LFS 3.7.1 stops the push before any ref moves, and `git push` exits with
+status 1:
+
+<!-- example: lfs-quota -->
+```text
+LFS: batch response: status 507 from server (hn-serve/1 reject ref=- actor=4f1c9a6d0d2b7e3a8c5f6e1b9d0a7c3e2f4b6d8a0c1e3f5a7b9d1c3e5f7a9b1c code=lfs-quota budget=lfs-quota limit=100 measured=150 next="ask the administrator to raise the quota")
+error: failed to push some refs to 'ssh://server.example/demo.git'
+```
+
+To accept the upload, the administrator raises the quota and the participant
+pushes again:
+
+```sh
+sudo -u hn-serve hn serve repo set demo --lfs-quota 2147483648
+```
+
+### Interrupted uploads
+
+An upload that stops before its last byte never reaches `lfs/objects/`, so it
+is never downloadable and never counted. When the connection closes, the
+session removes the staged file itself. When the session is killed outright,
+the file stays in `lfs/incoming/`; at the start of every LFS session for the
+repository, the server removes staged files older than one hour. Younger files
+stay because they may belong to an upload that is still running.
+
+### Locking and requests the server does not offer
+
+The server does not implement file locking. It never advertises the `locking`
+capability, and it answers `lock`, `unlock` and `list-lock` with status 501 and
+the message `locking is unsupported by hn serve`. Git LFS 3.7.1 asks for the
+lock list before each push anyway; after the 501 answer it records
+`lfs.<url>.locksverify false` in the clone's configuration and carries on.
+`git lfs lock FILE` and `git lfs locks` exit with status 2 and show the
+server's message.
+
+`git-lfs-authenticate`, which older clients use to obtain credentials for an
+HTTPS LFS endpoint, is refused with `unsupported-command`, as described in
+[Requests the server accepts](#requests-the-server-accepts). There is no HTTPS
+LFS endpoint.
+
+### Protocol answers
+
+Each request in an LFS session gets one of these statuses. Statuses 400, 404,
+422, 501, 503 and 507 carry one message line, which the Git LFS client shows.
+
+| Status | When |
+|----|----|
+| 200 | The request succeeded |
+| 400 | An unsupported protocol version, `hash-algo` other than `sha256`, an object ID that is not 64 lowercase hexadecimal digits, or a missing or malformed size. A malformed pkt-line, an unknown command, or `get-object` in an upload session or `put-object` and `verify-object` in a download session also end the session with exit status 1 |
+| 404 | `get-object` or `verify-object` for an object that is not stored, or stored with a different size |
+| 422 | Uploaded content does not match its object ID or declared size (`lfs-object-mismatch`) |
+| 501 | `lock`, `unlock` or `list-lock` |
+| 503 | `lfs.lock` stayed busy for 30 seconds; retry the upload |
+| 507 | The upload would exceed the quota (`lfs-quota`) |
+
+A pkt-line length header may not exceed 65519, the limit the proposal sets,
+and the server refuses a longer header before reading the packet.

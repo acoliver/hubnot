@@ -387,14 +387,13 @@ func lookupServeEnvironment(environment []string, name string) (string, bool) {
 }
 
 // serveLFSEnabled records whether the Git LFS transfer arm below serves
-// requests. WP14 sets it to true when it replaces serveLFSSession; the
-// refusal test in serve_session_test.go skips once it is true.
-const serveLFSEnabled = false
+// requests. It is true since WP14 replaced the refusal in serveLFSSession;
+// the refusal test in serve_session_test.go skips while it is true.
+const serveLFSEnabled = true
 
 // serveLFSSession is the Git LFS transfer arm of the session dispatch. It
-// runs only after the key and repository checks pass. LFS transfer is not
-// enabled yet, so every request is refused; WP14 replaces this function and
-// nothing else in the dispatch.
+// runs only after the key and repository checks pass and serves the
+// git-lfs-transfer protocol on the session's streams (serve_lfs.go).
 func serveLFSSession(session *serveSession, binding serveKeyBinding, request serveRequest) (int, error) {
-	return session.refuse(serveReasonUnsupportedCommand, binding.Actor, "Git LFS transfer is not enabled on this server.")
+	return runServeLFSSession(session.layout, binding, request.Repo, request.LFSOp, session.stdin, session.stdout)
 }

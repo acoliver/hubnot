@@ -342,6 +342,70 @@ every repair out of band.
 
 ### Git LFS storage
 
-This part applies only when LFS transfer is enabled for a hosted repository.
-The LFS work package describes upload verification, staged files and the
-quota here.
+Hosted repositories store Git LFS objects that mapped actors upload over
+`git-lfs-transfer`, as the guide describes in
+[Large files with Git LFS](serve-v0.md#large-files-with-git-lfs). LFS adds a
+second way for a mapped actor to write to the server account's disk, so it
+gets its own checks.
+
+**Same attribution and repository checks as Git.** An LFS session runs through
+the same forced command as a fetch or push. The key must be bound in the
+registry, the request must match the closed grammar, and the repository must
+be hosted before the first protocol byte is sent; otherwise the session is
+refused with an `hn-serve/1` line on stderr and nothing on stdout
+(`TestServeLFSSessionChecksKeyAndRepository`). The rejection lines an LFS session sends
+name the mapped actor from the registry. Every mapped actor may read and write
+the LFS objects of every hosted repository, as with Git refs.
+
+**Content addressing and verification before download.** An object's name is
+the SHA-256 of its content. The server accepts only 64 lowercase hexadecimal
+digits as an object ID, so an ID can never name a path outside
+`lfs/objects/`. An upload is written to `lfs/incoming/`, and the server
+compares its byte count with the declared size and its SHA-256 with the object
+ID before the file can be renamed into `lfs/objects/`. A mismatch removes the
+file and answers `lfs-object-mismatch` (`TestServeLFSObjectMismatch`). A
+download opens the stored file only after checking with `Lstat` that it is a
+regular file, and compares the opened file with that check, so a planted
+symbolic link is not followed. A stored object is never replaced, so an actor
+cannot overwrite an object that another actor uploaded.
+
+**Quota as the bound on storage.** Each repository's stored LFS bytes are
+bounded by its quota, 1 GiB unless the administrator sets another value. The
+server checks the quota before an upload starts and again under `lfs.lock`
+right before the rename, so concurrent uploads cannot exceed it together
+(`TestServeLFSQuotaBoundary`, `TestServeLFSQuotaRecheckedBeforeStoring`).
+Requests are bounded too: a pkt-line length header above 65519 is refused
+before the server reads the packet, and one request may carry at most 64
+arguments, 10,000 object lines and 4 MiB of text (`TestServeLFSFramingRefusals`,
+`TestServeLFSPacketReaderChecksLengthBeforeReading`).
+
+**Staging isolation.** Uploads in progress live only in `lfs/incoming/`, which
+no download reads and the quota never counts. An interrupted upload therefore
+never becomes downloadable. A session removes its staged file when the
+connection closes, and every LFS session removes staged files older than one
+hour, so a killed session leaves its file behind for at most that long plus
+the time until the next LFS session (`TestServeLFSInterruptedUploadNeverStored`).
+Renames and removals in `lfs/incoming/` happen under the exclusive layout lock,
+so a session validating the layout at the same moment never sees a file vanish
+between listing the directory and inspecting the file.
+
+**No locking.** The server never advertises the `locking` capability and
+answers every lock command with status 501, so no lock state exists for an
+actor to forge or abuse (`TestServeLFSLockingUnsupported`).
+
+**Writes stay inside the server state.** An LFS upload writes only below
+`state/repos/NAME/lfs/` and `state/repos/NAME/lfs.lock`, with modes 0700 and
+0600, and a download writes nothing. `TestServeLFSEnforcedWriteBoundary` runs
+the round trip inside the same bubblewrap boundary as the full acceptance run,
+and `TestServeLFSWrittenPathsAndModes` checks the paths and modes by snapshot.
+
+**Residual risk.** A mapped actor can fill a repository's LFS quota with
+arbitrary verified objects, after which uploads to that repository fail with
+`lfs-quota` until the administrator raises the quota or removes objects by
+hand. Objects that no ref points to any longer are not collected. Uploads in
+progress do not count against the quota while they are written: each staged
+file is capped at its declared size plus one byte, and that size must fit in
+the quota when the upload starts, but several concurrent uploads can together
+occupy more disk than the quota until they finish or are cleaned up. An actor
+can also keep a connection open while it sends object data slowly; this holds
+no lock, and connection limits belong to `sshd` and the host.
