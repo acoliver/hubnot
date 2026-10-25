@@ -100,6 +100,10 @@ Actor chain, proposal and memory refs (WP08) and protected branches (WP09) get f
 | `serve_push_test.go` | NEW. |
 | `docs/serve-v0.md` | CHANGE. "Push verdicts and ref classes" section only. |
 
+## Maintainer note: carried over from WP01
+
+WP01 left these for their first callers in this WP: `loadServeBranchOwners`, `saveServeBranchOwners` (the empty-save policy from the contract) and `appendServePushLog` with its entry types. Their schemas and validators already exist in `serve_state.go`; add the writers there, atomically and under the repository lock, with tests including two ordered appends.
+
 ## Subtasks
 
 ### Subtask T041: Hook entry checks
