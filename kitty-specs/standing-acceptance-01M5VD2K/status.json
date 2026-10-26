@@ -60,6 +60,9 @@
       "last_event_id": "01M5VYW37J5T217DSTZGM1CSJ7",
       "last_transition_at": "2026-10-26T11:17:32.018540+00:00",
       "model": "__resolved_model_absent__",
+      "notes": [
+        "WP03 implemented in cef2dec (event.go, standing_event_test.go). Event.Rule is tagged json:\"-\"; verifyEvent keeps every check and sets Rule only on proposal.merged via parseMergeRuleClaim (canonical claim only; every other shape is no claim, never an error); encodeAndSign appends rule last and refuses rule on other kinds ('rule is only valid on proposal.merged') or an invalid name ('proposal merge rule must be a valid rule name'). L06 still refused with 'invalid resource event JSON: unknown field \"rule\"'. The claim walk is a depth-counting byte walk (decoder form ~15% of verifyEvent; byte walk ~1%), checked against the decoder reference by a differential test and a fuzz target. Wiring: parseMergeRuleClaim runs on the live verifyEvent path; Event.Rule is consumed by WP05/WP07 (admitMergeFact) and written by WP11 (appendRuleMergeEvent). No admission surface or document changed. Lane setup: merged planning commit b201105 into lane-c, kitty-specs conflict resolved from feat/standing-acceptance (c22a63c); planning-artifact cleanup f5d6059 per move-task. Gate: gofmt -l clean; go vet ./... and go build ./... pass; go test -race -count=1 -timeout 60m -skip TestMemoryIndexTenThousandRecordsPerformanceAndRecovery ./... pass (hubnot 1087s); go test -count=1 -run '^TestMemoryIndexTenThousandRecordsPerformanceAndRecovery$' . pass (17.3s)."
+      ],
       "provider": "__resolved_provider_absent__",
       "role": "implementer",
       "shell_pid": 85418,
