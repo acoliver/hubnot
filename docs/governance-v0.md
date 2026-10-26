@@ -395,6 +395,53 @@ preview establishes candidate/target eligibility; execution additionally checks
 the selected private signing identity. A preview result never authorizes a later
 execution without reevaluation.
 
+After the executing actors, the preview prints three lines about the rule's
+acceptance. `Acceptance:` names the acceptance mode and says whether the
+proposal needs maintainer acceptance. `Counted reviewers:` lists the full
+fingerprints of the reviewers in the rule's `reviewers` field, or reads `all
+trusted reviewers` when the rule has no such field. `Counted approvals:` gives
+the current approvals the rule counts and the `proposals.requiredApprovals`
+threshold, as `N/M`. Under acceptance mode `rule` it adds `(author approvals do
+not count)`, because the candidate author's approval never counts there.
+
+Under acceptance mode `rule`, two blockers change. The readiness blocker
+`current approval, protected check or CI evidence is not ready` is replaced by
+the rule's own thresholds, `rule approval threshold is unmet: N of M counted
+approvals` and `pipeline "P" has N of M passing trusted results`, and the
+blocker `current required maintainer acceptances are missing` is dropped. A
+pipeline result counts only when it answers a run request from a maintainer or
+a listed requester of that pipeline. Every other blocker keeps its text and
+position. A current change request from any trusted reviewer, counted or not,
+a current trusted pipeline failure and a current maintainer rejection still
+block the rule. Under acceptance mode `maintainers` the blockers stay as they
+were, and a rule with `reviewers` also reports the rule approval threshold.
+
+The preview below is for a candidate by the rule's author that changes
+`src/feature.txt` and `tests/feature.txt` under the standing rule `ordinary`,
+with one approval from the counted reviewer, one passing result of pipeline
+`test` and no maintainer decision. It writes no event and no ref.
+
+<!-- example: standing-preview -->
+```text
+$ hn automerge <candidate-id> --rule ordinary
+Proposal: <candidate-id>
+Base: <base-commit>
+Head: <head-commit>
+Policy: <policy-digest>
+Target: main at <base-commit>
+Rule: ordinary
+Permitted executing actors:
+  <executor-actor>
+Acceptance: rule (standing acceptance; no maintainer acceptance required)
+Counted reviewers:
+  <reviewer-actor>
+Counted approvals: 1/1 (author approvals do not count)
+Changed paths:
+  "src/feature.txt"
+  "tests/feature.txt"
+Eligible: explicit --execute is required to merge locally.
+```
+
 Execution requires current ordinary and designated approvals, required passing
 pipeline results, and the existing maintainer acceptances. It also refuses current
 trusted change requests or pipeline failures, maintainer rejections, superseded

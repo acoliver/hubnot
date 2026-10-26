@@ -31,6 +31,7 @@ type automergeInspection struct {
 	Proposal          *StoredEvent
 	Evaluation        *ProposalEvaluation
 	Rule              *AutomergeRule
+	RuleAcceptance    *ruleAcceptance // set whenever Rule is
 	Branch, Current   string
 	Changed, Blockers []string
 }
@@ -230,6 +231,11 @@ func inspectAutomerge(query, ruleName string) (*automergeInspection, error) {
 			result.Blockers = append(result.Blockers, fmt.Sprintf("automerge rule %q does not exist in the signed base policy", ruleName))
 		}
 	}
+	standing := false
+	if result.Rule != nil {
+		result.RuleAcceptance = evaluateRuleAcceptance(automergeRuleInputs(proposal, evaluation, ruleName, changed, events))
+		standing = result.Rule.Acceptance.Standing()
+	}
 	if err := requireLineageTerminalEligibility("automerge", proposal.ID, evaluation.Lineage); err != nil {
 		result.Blockers = append(result.Blockers, err.Error())
 	}
@@ -239,11 +245,25 @@ func inspectAutomerge(query, ruleName string) (*automergeInspection, error) {
 	if !evaluation.CodeMatches {
 		result.Blockers = append(result.Blockers, "proposal code ref does not match its signed head")
 	}
-	if !evaluation.Ready {
+	// Under acceptance mode rule the rule's own thresholds replace readiness
+	// and no maintainer acceptance is required. The evaluator's author, path
+	// and rule-missing texts are not copied: the checks below report them.
+	if standing {
+		for _, unmet := range result.RuleAcceptance.UnmetOf(ruleUnmetApprovals, ruleUnmetPipeline) {
+			result.Blockers = append(result.Blockers, unmet.Text)
+		}
+	} else if !evaluation.Ready {
 		result.Blockers = append(result.Blockers, "current approval, protected check or CI evidence is not ready")
 	}
-	if !evaluation.Accepted {
+	if !standing && !evaluation.Accepted {
 		result.Blockers = append(result.Blockers, "current required maintainer acceptances are missing")
+	}
+	// A maintainers-mode rule with reviewers also needs its own approval
+	// threshold (US5-4); without reviewers its blockers are unchanged.
+	if result.Rule != nil && !standing && !result.Rule.Reviewers.IsZero() {
+		for _, unmet := range result.RuleAcceptance.UnmetOf(ruleUnmetApprovals) {
+			result.Blockers = append(result.Blockers, unmet.Text)
+		}
 	}
 	if evaluation.Rejected {
 		result.Blockers = append(result.Blockers, "proposal has a current maintainer rejection")
@@ -311,6 +331,29 @@ func inspectAutomerge(query, ruleName string) (*automergeInspection, error) {
 	return result, nil
 }
 
+// automergeRuleInputs gathers the rule derivation's inputs from what the
+// inspection already holds. The target branch is left empty because the
+// inspection reports a checked-out branch mismatch itself. A pipeline whose
+// definition does not load at the head is left out, so none of its results
+// count; evaluateProposal already refuses that case when the code matches.
+func automergeRuleInputs(proposal *StoredEvent, evaluation *ProposalEvaluation, ruleName string, changed []string, events []StoredEvent) ruleInputs {
+	definitions := make(map[string]string, len(evaluation.Policy.Pipelines))
+	for name := range evaluation.Policy.Pipelines {
+		if _, _, definition, err := loadPipeline(proposal.Event.Head, name); err == nil {
+			definitions[name] = definition
+		}
+	}
+	return ruleInputs{
+		Policy:              evaluation.Policy,
+		PolicyDigest:        evaluation.PolicyDigest,
+		Proposal:            *proposal,
+		RuleName:            ruleName,
+		Changed:             changed,
+		PipelineDefinitions: definitions,
+		Events:              events,
+	}
+}
+
 // Unlike protection matching, a descendant permission never allows modifying an
 // ancestor; a directory permission allows only paths below that directory.
 func automergePathAllowed(allowed []string, changed string) bool {
@@ -342,6 +385,9 @@ func printAutomergeInspection(i *automergeInspection) {
 		for _, actor := range actors {
 			fmt.Printf("  %s\n", actor)
 		}
+		if a := i.RuleAcceptance; a != nil {
+			printAutomergeRuleAcceptance(a)
+		}
 	}
 	fmt.Println("Changed paths:")
 	for _, p := range i.Changed {
@@ -355,6 +401,29 @@ func printAutomergeInspection(i *automergeInspection) {
 			fmt.Printf("  %s\n", safeText(b))
 		}
 	}
+}
+
+// printAutomergeRuleAcceptance prints the acceptance mode, the counted
+// reviewers and the counted approvals of the rule (FR-008).
+func printAutomergeRuleAcceptance(a *ruleAcceptance) {
+	if a.Standing {
+		fmt.Println("Acceptance: rule (standing acceptance; no maintainer acceptance required)")
+	} else {
+		fmt.Println("Acceptance: maintainers (maintainer acceptance required)")
+	}
+	if a.HasRuleReviewers {
+		fmt.Println("Counted reviewers:")
+		for _, reviewer := range a.CountedReviewers {
+			fmt.Printf("  %s\n", safeText(reviewer))
+		}
+	} else {
+		fmt.Println("Counted reviewers: all trusted reviewers")
+	}
+	fmt.Printf("Counted approvals: %d/%d", len(a.Approvals), a.RequiredApprovals)
+	if a.Standing {
+		fmt.Print(" (author approvals do not count)")
+	}
+	fmt.Println()
 }
 
 // A prepared expected-old transaction locks the actual target and HEAD before
