@@ -1,7 +1,7 @@
 {
-  "event_count": 35,
-  "last_event_id": "01M5WR013QZ83NKE8FG33F547W",
-  "materialized_at": "2026-10-26T18:36:35.319252+00:00",
+  "event_count": 36,
+  "last_event_id": "01M5WR1YSMF8527P905H5Q33PY",
+  "materialized_at": "2026-10-26T18:37:38.484469+00:00",
   "mission_number": "",
   "mission_slug": "standing-acceptance-01M5VD2K",
   "mission_type": "",
@@ -11,9 +11,9 @@
     "canceled": 0,
     "claimed": 0,
     "done": 0,
-    "for_review": 2,
+    "for_review": 1,
     "in_progress": 0,
-    "in_review": 0,
+    "in_review": 1,
     "planned": 16
   },
   "work_packages": {
@@ -75,14 +75,14 @@
       }
     },
     "WP03": {
-      "actor": "user",
-      "agent": null,
+      "actor": "llxprt",
+      "agent": "llxprt",
       "agent_profile": "__resolved_profile_absent__",
       "agent_profile_version": "__resolved_profile_version_absent__",
       "force_count": 1,
-      "lane": "for_review",
-      "last_event_id": "01M5WR013QZ83NKE8FG33F547W",
-      "last_transition_at": "2026-10-26T18:36:35.319252+00:00",
+      "lane": "in_review",
+      "last_event_id": "01M5WR1YSMF8527P905H5Q33PY",
+      "last_transition_at": "2026-10-26T18:37:38.484469+00:00",
       "model": "__resolved_model_absent__",
       "notes": [
         "WP03 implemented in cef2dec (event.go, standing_event_test.go). Event.Rule is tagged json:\"-\"; verifyEvent keeps every check and sets Rule only on proposal.merged via parseMergeRuleClaim (canonical claim only; every other shape is no claim, never an error); encodeAndSign appends rule last and refuses rule on other kinds ('rule is only valid on proposal.merged') or an invalid name ('proposal merge rule must be a valid rule name'). L06 still refused with 'invalid resource event JSON: unknown field \"rule\"'. The claim walk is a depth-counting byte walk (decoder form ~15% of verifyEvent; byte walk ~1%), checked against the decoder reference by a differential test and a fuzz target. Wiring: parseMergeRuleClaim runs on the live verifyEvent path; Event.Rule is consumed by WP05/WP07 (admitMergeFact) and written by WP11 (appendRuleMergeEvent). No admission surface or document changed. Lane setup: merged planning commit b201105 into lane-c, kitty-specs conflict resolved from feat/standing-acceptance (c22a63c); planning-artifact cleanup f5d6059 per move-task. Gate: gofmt -l clean; go vet ./... and go build ./... pass; go test -race -count=1 -timeout 60m -skip TestMemoryIndexTenThousandRecordsPerformanceAndRecovery ./... pass (hubnot 1087s); go test -count=1 -run '^TestMemoryIndexTenThousandRecordsPerformanceAndRecovery$' . pass (17.3s).",
@@ -97,9 +97,9 @@
         "reviewer": "user",
         "verdict": "changes_requested"
       },
-      "role": "implementer",
-      "shell_pid": 4175775,
-      "shell_pid_created_at": "1793032802.28",
+      "role": "reviewer",
+      "shell_pid": 1849958,
+      "shell_pid_created_at": "1793039856.21",
       "subtasks": {
         "T011": "done",
         "T012": "done",
