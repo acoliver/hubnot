@@ -139,3 +139,30 @@ func TestServeAutomergeFailsClosedOnUnreachableUpstream(t *testing.T) {
 		t.Fatalf("refused automerge recorded merge facts %+v", facts)
 	}
 }
+
+// A saved selection that leaves out a trusted actor would hide that actor's
+// veto from the inspection, so automerge --remote refuses it.
+func TestServeAutomergeRequiresTrustedSelection(t *testing.T) {
+	g := automergeServeFixture(t, serveGovernedOptions{RunnerReviews: true})
+	head := g.Commit(g.Base, map[string]string{"auto/a.txt": "a\n"})
+	p := g.ReadyProposal(g.Base, head)
+	g.hn(g.Maintainer, "replication", "select", "origin", "--actor", g.actors[g.Maintainer], "--proposal", p.Candidate.ID)
+	g.act(g.Runner, "review.submit", "review", p.Candidate.ID, "--request-changes", "--body", "Not yet.")
+
+	output, status := g.automerge(p.Candidate.ID, "--remote", "origin")
+	if status == 0 || !strings.Contains(output, "--all-trusted") {
+		t.Fatalf("automerge with a narrow selection exited %d:\n%s", status, output)
+	}
+	if tip := g.ServerTip("main"); tip != g.Base {
+		t.Fatalf("hosted main = %s, want %s", tip, g.Base)
+	}
+
+	g.hn(g.Maintainer, "replication", "select", "origin", "--all-trusted")
+	output, status = g.automerge(p.Candidate.ID, "--remote", "origin")
+	if status == 0 || !strings.Contains(output, "proposal has a current trusted change request") {
+		t.Fatalf("automerge after --all-trusted exited %d:\n%s", status, output)
+	}
+	if facts := g.MergeFacts(g.Maintainer, p.Candidate.ID); len(facts) != 0 {
+		t.Fatalf("refused automerge recorded merge facts %+v", facts)
+	}
+}

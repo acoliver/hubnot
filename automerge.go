@@ -637,6 +637,17 @@ func automergeRemote(first *automergeInspection, rule, remote, actor string) err
 	if identified, reason := serveRemoteIdentifies(remote); !identified {
 		return fmt.Errorf("remote %s is not an hn serve remote (%s)", remote, reason)
 	}
+	// The import must cover every actor whose evidence can veto the rule, or
+	// a trusted change request or failure on an unselected chain stays
+	// invisible to the inspection below.
+	selection, _, err := loadReplicationSelection(remote)
+	if err != nil {
+		return err
+	}
+	if missing := automergeUnselectedActors(selection, first.Evaluation.Policy); len(missing) > 0 {
+		return fmt.Errorf("the replication selection for %s omits %d trusted actor(s), whose vetoes automerge must see; run hn replication select %s --all-trusted",
+			remote, len(missing), remote)
+	}
 	if err := cmdSync([]string{remote}); err != nil {
 		return fmt.Errorf("import hosted facts from %s: %w", remote, err)
 	}
@@ -664,4 +675,28 @@ func automergeRemote(first *automergeInspection, rule, remote, actor string) err
 			inspection.Rule.TargetBranch, shortOID(inspection.Current), remote, shortOID(hosted))
 	}
 	return mergeRemoteBound(inspection.Proposal.ID, remote, branchRef, serveAdvanceBinding{ExpectedActor: actor, ExpectedTip: hosted})
+}
+
+// automergeUnselectedActors lists the policy's maintainers, trusted
+// reviewers, protected-check reviewers and trusted runners that a saved
+// replication selection does not import.
+func automergeUnselectedActors(selection ReplicationSelection, policy PolicyDocument) []string {
+	if selection.All || selection.AllTrusted {
+		return nil
+	}
+	needed := append([]string{}, policy.Maintainers...)
+	needed = append(needed, policy.Proposals.TrustedReviewers...)
+	if policy.ProtectedChecks != nil {
+		needed = append(needed, policy.ProtectedChecks.TrustedReviewers...)
+	}
+	for _, pipeline := range policy.Pipelines {
+		needed = append(needed, pipeline.TrustedRunners...)
+	}
+	var missing []string
+	for _, actor := range sortedUniqueStrings(needed...) {
+		if !stringInSlice(actor, selection.Actors) {
+			missing = append(missing, actor)
+		}
+	}
+	return missing
 }
