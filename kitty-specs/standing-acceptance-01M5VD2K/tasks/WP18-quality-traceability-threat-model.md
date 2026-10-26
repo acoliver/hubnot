@@ -90,7 +90,7 @@ Close the mission with measured and checked evidence:
 | File | Change |
 |----|----|
 | `standing_quality_test.go` | NEW. `TestStandingQuality...`. |
-| `docs/threat-model.md` | CHANGE. Two sections named in T088. |
+| `docs/threat-model.md` | CHANGE. Two sections named in T088. WP17 already updated "Compatibility and recovery"; leave it. |
 | `docs/governance-v0.md` | CHANGE. New "Standing acceptance traceability" section; consistency fixes only elsewhere. |
 | `docs/protocol-v0.md` | CHANGE. The `standing-rule-merge-fact` example; consistency fixes only elsewhere. |
 
@@ -112,7 +112,7 @@ Close the mission with measured and checked evidence:
 
 **Steps**:
 
-1. In `docs/protocol-v0.md`, "Runs and governance events", after WP03's rule merge fact paragraph, add `<!-- example: standing-rule-merge-fact -->` followed by the JSON of [contracts/rule-merge-fact.md](../contracts/rule-merge-fact.md) "Wire shape" with placeholder values.
+1. In `docs/protocol-v0.md`, "Runs and governance events", after WP07's rule merge fact paragraph, add `<!-- example: standing-rule-merge-fact -->` followed by the JSON of [contracts/rule-merge-fact.md](../contracts/rule-merge-fact.md) "Wire shape" with placeholder values.
 2. `TestStandingQualityDocumentedRuleMergeFact` (its source contains the exact marker string): run the local US1 flow, read E's latest fact with `git show refs/hn/actors/<E>:event.json`, and assert its key set equals the documented key set, `rule` equals `ordinary`, `policy` is the base digest, `evidence` has two sorted full IDs (the approval and the result), and `commit` is the merge commit.
 
 ### Subtask T087: "Standing acceptance traceability" section and its checking test

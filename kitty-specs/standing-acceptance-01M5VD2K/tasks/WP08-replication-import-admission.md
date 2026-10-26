@@ -26,11 +26,11 @@ history:
   - action: Prompt generated via /spec-kitty.tasks
 agent_profile: implementer-ivan
 authoritative_surface: quarantine.go
-create_intent: []
+create_intent:
+- standing_fact_test.go
 execution_mode: code_change
 owned_files:
 - quarantine.go
-- protected_checks.go
 - standing_fact_test.go
 role: implementer
 tags: []
@@ -66,7 +66,7 @@ A chain with an invalid rule merge fact is refused as a whole, the refusal names
 
 - Read spec US3-1 and US3-5, FR-012 to FR-014, C-005; [contracts/rule-merge-fact.md](../contracts/rule-merge-fact.md) "Inputs and object access per surface" (replication and hn serve rows) and fixture rows F21 and F22; [research.md](../research.md) findings 3, 4 and 12 and decision `01M5VF02KFTE4BX3G7THDHRGCV`.
 - Start with `spec-kitty agent action implement WP08 --agent <name> --mission standing-acceptance-01M5VD2K`.
-- Existing code in `quarantine.go`: `replicationEventDependencyWithOptions` (lines 1125 to 1236; the `proposal.decision`/`proposal.merged` case at 1207 to 1224), `replicationDependencyOptions`, `replicationCommitPresent`, `loadReplicationPolicyAt`, `replicationPipelineDigestAt`, `validateReplicationMergeAt` (1346 to 1367). In `protected_checks.go`: `validateProtectedDecisionAt` (the one-complete-store lookup at its top). In `serve_verdict_facts.go`: `checkServeActorDependencies` (read only).
+- Existing code in `quarantine.go`: `replicationEventDependencyWithOptions` (lines 1125 to 1236; the `proposal.decision`/`proposal.merged` case at 1207 to 1224), `replicationDependencyOptions`, `replicationCommitPresent`, `loadReplicationPolicyAt`, `replicationPipelineDigestAt`, `validateReplicationMergeAt` (1346 to 1367). From WP01: `changedPathsInOneStore` (`protected_checks.go`), the one-complete-store lookup extracted from `validateProtectedDecisionAt`; read it, do not edit that file. In `serve_verdict_facts.go`: `checkServeActorDependencies` (read only).
 - From WP05: `ruleObjectAccess`, `newRuleValidationMemo`, `validateRuleMergeFactWith`. From WP07: the `standing_fact_test.go` helpers. From WP06: the harness and defect table.
 
 ## Branch Strategy
@@ -81,7 +81,6 @@ A chain with an invalid rule merge fact is refused as a whole, the refusal names
 
 | File | Change |
 |----|----|
-| `protected_checks.go` | CHANGE. Extract `changedPathsInOneStore` from `validateProtectedDecisionAt` only. WP01's code in this file is not touched. |
 | `quarantine.go` | CHANGE. Rule-fact dependency checks and the rule branch of `validateReplicationMergeAt`; a memo option. |
 | `standing_fact_test.go` | CHANGE. Add `TestStandingFactImport...`. |
 
@@ -89,21 +88,16 @@ A chain with an invalid rule merge fact is refused as a whole, the refusal names
 
 ## Subtasks
 
-### Subtask T035: Extract `changedPathsInOneStore`
+### Subtask T035: Replication object access for rule facts
 
-**Steps**:
+**Steps** in `quarantine.go`:
 
-1. Move the lookup at the top of `validateProtectedDecisionAt` into:
-
-   ```go
-   // changedPathsInOneStore computes base..head changed paths from the
-   // quarantine, else from the accepted store. It never pairs a commit from
-   // one store with a commit from the other, and never treats a missing side
-   // as an empty or partial diff.
-   func changedPathsInOneStore(gitDir, acceptedGitDir, base, head string) ([]string, error)
-   ```
-
-2. `validateProtectedDecisionAt` calls it and wraps the error exactly as before (`protected checks: %w`). Behavior and messages are unchanged; the existing protected-check tests prove it.
+1. Add `func replicationRuleObjectAccess(gitDir, acceptedGitDir string) ruleObjectAccess` with:
+   - `PolicyAt`: `loadReplicationPolicyAt(gitDir, acceptedGitDir, commit)`;
+   - `ChangedPaths`: `changedPathsInOneStore(gitDir, acceptedGitDir, base, head)` (WP01);
+   - `PipelineDigest`: `replicationPipelineDigestAt(gitDir, acceptedGitDir, head, name)`.
+2. Add `RuleMemo *ruleValidationMemo` to `replicationDependencyOptions`, and a helper `func (o replicationDependencyOptions) ruleMemo(gitDir, acceptedGitDir string) *ruleValidationMemo` that returns the option's memo or a fresh one built from `replicationRuleObjectAccess`.
+3. Unit test (`TestStandingFactImportObjectAccess`): with two temporary repositories, a rule fact whose base and head live only in the accepted store gets its changed paths from there; one whose base is only in the quarantine and head only in the accepted store gets an error, never a mixed or empty list.
 
 ### Subtask T036: Missing base or head commit as a replication dependency
 
@@ -117,11 +111,7 @@ A chain with an invalid rule merge fact is refused as a whole, the refusal names
 
 **Steps**:
 
-1. Add `RuleMemo *ruleValidationMemo` to `replicationDependencyOptions`. The replication import loop that validates a batch creates one memo per import pass with:
-   - `PolicyAt`: `loadReplicationPolicyAt(gitDir, acceptedGitDir, commit)`;
-   - `ChangedPaths`: `changedPathsInOneStore(gitDir, acceptedGitDir, base, head)`;
-   - `PipelineDigest`: `replicationPipelineDigestAt(gitDir, acceptedGitDir, head, name)`.
-   Find the import loop that calls `replicationEventDependency` for the selected chains and pass the memo through `replicationEventDependencyWithOptions`. When the option is nil, create a memo for this call.
+1. The replication import loop that validates a batch creates one memo per import pass with `replicationRuleObjectAccess` (T035). Find the import loop that calls `replicationEventDependency` for the selected chains and pass the memo through `replicationEventDependencyWithOptions`. When the option is nil, `ruleMemo` creates a memo for this call.
 2. In `validateReplicationMergeAt` (or at its call site), when `merge.Event.Rule != ""`, call `validateRuleMergeFactWith(memo, merge, proposal, byID)` and return its error. The binding check `validateProposalMergeBinding` still runs first, as today.
 3. When `rule` is absent, the function body is unchanged.
 4. Make sure the import reports the error the way it reports an invalid acceptance merge fact today (the chain is refused and the message includes the error text). The `ruleFactError` text already carries the full fact ID and the check.
@@ -157,7 +147,7 @@ Black-box tests through real temporary bare remotes. Run `go test -race -run 'Te
 - [ ] **FR-014**: absent base or head is a missing dependency naming the commit; no empty change list is ever evaluated.
 - [ ] **NFR-001 (import surface)**: F01 to F22 refused, zero facts promoted from the defective chain.
 - [ ] **C-005**: every refusal leaves the verifier's refs unchanged apart from honest chains.
-- [ ] `changedPathsInOneStore` extraction leaves protected-check messages and tests unchanged.
+- [ ] `protected_checks.go` is not edited by this WP.
 
 ## Risks
 

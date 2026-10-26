@@ -24,10 +24,12 @@ history:
   - action: Prompt generated via /spec-kitty.tasks
 agent_profile: implementer-ivan
 authoritative_surface: standing_compat_test.go
-create_intent: []
+create_intent:
+- standing_compat_test.go
 execution_mode: code_change
 owned_files:
 - standing_compat_test.go
+- docs/threat-model.md
 role: implementer
 tags: []
 tracker_refs: []
@@ -59,7 +61,7 @@ Prove User Story 7 with executable tests (FR-022, NFR-004, C-003; decision `01M5
 
 - Read spec US7, FR-022, NFR-004; [research.md](../research.md) findings 1 and 2 and decision `01M5VF0QVPQ871M0DA8Q0SG5CX`.
 - Start with `spec-kitty agent action implement WP17 --agent <name> --mission standing-acceptance-01M5VD2K`.
-- From WP03: the existing `standing_compat_test.go` (parse and encoding tests); keep them. From WP06: the harness, which accepts a binary path per run if you add a variant; if it does not, run the older binary directly with `exec.Command` in the clone directories the harness created, using `operationalTestEnvironment`.
+- WP03's parse and encoding tests live in `standing_event_test.go`; this WP creates `standing_compat_test.go`. From WP06: the harness, which accepts a binary path per run if you add a variant; if it does not, run the older binary directly with `exec.Command` in the clone directories the harness created, using `operationalTestEnvironment`.
 - Older code facts: `parsePolicyBytes` uses `DisallowUnknownFields` (`policy.go` line 110); `verifyEvent` ignores unknown keys for non-resource events; `validateMergeEvent` needs `requiredAccepts` maintainer acceptance decisions and `validatePolicy` forces `requiredAccepts >= 1`.
 
 ## Branch Strategy
@@ -74,7 +76,8 @@ Prove User Story 7 with executable tests (FR-022, NFR-004, C-003; decision `01M5
 
 | File | Change |
 |----|----|
-| `standing_compat_test.go` | CHANGE. Add `TestStandingCompatOptOut...` and `TestStandingCompatOlderClient...`. Do not change WP03's tests. |
+| `standing_compat_test.go` | NEW. `TestStandingCompatOptOut...` and `TestStandingCompatOlderClient...`, helpers prefixed `standingCompat`. |
+| `docs/threat-model.md` | CHANGE. "Compatibility and recovery" section only. WP18 edits two other sections later. |
 
 ## Subtasks
 
@@ -117,6 +120,7 @@ Prove User Story 7 with executable tests (FR-022, NFR-004, C-003; decision `01M5
 1. **Realistic case**: after the US1 flow with the new binary (E executes `ordinary`, publishes), an older-client verifier clone runs `hn-older sync origin`: E's rule merge fact is not promoted and `hn-older proposal status <candidate>` does not report `merged`. The refusal may come from the base policy containing the new fields; assert refusal, not its wording.
 2. **Isolated case**: the base policy uses only fields the older client knows (a maintainers-mode rule), and the fact carries `rule` naming that rule and lists approvals and run results (sign it with the WP06 builder, once signed by a non-maintainer and once by a maintainer). The older client refuses with `merge ... is not authorized by exact base policy` (non-maintainer) and `merge ... lacks required acceptance evidence` (maintainer). The new client refuses both with `rule-signer` or `rule-acceptance`.
 3. Confirm the older client did not fail at parse time for the isolated case (its `verifyEvent` ignores the unknown key), so the evidence check is what refuses it.
+4. Document the observed behavior in `docs/threat-model.md`, "Compatibility and recovery": older executables reject a policy that contains `acceptance` or `reviewers` (including `"acceptance": "maintainers"`) and reject every rule merge fact, so a mixed team cannot mistake standing acceptance for maintainer acceptance; rolling back a binary does not remove published rule merge facts, which a newer client keeps judging against their own base policy. Plain sentences, no em dashes.
 
 ## Test Strategy
 
@@ -130,6 +134,7 @@ Black-box tests with two binaries. Run `go test -race -run 'TestStandingCompat' 
 - [ ] **US7-3**: the older client never admits a rule merge fact.
 - [ ] **C-003**: no pre-existing test file changed in the mission diff.
 - [ ] Skips are visible and name their reason.
+- [ ] "Compatibility and recovery" in `docs/threat-model.md` describes older-client behavior for the new fields and facts.
 
 ## Risks
 

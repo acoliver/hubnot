@@ -3,6 +3,7 @@ work_package_id: WP13
 title: hn-rule push option and rule reason codes
 dependencies:
 - WP03
+- WP07
 requirement_refs:
 - FR-016
 - FR-023
@@ -64,6 +65,7 @@ This WP changes no verdict. WP14 uses `options.Rule` in the protected verdict, a
 ## Context
 
 - Read the contract sections named above; plan "Complexity Tracking"; [research.md](../research.md) findings 13, 15 and 16.
+- WP07 is a dependency only because both WPs edit `docs/protocol-v0.md` (different sections); it orders the edits. Technically this WP needs only WP03.
 - Start with `spec-kitty agent action implement WP13 --agent <name> --mission standing-acceptance-01M5VD2K`.
 - Existing code: `servePushOptionAdvance`, `servePushOptionExpected` (`serve_wire.go`); `servePushOptionLimit`, `servePushOptionSentence`, `parseServePushOptions` (`serve_hooks.go` lines 48 to 51 and 664 to 710); `servePushOptions` (`serve_verdict.go` line 69); `serveReason`, `serveReasonCatalogue`, `serveReasonLookup`, `serveReasonKnown`, `serveReasonDefaultNext` (`serve_reasons.go`); `validPipelineName` (`ci.go`).
 - Frozen tests that must pass unchanged: `TestServeReasonsCatalogueOrderAndLookups` (pins `serveReasonCatalogue` with `reflect.DeepEqual`), `TestServeReasonsDocsTableMatchesCatalogue` (compares the **first** reason table under "hn serve wire surface" in `docs/protocol-v0.md` with `serveReasonCatalogue`; its parser stops at the first non-table line), `TestServeReasonsEveryCodeRoundTrips`, `TestServePushOptions` (compares refusals with `servePushOptionSentence`; its three-option case includes an unknown option and stays refused).

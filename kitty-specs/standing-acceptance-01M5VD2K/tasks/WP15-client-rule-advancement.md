@@ -31,7 +31,8 @@ history:
   - action: Prompt generated via /spec-kitty.tasks
 agent_profile: implementer-ivan
 authoritative_surface: serve_client.go
-create_intent: []
+create_intent:
+- standing_serve_test.go
 execution_mode: code_change
 owned_files:
 - serve_client.go

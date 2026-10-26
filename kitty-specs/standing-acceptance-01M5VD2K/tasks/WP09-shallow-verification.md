@@ -23,7 +23,8 @@ history:
   - action: Prompt generated via /spec-kitty.tasks
 agent_profile: implementer-ivan
 authoritative_surface: shallow.go
-create_intent: []
+create_intent:
+- standing_fact_test.go
 execution_mode: code_change
 owned_files:
 - shallow.go

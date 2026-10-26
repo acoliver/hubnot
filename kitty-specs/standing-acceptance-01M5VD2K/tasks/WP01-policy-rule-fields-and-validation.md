@@ -10,7 +10,6 @@ requirement_refs:
 - FR-004
 - FR-005
 - FR-022
-- FR-023
 planning_base_branch: feat/standing-acceptance
 merge_target_branch: feat/standing-acceptance
 branch_strategy: Planning artifacts for this mission were generated on feat/standing-acceptance. During /spec-kitty.implement this WP may branch from a dependency-specific base, but completed changes must merge back into feat/standing-acceptance unless the human explicitly redirects the landing branch.
@@ -30,12 +29,11 @@ history:
 agent_profile: implementer-ivan
 authoritative_surface: protected_checks.go
 create_intent:
-- standing_policy_test.go
+- standing_policy_fields_test.go
 execution_mode: code_change
 owned_files:
 - protected_checks.go
-- standing_policy_test.go
-- docs/governance-v0.md
+- standing_policy_fields_test.go
 role: implementer
 tags: []
 tracker_refs: []
@@ -64,7 +62,9 @@ Give each automerge rule two optional fields and validate them exactly as [contr
 
 Under acceptance mode `rule`, executing actors need not be maintainers (FR-002); `proposals.requiredApprovals` must be at least 1 (FR-004); and no path selector may cover `.hn` or overlap a `protectedChecks.paths` selector (FR-003, C-007). A policy without the new fields parses, validates and encodes exactly as before (FR-022, policy part).
 
-This WP changes no runtime merge behavior. Later WPs read the fields.
+This WP also extracts `changedPathsInOneStore` from `validateProtectedDecisionAt` without changing behavior, so the replication rule check (WP08) can reuse it without editing this file again.
+
+This WP changes no runtime merge behavior. Later WPs read the fields. It owns no document: WP02 documents the fields together with their inspection output, right after this WP (tasks decision 12 keeps this WP's files disjoint from every other WP so execution lanes stay acyclic).
 
 ## Context
 
@@ -87,9 +87,8 @@ This WP changes no runtime merge behavior. Later WPs read the fields.
 
 | File | Change |
 |----|----|
-| `protected_checks.go` | CHANGE. New types and decoders, two fields on `AutomergeRule`, validation in `validateOptionalPolicy`, overlap helper. WP08 later extracts `changedPathsInOneStore` in this file; do not touch `validateProtectedDecisionAt`. |
-| `standing_policy_test.go` | NEW. Unit tests and black-box refusal tests. WP02 adds inspection tests later. |
-| `docs/governance-v0.md` | CHANGE. One new section on rule fields with the `standing-policy-refusals` example. |
+| `protected_checks.go` | CHANGE. New types and decoders, two fields on `AutomergeRule`, validation in `validateOptionalPolicy`, overlap helper, and the behavior-preserving extraction of `changedPathsInOneStore`. No other WP edits this file. |
+| `standing_policy_fields_test.go` | NEW. Unit tests and black-box refusal tests (`TestStandingPolicyFields...`). Helpers here are prefixed `standingPolicyFields` so WP02 can reuse them from `standing_policy_test.go`. |
 
 ## Subtasks
 
@@ -187,7 +186,7 @@ Note on ordering: the existing per-rule loop checks `actors` and `authors` with 
 
 **Purpose**: contract coverage of every row and of the decoders, independent of Git.
 
-**Steps** (tests named `TestStandingPolicyFields...` in `standing_policy_test.go`):
+**Steps** (tests named `TestStandingPolicyFields...` in `standing_policy_fields_test.go`):
 
 1. Decode table through `parsePolicyBytes` with a minimal valid policy (one maintainer M, one trusted reviewer R, `requiredApprovals` 1, `requiredAccepts` 1, one rule). Cases for `acceptance`: absent (valid, `Mode()` is `maintainers`), `"maintainers"` (valid), `"rule"` with a non-maintainer actor (valid, `Standing()` true), `"Rule"`, `""`, `null`, `1`, `true`, `["rule"]`, `{}` (each refused with the row 1 message naming the rule).
 2. Cases for `reviewers`: absent, `[R]`, `null`, `"R"`, `[1]`, `[]`, 65 entries, `[R, R]`, `[X]` with X untrusted, and `requiredApprovals` 2 with two trusted reviewers but `reviewers` listing one. Expect rows 2, 5, 6, 7 and 8 in turn.
@@ -206,22 +205,31 @@ Assert messages with `strings.Contains` on the full expected message.
 1. Build the binary once with `buildOperationalBinary(t)`. Create a repository with `initOperationalRepository`, two identities with `hn init` in separate clones (maintainer and a second actor used as executing actor), and commit a valid base policy on `main`.
 2. For each refused draft of T004 (one per row 1 to 10, plus each `.hn` selector and both overlap directions), write the draft to `.hn/policy.json` in the worktree and run `hn policy check --base main --file .hn/policy.json`. Assert a non-zero exit, the expected message naming the rule and the field or path, and that no ref changed (`git for-each-ref` before and after).
 3. Run the same command for a valid standing draft (non-maintainer executing actor, `reviewers` set) and assert exit 0.
-4. Name helpers `standingPolicy...`. Use `runOperationalCommand` and its failure-returning variants as other black-box tests do; do not call `cmdPolicyCheck` in-process.
+4. Name helpers `standingPolicyFields...` and keep them reusable: WP02 drives the same drafts for its documented example (`standingPolicyFieldsRepo`, `standingPolicyFieldsDraft`, `standingPolicyFieldsCheck` or similar). Use `runOperationalCommand` and its failure-returning variants as other black-box tests do; do not call `cmdPolicyCheck` in-process.
 
-### Subtask T006: Governance guide rule-field section and `standing-policy-refusals` example
+### Subtask T006: Extract `changedPathsInOneStore`
 
-**Purpose**: HN-005 and FR-023: the policy fields are documented where policy is documented, with an executed example.
+**Purpose**: the replication rule check (WP08) needs the one-complete-store changed-path lookup that `validateProtectedDecisionAt` inlines today ([research.md](../research.md) finding 12, decision `01M5VF02KFTE4BX3G7THDHRGCV`). Extracting it here keeps `protected_checks.go` owned by one WP.
 
 **Steps**:
 
-1. In `docs/governance-v0.md`, under "Optional check protection and automerge", add a subsection titled "Standing acceptance rule fields" after "Rule-based native automerge". Explain in plain sentences: what `acceptance` and `reviewers` mean; that absence keeps today's behavior; that a rule with acceptance mode `rule` is the standing acceptance for every proposal that satisfies it, granted once by the maintainer-accepted amendment that adopted it; the requirement of at least one approval; why a standing rule cannot cover `.hn` or overlap protected-check paths; and that older clients reject a policy that contains either field, even `"acceptance": "maintainers"`.
-2. Add `<!-- example: standing-policy-refusals -->` followed by a fenced block that shows, for rows 4 to 10, the draft fragment and the exact refusal message. Use placeholder fingerprints in the form the guide already uses.
-3. Add `TestStandingPolicyDocumentedRefusals` in `standing_policy_test.go`. Its source must contain the exact marker string `<!-- example: standing-policy-refusals -->` (the guard `TestServeQualityDocumentedExamplesAreExecuted` looks for it). The test reads the block that follows the marker, substitutes real fingerprints, runs each draft through `hn policy check` and compares each refusal with the documented message.
-4. Style: direct sentences, descriptive headings, no em dashes, no rhetorical contrasts.
+1. Move the lookup at the top of `validateProtectedDecisionAt` into:
+
+   ```go
+   // changedPathsInOneStore computes base..head changed paths from the
+   // quarantine, else from the accepted store. It never pairs a commit from
+   // one store with a commit from the other, and never treats a missing side
+   // as an empty or partial diff.
+   func changedPathsInOneStore(gitDir, acceptedGitDir, base, head string) ([]string, error)
+   ```
+
+   Keep the existing logic exactly: try `changedPathsAt(gitDir, base, head)`; on error, and when `acceptedGitDir` is non-empty and differs from `gitDir`, try `changedPathsAt(acceptedGitDir, base, head)`; return the last error otherwise.
+2. `validateProtectedDecisionAt` calls it and wraps the error exactly as before (`protected checks: %w`). Messages and behavior are unchanged; `protected_checks_test.go` and the replication tests prove it.
+3. Add one unit test in `standing_policy_fields_test.go` (`TestStandingPolicyFieldsChangedPathsInOneStore`) with two temporary repositories: both commits in the first store; both only in the second; base only in the first and head only in the second (must fail, never mix).
 
 ## Test Strategy
 
-Unit tests for decoders and every validation row, black-box tests through the built binary for the refusals, and the unchanged existing suite. Run `go test -race -run 'TestStandingPolicy' ./...`, then the full gate.
+Unit tests for decoders and every validation row, black-box tests through the built binary for the refusals, the extraction test, and the unchanged existing suite. Run `go test -race -run 'TestStandingPolicyFields|TestProtected|TestPolicy' ./...`, then the full gate.
 
 ## Definition of Done
 
@@ -232,7 +240,8 @@ Unit tests for decoders and every validation row, black-box tests through the bu
 - [ ] **FR-004**: acceptance mode `rule` with `requiredApprovals` 0 is refused.
 - [ ] **FR-005** (validation): rows 2 and 5 to 8 refuse with their messages.
 - [ ] **FR-022** (policy): policies without the new fields parse and marshal byte for byte as before; every pre-existing test passes with no assertion change.
-- [ ] Guide section written; `standing-policy-refusals` executed by a test that contains the marker.
+- [ ] `changedPathsInOneStore` extracted with no behavior or message change; its mixed-store case fails.
+- [ ] No document changed (WP02 documents the fields).
 
 ## Risks
 

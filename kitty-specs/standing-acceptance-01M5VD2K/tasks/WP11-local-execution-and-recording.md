@@ -29,7 +29,8 @@ history:
   - action: Prompt generated via /spec-kitty.tasks
 agent_profile: implementer-ivan
 authoritative_surface: governance.go
-create_intent: []
+create_intent:
+- standing_automerge_test.go
 execution_mode: code_change
 owned_files:
 - governance.go

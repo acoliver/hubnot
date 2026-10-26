@@ -2,10 +2,12 @@
 work_package_id: WP07
 title: Local projection admits only valid rule merge facts
 dependencies:
+- WP02
 - WP05
 - WP06
 requirement_refs:
 - FR-012
+- FR-023
 - NFR-001
 - NFR-005
 planning_base_branch: feat/standing-acceptance
@@ -31,6 +33,7 @@ owned_files:
 - policy.go
 - store.go
 - standing_fact_test.go
+- docs/protocol-v0.md
 role: implementer
 tags: []
 tracker_refs: []
@@ -56,9 +59,12 @@ Make local event projection, the first of the four fact-admission surfaces (FR-0
 
 This WP must land before any client records a rule merge fact (WP11): without it, the executing actor's own clone would reject its own fact.
 
+It also documents the rule merge fact in `docs/protocol-v0.md`: the `rule` field WP03 added, its parse-time refusals, and the evidence semantics this admission rule enforces (HN-005, FR-023).
+
 ## Context
 
 - Read [contracts/rule-merge-fact.md](../contracts/rule-merge-fact.md) "Inputs and object access per surface" (the local projection row) and "Memoization"; spec US3-3; plan "Changes to existing code" rows for `policy.go` and `store.go`.
+- WP02 is a dependency only because both WPs edit `docs/protocol-v0.md` (different sections); it orders the edits.
 - Start with `spec-kitty agent action implement WP07 --agent <name> --mission standing-acceptance-01M5VD2K`.
 - Existing code: `validateEventRelationships` (`store.go` line 306; the `proposal.merged` case at lines 357 to 367 calls `validateProposalMergeBinding` then `validateMergeEvent`); `validateMergeEvent` (`policy.go` lines 547 to 568); `loadPolicy`, `loadPipeline` (`ci.go`), `changedPathsAt("", base, head)` (`protected_checks.go`). `validateEventRelationships` is also called from `issue_read.go` line 104.
 - From WP05: `ruleObjectAccess`, `newRuleValidationMemo`, `validateRuleMergeFactWith`, `ruleFactError`.
@@ -79,10 +85,11 @@ This WP must land before any client records a rule merge fact (WP11): without it
 | `policy.go` | CHANGE. `validateMergeEvent` gains a rule branch and a memo-taking variant. WP11 later adds the status line in `cmdProposalStatus`; do not touch it here. |
 | `store.go` | CHANGE. `validateEventRelationships` creates one memo per pass and passes it on. |
 | `standing_fact_test.go` | NEW. `TestStandingFactLocal...`. WP08, WP09 and WP16 add tests later. |
+| `docs/protocol-v0.md` | CHANGE. "Runs and governance events" only: the rule merge fact paragraph. WP02 edits "Optional policy rules"; do not touch it. |
 
 ## Subtasks
 
-### Subtask T031: Rule branch in `validateMergeEvent` with local object access
+### Subtask T031: Rule branch in `validateMergeEvent` and the per-pass memo in `store.go`
 
 **Steps**:
 
@@ -94,15 +101,19 @@ This WP must land before any client records a rule merge fact (WP11): without it
    - `merge.Event.Rule == ""`: run today's body of `validateMergeEvent` unchanged (same messages, same `shortID` use).
    - otherwise: `validateRuleMergeFactWith(memo, merge, proposal, byID)`. Wrap a non-`ruleFactError` error (policy unavailable, changed paths unavailable) as `merge %s: %w` with the full fact ID, and return a `ruleFactError` unwrapped so its message reads `rule merge <full ID> fails <check>: <detail>` on every surface.
 3. Keep `validateMergeEvent(merge, proposal, byID)` as a wrapper that creates a fresh memo with `localRuleObjectAccess()`. Existing tests that call it keep working.
-4. Missing objects (FR-014, local part): when `ChangedPaths` fails because a commit is absent, the error propagates and projection refuses; it never evaluates an empty list. A full clone always holds both commits after import; a shallow clone is guarded earlier by WP09.
+4. Per-pass memo in `store.go`: in `validateEventRelationships`, create `memo := newRuleValidationMemo(localRuleObjectAccess())` once before the loop over events, and call `validateMergeEventWith(memo, stored, proposal, byID)` in the `proposal.merged` case. Leave the binding check (`validateProposalMergeBinding`) first, as today. Do not create the memo inside the loop; one per pass is the contract (NFR-005). Do not change any other case of the switch.
+5. Missing objects (FR-014, local part): when `ChangedPaths` fails because a commit is absent, the error propagates and projection refuses; it never evaluates an empty list. A full clone always holds both commits after import; a shallow clone is guarded earlier by WP09.
 
-### Subtask T032: Per-pass memo wiring in `store.go`
+### Subtask T032: Protocol guide for rule merge facts
 
-**Steps**:
+**Steps** in `docs/protocol-v0.md`, "Runs and governance events", after the existing `proposal.merged` paragraph:
 
-1. In `validateEventRelationships`, create `memo := newRuleValidationMemo(localRuleObjectAccess())` once before the loop over events, and call `validateMergeEventWith(memo, stored, proposal, byID)` in the `proposal.merged` case. Leave the binding check (`validateProposalMergeBinding`) first, as today.
-2. Do not create the memo lazily inside the loop; one per pass is the contract.
-3. Do not change any other case of the switch.
+1. A paragraph on rule merge facts: the optional `rule` field names an automerge rule with acceptance mode `rule` in the candidate's base policy; the signer must be one of that rule's executing actors; for such a fact `evidence` lists exactly the qualifying approval and passing run-result IDs, at most one per counting reviewer and one per trusted runner per pipeline, and any other item, including a `proposal.decision`, invalidates the fact; `policy` is the base policy digest; `commit` is either a two-parent merge commit or the head itself after an `hn serve` fast-forward; a fact without `rule` keeps today's meaning and check.
+2. The parse-time refusals of [contracts/rule-merge-fact.md](../contracts/rule-merge-fact.md) "Parse-time rules" (WP03 implemented them), as a short table.
+3. One sentence on verification: every verifier re-derives the rule from the base policy, the candidate's base and head and the listed evidence, and judges the fact by that evidence alone; vetoes outside the evidence block execution and server advancement, never fact validity (FR-015). Name the stable check names of the contract and the rendered refusal form `rule merge <full fact ID> fails <check>: <detail>`.
+4. One sentence on older clients: they ignore the key and then reject the fact, because it cites no acceptance decisions.
+5. Keep the existing paragraph on missing-event repair accurate: under acceptance mode `maintainers` repair still uses `hn merge`; add that under acceptance mode `rule` the executing actor reruns the same `hn automerge` command (FR-020, implemented in WP12 and WP15).
+6. Do not add the `standing-rule-merge-fact` example; WP18 adds it with a recorded fact. Style: plain direct sentences, no em dashes.
 
 ### Subtask T033: Local-store tests for F01 to F18 and the valid fact
 
@@ -131,6 +142,7 @@ Black-box tests through the built binary with facts signed in-process. Run `go t
 - [ ] **FR-012 (local projection)**: every rule merge fact is judged by `validateRuleMergeFact`; acceptance facts keep their check and messages.
 - [ ] **NFR-001 (local surface)**: F01 to F18 are refused by every projecting command, with the full fact ID and check name.
 - [ ] **NFR-005**: one memo per projection pass.
+- [ ] **FR-023 (rule merge fact)**: protocol guide paragraph and parse table written.
 - [ ] No pre-existing test assertion changed.
 
 ## Risks

@@ -6,7 +6,6 @@ requirement_refs:
 - C-004
 - FR-010
 - FR-022
-- FR-023
 planning_base_branch: feat/standing-acceptance
 merge_target_branch: feat/standing-acceptance
 branch_strategy: Planning artifacts for this mission were generated on feat/standing-acceptance. During /spec-kitty.implement this WP may branch from a dependency-specific base, but completed changes must merge back into feat/standing-acceptance unless the human explicitly redirects the landing branch.
@@ -24,12 +23,11 @@ history:
 agent_profile: implementer-ivan
 authoritative_surface: event.go
 create_intent:
-- standing_compat_test.go
+- standing_event_test.go
 execution_mode: code_change
 owned_files:
 - event.go
-- standing_compat_test.go
-- docs/protocol-v0.md
+- standing_event_test.go
 role: implementer
 tags: []
 tracker_refs: []
@@ -61,7 +59,7 @@ Carry the rule name of a rule merge fact in the existing `proposal.merged` event
 | The key `rule` appears more than once | `event has a duplicate rule key` |
 | The key `rule` holds `null`, `""` or a non-string | `proposal merge rule must be a valid rule name` |
 
-Every existing payload must encode byte-identically (FR-022, event part). This WP does not decide when a rule merge fact is valid; WP05 and WP07 do.
+Every existing payload must encode byte-identically (FR-022, event part). This WP does not decide when a rule merge fact is valid; WP05 and WP07 do. WP07 documents the field in `docs/protocol-v0.md` together with the admission rule that gives it meaning; this WP owns no document, so its files stay disjoint from every other WP and execution lanes stay acyclic (tasks decision 12).
 
 ## Context
 
@@ -83,8 +81,7 @@ Every existing payload must encode byte-identically (FR-022, event part). This W
 | File | Change |
 |----|----|
 | `event.go` | CHANGE. One struct field, content rules, key scan. |
-| `standing_compat_test.go` | NEW. Parse and encoding tests (`TestStandingCompatEvent...`). WP17 adds opt-out and older-client tests later. |
-| `docs/protocol-v0.md` | CHANGE. "Runs and governance events" and "Optional policy rules" sections only. |
+| `standing_event_test.go` | NEW. Parse and encoding tests (`TestStandingEvent...`), helpers prefixed `standingEvent`. |
 
 ## Subtasks
 
@@ -119,31 +116,32 @@ Every existing payload must encode byte-identically (FR-022, event part). This W
    - the value is not a JSON string, or is the empty string: `proposal merge rule must be a valid rule name`. Read the value with `Token()`; a `string` token is a string, anything else (`nil`, `bool`, `float64`, `json.Delim`) is refused. If it is a delimiter, return the error without consuming the nested value.
 3. The grammar check of a present non-empty string stays in `validateEventContent` (T011), so `encodeAndSign` and `verifyEvent` share it.
 4. Malformed JSON cannot reach the scan, because `json.Unmarshal` already succeeded; still return a wrapped error on any decoder error.
-5. Keep the scan cheap: no map of keys, no decoding of other values into Go types. Add a benchmark `BenchmarkStandingCompatEventKeyScan` over a typical `review.submit` payload and record the number in the Activity Log next to `BenchmarkVerifyEvent` if one exists (otherwise compare with the cost of `ed25519.Verify` on the same payload).
+5. Keep the scan cheap: no map of keys, no decoding of other values into Go types. T014 measures it.
 
 ### Subtask T013: Parse-time and byte-identical encoding tests
 
-**Steps** (tests `TestStandingCompatEvent...` in `standing_compat_test.go`):
+**Steps** (tests `TestStandingEvent...` in `standing_event_test.go`):
 
 1. **Byte identity**: for one event of every non-resource kind Hubnot writes today (issue.open, issue.comment, proposal.open, proposal.revise, review.submit, run.request, run.result, proposal.decision, proposal.merged without rule, identity events) build the `Event`, `json.Marshal` it, and assert the output has no `"rule"` key and equals the marshalled value of the same struct with the field removed. A practical way: compare against a golden payload string per kind kept in the test, or against `json.Marshal` of an anonymous struct copy without `Rule`.
 2. **Accepted shapes**: a signed `proposal.merged` with `rule` `ordinary` verifies and decodes with `Rule == "ordinary"`; a 64-character name verifies.
 3. **Refused shapes** (raw signed payloads, built with the test identity's private key so the signature is valid): `rule` on `review.submit` (F19); `"rule": ""`, `"rule": null`, `"rule": 1`, `"rule": ["ordinary"]`, `"RULE": "ordinary"`, `"Rule": "ordinary"`, two `rule` keys, and `"rule": "bad name"`, `"rule": "."`, a 65-character name on `proposal.merged` (F20 family). Each refused by `verifyEvent` with the table's message.
 4. **Signing refusal**: `encodeAndSign` refuses an `Event` with `Rule` set on `review.submit` and with an invalid name on `proposal.merged`.
 5. **Resource kinds**: a resource event payload with an added `"rule"` key (valid signature) is refused; a resource event without it verifies as before.
-6. Build raw signed payloads with a small helper `standingCompatSignRaw(t, identity, payload []byte) []byte` that signs with `identity.privateKey()`. Use an identity from `testIdentity` or `createIdentity` inside `inIdentityTestRepository`, as `event_test.go` does.
+6. Build raw signed payloads with a small helper `standingEventSignRaw(t, identity, payload []byte) []byte` that signs with `identity.privateKey()`. Use an identity from `testIdentity` or `createIdentity` inside `inIdentityTestRepository`, as `event_test.go` does.
 
-### Subtask T014: Protocol guide: `rule` field, evidence semantics and policy fields
+### Subtask T014: Key-scan cost and existing-payload audit
 
-**Steps** in `docs/protocol-v0.md`:
+**Purpose**: the plan names two risks of the key scan: its cost on every event read, and the chance that a historical event carries a key the scan now refuses. Measure the first and audit the second.
 
-1. In "Runs and governance events", after the existing `proposal.merged` paragraph, add a paragraph on rule merge facts: the optional `rule` field names an automerge rule with acceptance mode `rule` in the candidate's base policy; for such a fact `evidence` lists exactly the qualifying approval and passing run-result IDs, at most one per counting reviewer and one per trusted runner per pipeline; any other item invalidates the fact; `policy` is the base policy digest; `commit` is either a two-parent merge commit or the head itself after an `hn serve` fast-forward; a fact without `rule` keeps today's meaning. List the parse-time refusals of the table above. State that older clients ignore the key and then reject the fact because it cites no acceptance decisions.
-2. In "Optional policy rules", replace the sentence that says a rule "restricts executing maintainers" with text that covers both acceptance modes, and add one paragraph on `acceptance` and `reviewers` that links to the governance guide's existing anchor `governance-v0.md#optional-check-protection-and-automerge`. WP01 runs in parallel and adds the "Standing acceptance rule fields" subsection under that heading, so the existing anchor stays valid whichever WP lands first. Keep the paragraph on missing-event repair accurate: under acceptance mode `rule`, repair reruns `hn automerge` (FR-020); under acceptance mode `maintainers` it still uses `hn merge`.
-3. Do not add the `standing-rule-merge-fact` example here; WP18 adds it with a recorded fact.
-4. Style: plain direct sentences, no em dashes.
+**Steps**:
+
+1. Add `BenchmarkStandingEventKeyScan` over a typical `review.submit` payload and a large `run.result` payload, and `BenchmarkStandingEventVerify` running `verifyEvent` on the same payloads. Record both numbers in the Activity Log. The scan should cost a small fraction of `verifyEvent` (which includes `ed25519.Verify`); if it costs more than 10% of it, simplify the scan (for example skip values with a depth-counting byte walk) and record the change.
+2. Audit: add `TestStandingEventExistingPayloadsHaveNoRuleKey`, which walks every `event.json` blob reachable from `refs/hn/actors/*` in any fixture repository committed under `testdata/` (if the repository has such fixtures; check with `git ls-files testdata`), runs `scanEventRuleKey` on each and requires no refusal. If the repository has no committed event fixtures, the test instead encodes one event of every non-resource kind with every optional field set, and requires the scan to accept each; record which form you used.
+3. Run the full existing suite once with the scan in place and record in the Activity Log that no existing test failed, which is the audit over every payload the suite produces (NFR-004).
 
 ## Test Strategy
 
-Unit tests with real signatures, plus the unchanged existing event, replication and store tests (`event_test.go`, `revision_event_test.go`, `replication_test.go`). Run `go test -race -run 'TestStandingCompatEvent|TestEvent' ./...`, then the full gate.
+Unit tests with real signatures, plus the unchanged existing event, replication and store tests (`event_test.go`, `revision_event_test.go`, `replication_test.go`). Run `go test -race -run 'TestStandingEvent|TestEvent' ./...` and `go test -run '^$' -bench 'StandingEvent' ./...`, then the full gate.
 
 ## Definition of Done
 
@@ -151,7 +149,8 @@ Unit tests with real signatures, plus the unchanged existing event, replication 
 - [ ] **FR-010 (shape)**: `proposal.merged` carries an optional `rule`; `rule` is refused on every other kind, including resource kinds.
 - [ ] Every row of the parse-time table refuses with its message, through `verifyEvent` and, where applicable, `encodeAndSign`.
 - [ ] **FR-022 (event) / C-004**: every existing kind encodes byte-identically; every pre-existing test passes with no assertion change.
-- [ ] Protocol guide updated in both sections.
+- [ ] Key-scan cost measured and recorded; existing-payload audit passes.
+- [ ] No document changed (WP02 documents the policy fields; WP07 documents the `rule` field).
 
 ## Risks
 

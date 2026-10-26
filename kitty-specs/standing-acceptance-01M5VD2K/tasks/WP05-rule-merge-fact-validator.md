@@ -28,7 +28,9 @@ history:
   - action: Prompt generated via /spec-kitty.tasks
 agent_profile: implementer-ivan
 authoritative_surface: rule_acceptance.go
-create_intent: []
+create_intent:
+- rule_acceptance.go
+- rule_acceptance_test.go
 execution_mode: code_change
 owned_files:
 - rule_acceptance.go
