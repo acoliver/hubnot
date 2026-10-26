@@ -1,7 +1,7 @@
 {
-  "event_count": 27,
-  "last_event_id": "01M5VYXV8VJ1QZJRDKEBT9P779",
-  "materialized_at": "2026-10-26T11:18:29.403319+00:00",
+  "event_count": 28,
+  "last_event_id": "01M5W18Y65QENSHAH7Z9K5WSQA",
+  "materialized_at": "2026-10-26T11:59:29.989584+00:00",
   "mission_number": "",
   "mission_slug": "standing-acceptance-01M5VD2K",
   "mission_type": "",
@@ -13,8 +13,8 @@
     "done": 0,
     "for_review": 0,
     "in_progress": 0,
-    "in_review": 2,
-    "planned": 17
+    "in_review": 1,
+    "planned": 18
   },
   "work_packages": {
     "WP01": {
@@ -51,19 +51,25 @@
       "last_transition_at": "2026-10-26T07:29:36.143058+00:00"
     },
     "WP03": {
-      "actor": "llxprt",
+      "actor": "user",
       "agent": "llxprt",
       "agent_profile": "__resolved_profile_absent__",
       "agent_profile_version": "__resolved_profile_version_absent__",
-      "force_count": 0,
-      "lane": "in_review",
-      "last_event_id": "01M5VYXV8VJ1QZJRDKEBT9P779",
-      "last_transition_at": "2026-10-26T11:18:29.403319+00:00",
+      "force_count": 1,
+      "lane": "planned",
+      "last_event_id": "01M5W18Y65QENSHAH7Z9K5WSQA",
+      "last_transition_at": "2026-10-26T11:59:29.989584+00:00",
       "model": "__resolved_model_absent__",
       "notes": [
         "WP03 implemented in cef2dec (event.go, standing_event_test.go). Event.Rule is tagged json:\"-\"; verifyEvent keeps every check and sets Rule only on proposal.merged via parseMergeRuleClaim (canonical claim only; every other shape is no claim, never an error); encodeAndSign appends rule last and refuses rule on other kinds ('rule is only valid on proposal.merged') or an invalid name ('proposal merge rule must be a valid rule name'). L06 still refused with 'invalid resource event JSON: unknown field \"rule\"'. The claim walk is a depth-counting byte walk (decoder form ~15% of verifyEvent; byte walk ~1%), checked against the decoder reference by a differential test and a fuzz target. Wiring: parseMergeRuleClaim runs on the live verifyEvent path; Event.Rule is consumed by WP05/WP07 (admitMergeFact) and written by WP11 (appendRuleMergeEvent). No admission surface or document changed. Lane setup: merged planning commit b201105 into lane-c, kitty-specs conflict resolved from feat/standing-acceptance (c22a63c); planning-artifact cleanup f5d6059 per move-task. Gate: gofmt -l clean; go vet ./... and go build ./... pass; go test -race -count=1 -timeout 60m -skip TestMemoryIndexTenThousandRecordsPerformanceAndRecovery ./... pass (hubnot 1087s); go test -count=1 -run '^TestMemoryIndexTenThousandRecordsPerformanceAndRecovery$' . pass (17.3s)."
       ],
       "provider": "__resolved_provider_absent__",
+      "review_result": {
+        "feedback_path": "/home/acoliver/projects/appaday/gitium/hubnot/kitty-specs/standing-acceptance-01M5VD2K/tasks/WP03-rule-field-on-proposal-merged/review-cycle-1.md",
+        "reference": "review-cycle://standing-acceptance-01M5VD2K/WP03-rule-field-on-proposal-merged/review-cycle-1.md",
+        "reviewer": "user",
+        "verdict": "changes_requested"
+      },
       "role": "reviewer",
       "shell_pid": 1388477,
       "shell_pid_created_at": "1793013506.83",
