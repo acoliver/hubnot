@@ -93,8 +93,9 @@
         "WP13",
         "WP14",
         "WP15",
-        "WP16",
         "WP17",
+        "WP19",
+        "WP16",
         "WP18"
       ],
       "write_scope": [
@@ -139,10 +140,10 @@
       "parallel_group": 2
     }
   ],
-  "computed_at": "2026-10-26T07:29:51.691290+00:00",
+  "computed_at": "2026-10-26T10:08:40.404245+00:00",
   "computed_from": "dependency_graph+ownership",
   "planning_artifact_wps": [],
-  "planning_commit_sha": "7c5af1fd66bf2a2f189a76021878a0b17ecc89de",
+  "planning_commit_sha": "b2011059ecd17b3888b7c3d179c3a3fd7ace55cf",
   "collapse_report": {
     "events": [
       {
@@ -197,7 +198,7 @@
         "wp_a": "WP07",
         "wp_b": "WP09",
         "rule": "write_scope_overlap",
-        "evidence": "overlapping globs: 'standing_fact_test.go' vs 'standing_fact_test.go'"
+        "evidence": "overlapping globs: 'policy.go' vs 'policy.go', 'standing_fact_test.go' vs 'standing_fact_test.go'"
       },
       {
         "wp_a": "WP07",
@@ -212,10 +213,16 @@
         "evidence": "overlapping globs: 'automerge.go' vs 'automerge.go'"
       },
       {
+        "wp_a": "WP10",
+        "wp_b": "WP19",
+        "rule": "write_scope_overlap",
+        "evidence": "overlapping globs: 'automerge.go' vs 'automerge.go'"
+      },
+      {
         "wp_a": "WP13",
         "wp_b": "WP14",
         "rule": "write_scope_overlap",
-        "evidence": "overlapping globs: 'standing_serve_test.go' vs 'standing_serve_test.go'; WP14 depends on WP13"
+        "evidence": "overlapping globs: 'serve_verdict.go' vs 'serve_verdict.go', 'standing_serve_test.go' vs 'standing_serve_test.go'; WP14 depends on WP13"
       },
       {
         "wp_a": "WP17",
@@ -224,10 +231,10 @@
         "evidence": "overlapping globs: 'docs/threat-model.md' vs 'docs/threat-model.md'; WP18 depends on WP17"
       }
     ],
-    "total_merges": 13,
+    "total_merges": 14,
     "independent_wps_collapsed": 0,
     "by_rule": {
-      "write_scope_overlap": 13
+      "write_scope_overlap": 14
     }
   }
 }
