@@ -80,6 +80,9 @@ type serveGovernedOptions struct {
 	// AutomergePaths adds automerge rule "auto" for main, executed by the
 	// maintainer for proposals by the author that change only these paths.
 	AutomergePaths []string
+
+	// RunnerReviews makes the runner a second trusted reviewer.
+	RunnerReviews bool
 }
 
 // serveGovernedPolicy is an hn.policy/0 document by role. Every proposal
@@ -196,6 +199,9 @@ func newServeGovernedFixture(t *testing.T, options serveGovernedOptions) *serveG
 	if len(options.ProtectedPaths) > 0 {
 		g.Policy.ProtectedPaths = options.ProtectedPaths
 		g.Policy.ProtectedReviewers = []string{f.actors[g.Maintainer]}
+	}
+	if options.RunnerReviews && g.Runner != g.Reviewer {
+		g.Policy.Reviewers = append(g.Policy.Reviewers, f.actors[g.Runner])
 	}
 	if len(options.AutomergePaths) > 0 {
 		g.Policy.AutomergePaths = options.AutomergePaths

@@ -114,7 +114,19 @@ func serveAdvanceRerun(proposalID, remote, branchRef string) string {
 	return command
 }
 
+// serveAdvanceBinding pins an advancement to what a caller already checked.
+// ExpectedActor is the signing identity the caller authorized; ExpectedTip
+// is the hosted branch tip the caller inspected. Empty fields are unbound.
+type serveAdvanceBinding struct {
+	ExpectedActor string
+	ExpectedTip   string
+}
+
 func cmdMergeRemote(proposalID, remote, branchRef string) error {
+	return mergeRemoteBound(proposalID, remote, branchRef, serveAdvanceBinding{})
+}
+
+func mergeRemoteBound(proposalID, remote, branchRef string, binding serveAdvanceBinding) error {
 	if !validReplicationRemote(remote) {
 		return fmt.Errorf("invalid remote name %q", remote)
 	}
@@ -126,6 +138,9 @@ func cmdMergeRemote(proposalID, remote, branchRef string) error {
 	identity, proposal, evaluation, err := serveAdvanceValidate(proposalID)
 	if err != nil {
 		return serveAdvanceStepError(1, "validate locally", err)
+	}
+	if binding.ExpectedActor != "" && identity.Actor != binding.ExpectedActor {
+		return serveAdvanceStepError(1, "validate locally", fmt.Errorf("selected signing identity changed or is not bound to this advancement"))
 	}
 	head := proposal.Event.Head
 
@@ -148,6 +163,9 @@ func cmdMergeRemote(proposalID, remote, branchRef string) error {
 	tip, err := serveAdvanceReadTip(remote, branchRef)
 	if err != nil {
 		return serveAdvanceStepError(4, "read the tip", err)
+	}
+	if binding.ExpectedTip != "" && tip != binding.ExpectedTip {
+		return serveAdvanceStepError(4, "read the tip", fmt.Errorf("%s %s is at %s, not the inspected %s; update the local branch and rerun", remote, branchRef, shortOID(tip), shortOID(binding.ExpectedTip)))
 	}
 
 	// Step 5: repair if already advanced.

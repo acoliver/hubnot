@@ -408,14 +408,22 @@ native pipelines and configure their trusted runners in policy; a local Git
 merge hook is not an automerge acceptance gate. Operator-controlled Git
 `reference-transaction` hooks retain their normal behavior.
 
-No command here starts a daemon, executes a pipeline, creates an approval or
-acceptance, synchronizes, or pushes. Publication remains explicit:
+Without `--remote`, no command here starts a daemon, executes a pipeline,
+creates an approval or acceptance, synchronizes, or pushes. Publication
+remains explicit:
 
 ```sh
 hn sync origin
 
 git push origin main:main
 ```
+
+An `hn serve` remote accepts no local merge commit on a protected branch, so
+the explicit publication above cannot land an automerge there. Use
+`hn automerge PROPOSAL --rule NAME --execute --remote REMOTE`, which imports
+the hosted facts, inspects the rule again against them and asks the server to
+advance the branch to the signed head. See
+[Automerge rules](serve-v0.md#automerge-rules).
 
 If code merged but its signed fact could not be recorded, inspect the target
 and retry `hn merge C` for the existing manual repair. Repair requires current

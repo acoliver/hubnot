@@ -1416,13 +1416,23 @@ hn automerge PROPOSAL --rule NAME --execute --remote origin
 ```
 
 `hn automerge` checks the rule first, as it does locally: the checked-out
-branch must be the rule's target branch, and the proposal's author and changed
-paths must match the rule. It then runs the same advancement as
-`hn merge PROPOSAL --remote origin`, so the server applies every check above.
+branch must be the rule's target branch at the proposal's base, and the
+proposal's author and changed paths must match the rule. With `--remote` it
+then imports the hosted facts with `hn sync` and inspects the rule again, so a
+trusted change request or failing run that exists only on the server blocks
+it. The checked-out branch must equal the hosted tip; otherwise the command
+asks you to update it and rerun. Finally it runs the advancement of
+`hn merge PROPOSAL --remote REMOTE`, bound to that tip with `hn-expected-tip`
+and to the rule's executing actor, and the server applies every check above.
+
+The server itself does not evaluate automerge rules. Evidence that reaches the
+server after the import and before the push is judged only by the ordinary
+protected-branch checks.
+
 Without `--remote`, `hn automerge --execute` refuses a target branch that
-tracks an `hn serve` remote before it creates a local merge commit or merge
-fact, because the server never accepts a local merge commit on a protected
-branch.
+tracks an `hn serve` remote, or a remote it cannot reach to tell, before it
+creates a local merge commit or merge fact, because the server never accepts a
+local merge commit on a protected branch.
 
 ### Two advancements at the same time
 

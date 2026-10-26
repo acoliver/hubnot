@@ -71,17 +71,22 @@ func cmdAutomerge(args []string) error {
 		return fmt.Errorf("identity %s is not an executing actor for automerge rule %q", identity.Actor, *rule)
 	}
 	// An hn serve remote advances its protected branch only to the signed
-	// proposal head and never accepts a local merge commit. With --remote the
-	// rule's checks above gate the server's own advancement; without it, a
-	// target branch that tracks an hn serve remote is refused before any
-	// local merge commit or merge fact exists.
+	// proposal head and never accepts a local merge commit. With --remote,
+	// the advancement is bound to the executing actor and to the hosted tip
+	// the rule was inspected against; without it, a target branch whose
+	// upstream is or may be an hn serve remote is refused before any local
+	// merge commit or merge fact exists.
 	if *remote != "" {
-		return cmdMergeRemote(inspection.Proposal.ID, *remote, "refs/heads/"+inspection.Rule.TargetBranch)
+		return automergeRemote(inspection, *rule, *remote, identity.Actor)
 	}
 	if upstream, err := gitText("config", "--get", "branch."+inspection.Rule.TargetBranch+".remote"); err == nil && upstream != "" && upstream != "." {
-		if identified, _ := serveRemoteIdentifies(upstream); identified {
+		identified, reason := serveRemoteIdentifies(upstream)
+		if identified {
 			return fmt.Errorf("branch %s tracks hn serve remote %s, which advances only to the signed proposal head; run hn automerge %s --rule %s --execute --remote %s",
 				inspection.Rule.TargetBranch, upstream, inspection.Proposal.ID, *rule, upstream)
+		}
+		if strings.HasPrefix(reason, "cannot ") {
+			return fmt.Errorf("cannot tell whether %s, the upstream of %s, is an hn serve remote (%s); retry when it is reachable", upstream, inspection.Rule.TargetBranch, reason)
 		}
 	}
 	guard := &proposalMergeGuard{ExpectedActor: identity.Actor}
@@ -617,4 +622,46 @@ func automergeIgnoredPathCollision(changed []string, p string) bool {
 		offset = end + 1
 	}
 	return false
+}
+
+// automergeRemote executes an automerge rule against an hn serve remote. It
+// imports the hosted facts first and inspects the rule again, so a trusted
+// change request or failing run that exists only on the server blocks the
+// rule, and it requires the checked-out target branch to equal the hosted
+// tip it then binds the advancement to. The server applies its own checks
+// to the advancement; it does not evaluate automerge rules.
+func automergeRemote(first *automergeInspection, rule, remote, actor string) error {
+	if !validReplicationRemote(remote) {
+		return fmt.Errorf("invalid remote name %q", remote)
+	}
+	if identified, reason := serveRemoteIdentifies(remote); !identified {
+		return fmt.Errorf("remote %s is not an hn serve remote (%s)", remote, reason)
+	}
+	if err := cmdSync([]string{remote}); err != nil {
+		return fmt.Errorf("import hosted facts from %s: %w", remote, err)
+	}
+	inspection, err := inspectAutomerge(first.Proposal.ID, rule)
+	if err != nil {
+		return err
+	}
+	if err := inspection.eligible(); err != nil {
+		return err
+	}
+	if inspection.Branch != first.Rule.TargetBranch || inspection.Proposal.Event.Base != first.Proposal.Event.Base ||
+		inspection.Proposal.Event.Head != first.Proposal.Event.Head || inspection.Evaluation.PolicyDigest != first.Evaluation.PolicyDigest {
+		return fmt.Errorf("automerge candidate, policy or target changed while importing hosted facts")
+	}
+	if !actorListed(actor, inspection.Rule.Actors) {
+		return fmt.Errorf("identity %s is no longer an executing actor for automerge rule %q", actor, rule)
+	}
+	branchRef := "refs/heads/" + inspection.Rule.TargetBranch
+	hosted, found, err := serveAdvanceRemoteRef(remote, branchRef)
+	if err != nil {
+		return err
+	}
+	if !found || hosted != inspection.Current {
+		return fmt.Errorf("local %s is at %s but %s has %s; update the local branch to the hosted tip and rerun",
+			inspection.Rule.TargetBranch, shortOID(inspection.Current), remote, shortOID(hosted))
+	}
+	return mergeRemoteBound(inspection.Proposal.ID, remote, branchRef, serveAdvanceBinding{ExpectedActor: actor, ExpectedTip: hosted})
 }
