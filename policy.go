@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -544,7 +545,61 @@ func validateDecisionEvent(decision, proposal StoredEvent, byID map[string]Store
 	return nil
 }
 
+// validateMergeEvent judges one proposal.merged fact on its own validation
+// pass. Projection shares one memo across a pass through
+// validateMergeEventWith instead.
 func validateMergeEvent(merge, proposal StoredEvent, byID map[string]StoredEvent) error {
+	_, err := validateMergeEventWith(newRuleValidationMemo(localRuleObjectAccess()), merge, proposal, byID)
+	return err
+}
+
+// validateMergeEventWith is local projection's fact-admission surface: the
+// union rule of admitMergeFact over maintainerMergeCheck (path a) and the
+// local rule path (path b), whose object reads go through memo.
+func validateMergeEventWith(memo *ruleValidationMemo, merge, proposal StoredEvent, byID map[string]StoredEvent) (mergeAuthority, error) {
+	return admitMergeFact(merge,
+		func() error { return maintainerMergeCheck(merge, proposal, byID) },
+		func() error { return localRuleMergeCheck(memo, merge, proposal, byID) },
+	)
+}
+
+// localRuleMergeCheck is path (b) for local projection. A ruleFactError is
+// returned as is, so its message reads the same on every surface; a missing
+// input such as an absent commit refuses the fact and never evaluates it.
+func localRuleMergeCheck(memo *ruleValidationMemo, merge, proposal StoredEvent, byID map[string]StoredEvent) error {
+	// Interim boundary (FR-025): the shallow closure rules of WP09 do not
+	// exist yet, so a shallow clone cannot know it holds every input.
+	if shallow, err := repositoryIsShallow(); err != nil || shallow {
+		return fmt.Errorf("rule merge %s cannot be verified in a shallow clone by this build; verify it in a full clone", merge.ID)
+	}
+	err := validateRuleMergeFactWith(memo, merge, proposal, byID)
+	var factErr *ruleFactError
+	if err == nil || errors.As(err, &factErr) {
+		return err
+	}
+	return fmt.Errorf("merge %s: %w", merge.ID, err)
+}
+
+// localRuleObjectAccess reads path (b) inputs from the current repository.
+func localRuleObjectAccess() ruleObjectAccess {
+	return ruleObjectAccess{
+		PolicyAt: func(commit string) (PolicyDocument, string, error) {
+			policy, _, digest, err := loadPolicy(commit)
+			return policy, digest, err
+		},
+		ChangedPaths: func(base, head string) ([]string, error) {
+			return changedPathsAt("", base, head)
+		},
+		PipelineDigest: func(head, pipeline string) (string, error) {
+			_, _, digest, err := loadPipeline(head, pipeline)
+			return digest, err
+		},
+	}
+}
+
+// maintainerMergeCheck is path (a): the acceptance merge fact check that
+// predates rule merge facts, unchanged.
+func maintainerMergeCheck(merge, proposal StoredEvent, byID map[string]StoredEvent) error {
 	policy, _, digest, err := loadPolicy(proposal.Event.Base)
 	if err != nil {
 		return fmt.Errorf("merge %s: %w", shortID(merge.ID), err)

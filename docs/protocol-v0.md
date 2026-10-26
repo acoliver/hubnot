@@ -264,6 +264,64 @@ commit, base-policy digest, and acceptance-decision IDs. It is emitted after
 Git creates the merge commit; branch publication remains a separate ordinary
 Git action.
 
+Every verifier applies one union rule to a `proposal.merged` fact. The fact is
+valid when it passes the existing maintainer check, whatever else it carries.
+When the maintainer check fails, the fact is valid only if it carries a rule
+claim and passes the rule check. A fact that passes neither check is invalid,
+and every command that projects events refuses while such a fact is in the
+local store. A maintainer merge that also carries a rule claim remains a
+maintainer merge; status displays it as such, with the rule name marked as not
+verified.
+
+A rule merge fact is a `proposal.merged` fact with the optional `rule` field,
+which Hubnot encodes as the last key and only on this kind. `rule` names an
+automerge rule with acceptance mode `rule` in the candidate's base policy, and
+the signer must be one of that rule's executing actors. `policy` is the base
+policy digest. `evidence` lists exactly the qualifying approval and passing
+run-result IDs: at most one approval per counting reviewer and one result per
+trusted runner per pipeline. Any other item, including a `proposal.decision`,
+fails the rule check. `commit` is either a two-parent merge commit or the head
+itself after an `hn serve` fast-forward.
+
+Verifiers recognize a rule claim on `proposal.merged` only in this shape:
+
+| `proposal.merged` payload | Rule claim |
+|----|----|
+| Exactly one top-level key equal to `rule` under Unicode case folding, spelled exactly `rule`, whose value is a JSON string that is a valid rule name (1 to 64 of `A-Z a-z 0-9 - _ .`, excluding `.` and `..`) | that name |
+| No such key | none |
+| `"rule"` with `null`, `""`, a number, a boolean, an array or an object | none |
+| A case variant such as `"RULE"` or `"Rule"`, alone or next to `rule` | none |
+| Two or more keys equal to `rule` under case folding | none |
+| A string that is not a valid rule name | none |
+
+Keys are compared after JSON unescaping. A fact without a claim gets the
+maintainer check alone. No event is refused because of a `rule` key: other
+event kinds ignore it as before, and resource kinds refuse it through their
+strict decoder as before.
+
+The rule check re-derives the named rule from the base policy, the candidate's
+base and head, and the listed evidence, and judges the fact by that evidence
+alone. Maintainer rejections, change requests and failed runs outside the
+evidence block execution and server advancement and have no effect on fact
+validity. The checks run in this order, and the first failure is reported as
+`rule merge <full fact ID> fails <check>: <detail>`: `policy-digest`,
+`rule-exists`, `rule-acceptance`, `rule-signer`, `rule-author`, `manual-path`,
+`changed-paths`, `evidence-item`, `evidence-duplicate`, `approval-threshold`
+and `pipeline-threshold`. A base or head commit that is missing from a full
+clone refuses the fact; it is never judged as an empty change list. A shallow
+clone refuses every fact that needs the rule check with
+`rule merge <full fact ID> cannot be verified in a shallow clone by this build; verify it in a full clone`,
+and accepts maintainer merges exactly as before.
+
+Older clients ignore the `rule` key and run only the maintainer check. They
+therefore reject every fact that only the rule check admits, and agree with
+newer clients on every maintainer merge.
+
+Missing-event repair follows the acceptance mode of the rule that merged the
+candidate. Under acceptance mode `maintainers`, repair uses `hn merge`, as
+described under optional policy rules. Under acceptance mode `rule`, the
+executing actor reruns the same `hn automerge` command.
+
 ## Optional policy rules
 
 `hn.policy/0` may include independent optional `protectedChecks` and `automerge`
