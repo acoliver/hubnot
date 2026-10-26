@@ -1,7 +1,7 @@
 {
-  "event_count": 66,
-  "last_event_id": "01M5XAA7HBRCGPEY95PBM9BFQJ",
-  "materialized_at": "2026-10-26T23:56:43.934128+00:00",
+  "event_count": 68,
+  "last_event_id": "01M5XAB7J735GSWAJ8TT24JAX1",
+  "materialized_at": "2026-10-26T23:57:16.729616+00:00",
   "mission_number": "",
   "mission_slug": "standing-acceptance-01M5VD2K",
   "mission_type": "software-dev",
@@ -12,9 +12,9 @@
     "claimed": 0,
     "done": 0,
     "for_review": 0,
-    "in_progress": 1,
+    "in_progress": 2,
     "in_review": 0,
-    "planned": 10
+    "planned": 9
   },
   "work_packages": {
     "WP01": {
@@ -315,11 +315,19 @@
       "last_transition_at": "2026-10-26T07:29:44.836999+00:00"
     },
     "WP13": {
-      "actor": "finalize-tasks",
+      "actor": "llxprt",
+      "agent": "llxprt",
+      "agent_profile": "__resolved_profile_absent__",
+      "agent_profile_version": "__resolved_profile_version_absent__",
       "force_count": 0,
-      "lane": "planned",
-      "last_event_id": "01M5VHV19A9TMS2VP7240MRGTR",
-      "last_transition_at": "2026-10-26T07:29:45.770563+00:00"
+      "lane": "in_progress",
+      "last_event_id": "01M5XAB7J735GSWAJ8TT24JAX1",
+      "last_transition_at": "2026-10-26T23:57:16.729616+00:00",
+      "model": "__resolved_model_absent__",
+      "provider": "__resolved_provider_absent__",
+      "role": "implementer",
+      "shell_pid": 2360826,
+      "shell_pid_created_at": "1793059033.7"
     },
     "WP14": {
       "actor": "finalize-tasks",
