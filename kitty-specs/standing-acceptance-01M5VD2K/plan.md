@@ -1,7 +1,7 @@
 # Implementation Plan: Standing acceptance for automerge rules
 
 **Branch**: `feat/standing-acceptance` (planning base and merge target) | **Date**: 2026-10-26 | **Spec**: [spec.md](spec.md)
-**Input**: `kitty-specs/standing-acceptance-01M5VD2K/spec.md`, confirmed by the maintainer with OQ-1 to OQ-11 accepted as recommended (commit `c9c0194`).
+**Input**: `kitty-specs/standing-acceptance-01M5VD2K/spec.md`, confirmed by the maintainer with OQ-1 to OQ-11 accepted as recommended (commit `c9c0194`), and amended after `/spec-kitty.analyze` by maintainer decisions A to F (spec section "Analysis remediation decisions").
 
 Planning ran non-interactively. The maintainer delegated every remaining decision within the `.kittify` charter. Each choice the spec leaves open is recorded as a resolved plan-flow Decision Moment under `kitty-specs/standing-acceptance-01M5VD2K/decisions/` and summarized in [research.md](research.md). No planning question is deferred, so this plan carries no clarification markers.
 
@@ -9,7 +9,7 @@ Planning ran non-interactively. The maintainer delegated every remaining decisio
 
 An automerge rule gains two optional fields. `acceptance` is either `maintainers` (the default, today's behavior) or `rule`. `reviewers` narrows which trusted reviewers' approvals count toward the rule. A rule with acceptance mode `rule` is the standing acceptance for every proposal that satisfies it: its executing actors need not be maintainers, and executing it requires no per-proposal `proposal.decision`. The executing actor records the existing `proposal.merged` event with a new optional `rule` field, and its `evidence` lists the qualifying approvals and passing run results instead of acceptance decisions.
 
-All of the derivation lives in one new file, `rule_acceptance.go`, with two pure functions. `evaluateRuleAcceptance` judges current evidence, including vetoes, for the keyless preview, local execution and the `hn serve` protected-branch verdict. `validateRuleMergeFact` judges an immutable fact against only its listed evidence, for local event projection (`store.go`), replication import (`quarantine.go`, which the `hn serve` actor-chain check also calls) and, after the shallow dependency guard, shallow clones. The existing acceptance merge fact checks stay as they are and still run whenever `rule` is absent. On `hn serve`, an advancement request names the rule with a third push option, `hn-rule=NAME`. The server then evaluates the rule itself and requires the requester to be one of its executing actors. Direct pushes and advancement requests without `hn-rule` keep requiring maintainer acceptance.
+All of the derivation lives in one new file, `rule_acceptance.go`, with two pure functions and one combinator. `evaluateRuleAcceptance` judges current evidence, including vetoes, for the keyless preview, local execution and the `hn serve` protected-branch verdict. `validateRuleMergeFact` judges an immutable fact against only its listed evidence (path (b) of the spec invariant). `admitMergeFact` applies the union rule of decision `01M5VSEHEVA82N9T64ZH1P1Q2A` for every fact-admission surface: the surface's existing acceptance merge fact check (path (a)) runs first and unchanged, and path (b) runs only when it fails and the fact carries a canonical rule claim. Local event projection (`policy.go` and `store.go`), replication import (`quarantine.go`, which the `hn serve` actor-chain check also calls) and shallow clones all call it. `event.go` recognizes a rule claim on `proposal.merged` without refusing any payload, so every event that verified before the mission still verifies. On `hn serve`, an advancement request names the rule with a third push option, `hn-rule=NAME`. The server then evaluates the rule itself and requires the requester to be one of its executing actors. Direct pushes and advancement requests without `hn-rule` keep requiring maintainer acceptance.
 
 ## Technical Context
 
@@ -21,7 +21,7 @@ All of the derivation lives in one new file, `rule_acceptance.go`, with two pure
 **Project Type**: Single Go CLI application.
 **Performance Goals**: NFR-006. Importing 20 rule merge facts into a repository of 1,000 events takes at most 1.5 times as long as importing 20 acceptance merge facts, at the 95th percentile over 20 runs. NFR-005 limits each fact to one changed-path computation, bounded by the existing 8 MiB limit, and changed paths and pipeline digests are memoized per `(base, head)` within one validation pass.
 **Constraints**: Fail closed on every malformed or insufficient fact, policy and push (C-005). No new event kind, no re-encoding of signed bytes, and no change to the validity of historical facts (C-004). No edit to any existing test assertion (C-003). `hn serve` signs nothing (C-008). Policy amendments and protected-check changes always take the manual path (C-007).
-**Scale/Scope**: Seven implementation concerns. One new source file (`rule_acceptance.go`), targeted changes to fourteen existing source files, eight new test files, and four updated documents.
+**Scale/Scope**: Seven implementation concerns. One new source file (`rule_acceptance.go`), targeted changes to fifteen existing source files, eight new test files, and four updated documents.
 
 ## Charter Check
 
@@ -33,13 +33,13 @@ The charter in `.kittify/charter/charter.md` and its five project directives app
 |----|----|----|
 | Go, standard library first, narrow interfaces | No new dependency. The rule derivation is one file of pure functions behind two entry points, and callers keep their own Git access. | Pass |
 | HN-001 repository-native boundary | Standing acceptance is policy in the repository and a field in an existing signed event that Git transports. `hn serve` stays optional and only re-derives what every client derives. | Pass |
-| HN-002 evidence integrity | A rule merge fact binds the candidate, head, result commit, base policy digest, rule name and the exact qualifying event IDs. Verifiers re-derive the rule from the base policy, the candidate's code and that evidence, and any non-qualifying item invalidates the fact. The client signs nothing it has not validated itself first (see [contracts/rule-merge-fact.md](contracts/rule-merge-fact.md)). | Pass |
-| HN-003 hostile input and least authority | Every fact, policy and pushed ref is hostile. Unknown, misplaced, empty and case-variant `rule` keys are refused at parse time. An executing actor gains authority over exactly one named rule and nothing else (FR-019). A missing base or head commit becomes a missing dependency; it is never treated as an empty diff. | Pass |
+| HN-002 evidence integrity | A rule merge fact binds the candidate, head, result commit, base policy digest, rule name and the exact qualifying event IDs. Verifiers re-derive the rule from the base policy, the candidate's code and that evidence, and any non-qualifying item fails path (b). Authenticated legacy bytes keep their meaning: path (a) is unchanged, and a `rule` key on any other kind or in non-canonical form is ignored as today, so no previously valid fact becomes invalid. The client signs nothing it has not validated itself first (see [contracts/rule-merge-fact.md](contracts/rule-merge-fact.md)). | Pass |
+| HN-003 hostile input and least authority | Every fact, policy and pushed ref is hostile. A rule claim is recognized only in one canonical form; any other `rule` shape carries no authority and leaves the fact to the unchanged maintainer check. Every surface that has not yet been extended with path (b) rejects rule-only facts, and an `hn serve` build that parses `hn-rule` before it evaluates rules refuses every update carrying it (FR-025). An executing actor gains authority over exactly one named rule and nothing else (FR-019). A missing base or head commit becomes a missing dependency; it is never treated as an empty diff. | Pass |
 | HN-004 immutable conflict recovery | No signed byte changes meaning. A changed target policy or a moved target sends the candidate to `hn proposal revise`, as automerge and `hn serve` already do. Interrupted merges record the missing fact once without a second merge. | Pass |
 | HN-005 protocol and docs move together | `docs/governance-v0.md`, `docs/protocol-v0.md`, `docs/serve-v0.md` and `docs/threat-model.md` change in the concern that changes the behavior, and their examples are executed by tests (FR-023). | Pass |
-| Quality gates and black-box tests | Acceptance tests drive only `hn`, `git` and the `hn serve` forced command. Every pre-existing test keeps its assertions (NFR-004), including the three that pin `hn serve` catalogues and traceability IDs (see Complexity Tracking). | Pass |
+| Quality gates and black-box tests | Acceptance tests drive only `hn`, `git` and the `hn serve` forced command. Every test present at the implementation-start snapshot `d881d9b` keeps its assertions (NFR-004, C-003, decision `01M5VSEHF9P9VRVTY68PD8DZ7D`), including the three that pin `hn serve` catalogues and traceability IDs (see Complexity Tracking). | Pass |
 | DIRECTIVE_024 locality | Existing files change only where a rule must be honored: one branch at the top of each merge-fact validator, one authority hook in `mergeProposal`, one option in the push-option parser, and rule steps in the protected verdict. | Pass |
-| DIRECTIVE_044 canonical sources | The rule derivation has one home. The acceptance-fact duplication that already exists between `store.go` and `quarantine.go` is left as is, because consolidating it would change error text that existing tests read. | Pass with one recorded tension |
+| DIRECTIVE_044 canonical sources | The rule derivation and the union order have one home (`rule_acceptance.go`), and the rule claim parser has one home (`event.go`). The acceptance-fact duplication that already exists between `store.go` and `quarantine.go` is left as is, because consolidating it would change error text that existing tests read; `admitMergeFact` takes each surface's existing check as its path (a). | Pass with one recorded tension |
 
 **Post-design re-check**: the Phase 1 contracts add no dependency, no service, no new event kind and no new ref namespace. The protocol-relevant changes are the optional `rule` field of `proposal.merged`, the rule evidence semantics, the `hn-rule` push option and three reason codes. All four are documented in the contracts and assigned to documentation updates in IC-02 and IC-06. The gate still passes.
 
@@ -70,12 +70,16 @@ flowchart LR
       W[Shallow verification<br/>guardShallowEventClosure, then projection]
     end
     E[rule_acceptance.go<br/>evaluateRuleAcceptance]
+    U[rule_acceptance.go<br/>admitMergeFact: path a first, then path b]
     V[rule_acceptance.go<br/>validateRuleMergeFact]
+    C[event.go<br/>parseMergeRuleClaim]
     P & X & R & S --> E
-    L & Q --> V
+    L & Q --> U
+    U -- only when path a fails and a claim exists --> V
+    C -. sets Event.Rule .-> U
     H --> Q
     W --> L
-    X & R -- pre-sign self-check --> V
+    X & R -- pre-sign self-check --> U
 ```
 
 The two functions share one set of helpers for counting approvals, qualifying run results and checking authors, paths, policy files and protected-check paths. `evaluateRuleAcceptance` also reports vetoes and the evidence set to sign. `validateRuleMergeFact` reports the first failed check by a stable check name (see [contracts/rule-merge-fact.md](contracts/rule-merge-fact.md)). Neither function runs Git. Callers supply the base policy, its digest, changed paths and pipeline definition digests through their existing object access: the working repository for local commands, quarantine plus accepted store for import, and the hosted repository inside Git's quarantine environment for `hn serve`.
@@ -111,29 +115,48 @@ Each row names the exact function the change touches. The mapping answers the in
 |----|----|----|
 | `protected_checks.go` `AutomergeRule`, `validateOptionalPolicy` | Rule has five fields; every `actors` entry must be a maintainer (lines 84 to 88) | Add `Acceptance AutomergeAcceptance` and `Reviewers AutomergeReviewers`. Keep the maintainer requirement for acceptance mode `maintainers` only. Add FR-003 path safety, FR-004 and FR-005 checks. |
 | `protected_checks.go` `validateProtectedDecisionAt` | Inlines the one-complete-store changed-path lookup (lines 271 to 277) | Extract `changedPathsInOneStore` without changing behavior; reuse it for rule facts. |
-| `event.go` `Event`, `validateEventContent`, `verifyEvent` | `verifyEvent` uses plain `json.Unmarshal`, so unknown keys are ignored | Add `Rule string json:"rule,omitempty"` after `Evidence`. Restrict it to `proposal.merged` with the rule-name grammar. Add a top-level key scan for `rule` (decision `01M5VEZKK32DXWNPRAYGDMY3ZK`). |
-| `policy.go` `validateMergeEvent` | Requires a maintainer signer and enough maintainer acceptance decisions | When `merge.Event.Rule != ""`, load pipeline digests and changed paths locally and call `validateRuleMergeFact`. Otherwise, unchanged. |
-| `quarantine.go` `replicationEventDependencyWithOptions`, `validateReplicationMergeAt` | Absent evidence is a missing dependency; merge evidence must be decisions | For a rule fact, report an absent base or head commit as a missing dependency before validation, then call `validateRuleMergeFact` with quarantine-or-accepted object access. Acceptance facts are unchanged. |
-| `shallow.go` `guardShallowEventClosure` | Treats every merge evidence ID as a `decision` dependency (lines 1012 to 1020) | For a rule fact, require each evidence ID as a `selected event fact`, plus the base commit, head commit and base policy blob. Acceptance facts are unchanged. |
+| `event.go` `Event`, `encodeAndSign`, `verifyEvent` | `verifyEvent` uses plain `json.Unmarshal`, so unknown keys are ignored | Add `Rule string json:"-"`, which `encoding/json` never reads or writes. `verifyEvent` keeps every existing check and, for `proposal.merged` only, sets `Rule` from `parseMergeRuleClaim` when the claim is canonical; no payload is refused because of a `rule` key. `encodeAndSign` refuses `Rule` on other kinds or with an invalid name and appends `rule` last (decision `01M5VSEHF1G2YQDQW7HPVBF95K`, amending `01M5VEZKK32DXWNPRAYGDMY3ZK`). |
+| `policy.go` `validateMergeEvent` | Requires a maintainer signer and enough maintainer acceptance decisions | Extract today's body as `maintainerMergeCheck`, unchanged. `validateMergeEventWith` calls `admitMergeFact` with it as path (a) and, as path (b), local object access and `validateRuleMergeFact`. In a shallow repository path (b) refuses until WP09 adds the shallow guards. |
+| `quarantine.go` `replicationEventDependencyWithOptions`, `validateReplicationMergeAt` | Absent evidence is a missing dependency; merge evidence must be decisions | The `proposal.merged` arm calls `admitMergeFact` with today's `validateReplicationMergeAt` as path (a), unchanged. Path (b) reports an absent base or head commit as a missing dependency, then calls `validateRuleMergeFact` with quarantine-or-accepted object access. |
+| `shallow.go` `guardShallowEventClosure` | Treats every merge evidence ID as a `decision` dependency (lines 1012 to 1020) | For a fact with a rule claim, classify each missing evidence ID as a `selected event fact`. Add shallow path (b) guards for the base commit, code ref, policy blob and pipeline definitions, reached only after path (a) failed. Facts without a claim are unchanged. |
 | `store.go` `validateEventRelationships` | Calls `validateProposalMergeBinding` and `validateMergeEvent` | No change. The branch inside `validateMergeEvent` covers rule facts; a per-pass memo of changed paths and pipeline digests is added there. |
 | `automerge.go` `inspectAutomerge`, `printAutomergeInspection` | Blocks on missing maintainer acceptances; checks the target policy digest | Under acceptance mode `rule`, replace the readiness and acceptance blockers with `evaluateRuleAcceptance` results; add rule-reviewer thresholds in both modes. Print acceptance mode, counted reviewers and whether maintainer acceptance is required. Recognize the contained-merge repair state for acceptance mode `rule`. |
-| `automerge.go` `cmdAutomerge`, `automergeRemote` | Local execution goes through `mergeProposal`; remote rerun stops at the local-equals-hosted check | Pass a rule authority in `proposalMergeGuard`, add the local repair branch, add the remote repair branch, and send `hn-rule`. |
+| `automerge.go` `cmdAutomerge`, `automergeRemote` | Local execution goes through `mergeProposal`; remote rerun stops at the merged blocker and the local-equals-hosted check | Pass a rule authority in `proposalMergeGuard`, add the local repair branch, send `hn-rule`, add the remote repair branch, and add the authorized publication-only rerun before both merged blockers (decision `01M5VSEHFCZGQHQ14CKJ3MAMP7`). |
 | `governance.go` `proposalMergeGuard`, `mergeProposal`, `appendProposalMergeEvent` | Requires accepted evidence and a maintainer identity in six places | With a rule authority, those six checks call the authority instead. Add `appendRuleMergeEvent`, which self-checks and then signs. With no guard, or an acceptance-mode guard, nothing changes. |
 | `serve_client.go` `serveAdvanceBinding`, `mergeRemoteBound`, `serveAdvanceValidate`, `serveAdvanceRecord` | Maintainer and acceptance checks; no rule | Add `Rule` to the binding. With a rule, validation and recording use the rule authority, step 6 adds `hn-rule`, and rerun messages name `hn automerge`. |
 | `serve_wire.go`, `serve_hooks.go` `parseServePushOptions` | Two options, limit 2 | Add `servePushOptionRule = "hn-rule"` and `servePushOptions.Rule`; limit 3; `hn-rule` requires `hn-advance`. Update `servePushOptionSentence`. |
+| `serve_verdict.go` `evaluateServePush` | Applies the `hn-advance` shape rule, then every class rule | WP13 adds an interim refusal of every update carrying `hn-rule` with `unsupported-command`; WP14 removes it when the rule steps land (FR-025). |
 | `serve_protected.go` `evaluateServeProtectedUpdate`, `candidate` | Steps 1 to 13, maintainer advancement | With `options.Rule`, add step 7a, replace step 10, skip step 11 and replace step 13 (decision `01M5VF0G52PH940GQ1BWX0X9TR`). |
 | `serve_reasons.go` `serveReasonLookup` | One catalogue | Add `serveRuleReasonCatalogue` with three codes and consult it in lookups. |
 | `policy_commands.go` `printPolicySource`, `compareOptionalPolicies` | Prints and compares five rule fields | Print acceptance mode and reviewers. Report acceptance and reviewer changes per rule. For acceptance mode `rule`, label the actors "Executing actors". Existing lines stay. |
-| `policy.go` `cmdProposalStatus` | Prints `Status:   merged` | For a candidate with a rule merge fact, add one line naming the rule and the full signing actor. |
+| `policy.go` `cmdProposalStatus` | Prints `Status:   merged` | For a candidate with a rule merge fact, add one line naming the rule and the full signing actor; for a maintainer merge fact with a rule claim, one line marking the annotation as not verified. |
 
 ### Domain rules and invariants
 
-The spec invariant holds because every surface that admits a rule merge fact calls `validateRuleMergeFact` with the base policy, the candidate's base and head and the listed evidence, and because the executing actor's client runs the same function on the fact before signing it. The full derivation, check names and refusal texts are in [contracts/rule-merge-fact.md](contracts/rule-merge-fact.md). Four rules carry the most risk.
+The spec invariant holds because every surface that admits a merge fact calls `admitMergeFact`, which runs the surface's unchanged maintainer check and then, only for a fact with a canonical rule claim that failed it, `validateRuleMergeFact` with the base policy, the candidate's base and head and the listed evidence, and because the executing actor's client runs the same combinator on the fact before signing it. The full derivation, check names and refusal texts are in [contracts/rule-merge-fact.md](contracts/rule-merge-fact.md). Five rules carry the most risk.
 
+0. **Validity is a union, and legacy history keeps its meaning.** A fact that passes today's maintainer check is valid on every client, old or new, whatever its `rule` field says, and is displayed as a maintainer merge. Path (b) adds validity only for facts that need it. No event kind other than `proposal.merged` changes how it decodes, and no `rule` key is a parse error (decision `01M5VSEHEVA82N9T64ZH1P1Q2A`).
 1. **Execution and admission are judged differently on purpose.** Execution and the server verdict see vetoes: current trusted change requests, trusted failures and maintainer rejections. Fact admission sees only the signed fact and its listed evidence (FR-015, OQ-8). A rule merge fact therefore stays valid after a later withdrawal or rejection, as an acceptance merge fact does today.
-2. **The evidence list is exact.** It names the current approval of each counting reviewer and, per pipeline, the latest passing result of each trusted runner, with nothing else. Any decision, change request, failed result, uncounted approval or result from an unauthorized request invalidates the whole fact (decision `01M5VEZXQ7GD8JJ4XNDZD6B2XD`).
+2. **The evidence list is exact under path (b).** It names the current approval of each counting reviewer and, per pipeline, the latest passing result of each trusted runner, with nothing else. Any decision, change request, failed result, uncounted approval or result from an unauthorized request fails path (b) (decision `01M5VEZXQ7GD8JJ4XNDZD6B2XD`). A fact that passes path (a) is not held to this rule.
 3. **Standing acceptance never crosses a policy change.** A rule applies only when the target policy digest equals the base policy digest. Locally `inspectAutomerge` already enforces this. On `hn serve`, step 7a enforces it before any rule check (FR-017).
 4. **An executing actor is bounded by construction.** Policy validation lets non-maintainers appear only in `actors` of an acceptance-mode `rule` rule. Every maintainer check that guards `hn decide`, `hn merge`, `hn merge --remote`, decision admission and the server's direct-push and acceptance paths stays unchanged. The executing actor can only reach the new authority through the rule it is listed in.
+
+### Activation boundaries
+
+Decision `01M5VSEHF5B1FM9TB52KWKQGWZ`. Each work package lands on its own, so each intermediate state must fail closed (FR-025). Path (a) never changes, so a surface that has not been extended rejects every fact that only path (b) admits and interprets no rule.
+
+| Landed through | Local projection | Replication import and `hn serve` actor chain | Shallow verification | `hn serve` push with `hn-rule` | Client writes rule facts |
+|----|----|----|----|----|----|
+| WP03 to WP06 | path (a) only | path (a) only | path (a) only | refused with `unsupported-command` (parse error, as today) | no |
+| WP07 | path (a), then path (b) | path (a) only | path (a); rule-only facts refused with the shallow interim message | as above | no |
+| WP08 | as above | path (a), then path (b) | as above | as above | no |
+| WP09 | as above | as above | path (a), then path (b) | as above | no |
+| WP11 | as above | as above | as above | as above | local merges |
+| WP13 | as above | as above | as above | parsed, then refused with `unsupported-command` before any protected check | local merges |
+| WP14 | as above | as above | as above | rule steps 7a, 10 and 13 | local merges |
+| WP15 | as above | as above | as above | as above | local and remote |
+
+Rows are cumulative in dependency order. WP13 may land before WP11; the two change different columns. Boundary fixtures B1 to B5 ([contracts/rule-merge-fact.md](contracts/rule-merge-fact.md#activation-boundary-fixtures-fr-025)) prove each row: a valid rule-only fact is accepted exactly by the surfaces that implement path (b), downgrade-shaped maintainer facts with a rule claim are accepted everywhere, a defective rule fact is refused everywhere, and a maintainer advancement that carries `hn-rule` never advances.
 
 ### Client output
 
@@ -165,9 +188,9 @@ The repository uses one flat `package main` with feature-prefixed files, so the 
 
 ```
 hubnot/
-├── rule_acceptance.go             # NEW: evaluateRuleAcceptance, validateRuleMergeFact, shared counting helpers
+├── rule_acceptance.go             # NEW: evaluateRuleAcceptance, validateRuleMergeFact, admitMergeFact, shared counting helpers
 ├── protected_checks.go            # CHANGE: rule fields and decoders, validateOptionalPolicy, changedPathsInOneStore
-├── event.go                       # CHANGE: Event.Rule, content rule, top-level key scan
+├── event.go                       # CHANGE: Event.Rule (json:"-"), parseMergeRuleClaim, signing rules
 ├── policy.go                      # CHANGE: validateMergeEvent rule branch, status line
 ├── store.go                       # CHANGE: per-pass memo for changed paths and pipeline digests
 ├── quarantine.go                  # CHANGE: rule fact dependencies and validation branch
@@ -176,6 +199,7 @@ hubnot/
 ├── governance.go                  # CHANGE: proposalMergeGuard rule authority, appendRuleMergeEvent
 ├── serve_client.go                # CHANGE: rule binding in mergeRemoteBound and its steps
 ├── serve_wire.go                  # CHANGE: hn-rule constant
+├── serve_verdict.go               # CHANGE: servePushOptions.Rule; interim hn-rule refusal (WP13, removed by WP14)
 ├── serve_hooks.go                 # CHANGE: parseServePushOptions, limit, sentence
 ├── serve_protected.go             # CHANGE: rule steps 7a, 10, 13
 ├── serve_reasons.go               # CHANGE: serveRuleReasonCatalogue and lookup
@@ -211,32 +235,32 @@ hubnot/
 
 ### IC-02: Rule merge fact wire shape
 
-- **Purpose**: Carry the rule name in `proposal.merged` without a new event kind, and refuse every misplaced, empty or case-variant `rule` key at parse time.
-- **Relevant requirements**: FR-010 (shape), FR-022 (event part), C-004, OQ-5.
+- **Purpose**: Carry the rule name in `proposal.merged` without a new event kind, and recognize a rule claim only in its canonical form, without refusing any payload that verified before the mission.
+- **Relevant requirements**: FR-010 (shape), FR-022 (event part), FR-024 (claim), C-004, OQ-5 as amended by decision `01M5VSEHEVA82N9T64ZH1P1Q2A`.
 - **Affected surfaces**: `event.go`, `rule_acceptance_test.go` (parse cases), `standing_compat_test.go`, `docs/protocol-v0.md`.
 - **Sequencing/depends-on**: none.
-- **Risks**: The key scan runs on every non-resource event read, so it must be a single token walk with no allocation of values. A historical event of another kind carrying a `rule` key would become invalid; no Hubnot client ever wrote one, and NFR-004 reruns all existing fixtures to show that nothing else changes.
+- **Risks**: The claim walk runs on every `proposal.merged` read, so it must be a single token walk that skips other values. A typed `rule` field read by `encoding/json` would turn `"rule": 1` into a decode error on a fact that is valid today, and would make resource events with a `rule` key pass their strict decoder; the `json:"-"` tag avoids both. Signed legacy fixtures L01 to L06 prove that no previously valid event changes verdict.
 
 ### IC-03: Shared rule evaluator
 
-- **Purpose**: Implement the rule derivation once, for current evidence and for immutable facts, so every surface reaches the same verdict.
-- **Relevant requirements**: FR-005 (counting), FR-006, FR-009 (eligibility part), FR-010 (evidence), FR-011, FR-012 (derivation), FR-015, NFR-002, OQ-2, OQ-5, OQ-8.
+- **Purpose**: Implement the rule derivation once, for current evidence and for immutable facts, and the union order once, so every surface reaches the same verdict.
+- **Relevant requirements**: FR-005 (counting), FR-006, FR-009 (eligibility part), FR-010 (evidence), FR-011, FR-012 (derivation), FR-015, FR-024 (`admitMergeFact`), NFR-002, OQ-2, OQ-5, OQ-8.
 - **Affected surfaces**: `rule_acceptance.go`, `rule_acceptance_test.go`.
 - **Sequencing/depends-on**: IC-01, IC-02.
 - **Risks**: Approval counting must not reuse `ProposalEvaluation.Approvals`, which includes the author when `allowAuthorApproval` is true (`policy.go` line 373); it recounts from `currentReviews`. Pipeline counting must use the same request authorization as decisions (`mayRequestRun`) so D1 requesters count.
 
 ### IC-04: Fact admission on every verifier
 
-- **Purpose**: Make local projection, replication import, shallow verification and the `hn serve` actor-chain check accept a rule merge fact only after the full derivation, and report missing evidence or commits as recoverable dependencies.
-- **Relevant requirements**: FR-012, FR-013, FR-014, FR-015, NFR-001, NFR-002, NFR-005, NFR-006, OQ-10.
+- **Purpose**: Make local projection, replication import, shallow verification and the `hn serve` actor-chain check admit merge facts through `admitMergeFact`, accept a fact through path (b) only after the full derivation, keep every legacy verdict, fail closed at every landing boundary, and report missing evidence or commits as recoverable dependencies.
+- **Relevant requirements**: FR-012, FR-013, FR-014, FR-015, FR-024, FR-025, NFR-001, NFR-002, NFR-005, NFR-006, OQ-10, C-004.
 - **Affected surfaces**: `policy.go` (`validateMergeEvent`), `quarantine.go`, `shallow.go`, `store.go`, `protected_checks.go` (`changedPathsInOneStore`), `standing_harness_test.go`, `standing_fact_test.go`.
 - **Sequencing/depends-on**: IC-03.
-- **Risks**: Local projection runs on every command, so an invalid fact in the local store makes every command refuse, as an invalid acceptance fact does today. The memo keeps one changed-path computation per `(base, head)` per pass. The quarantine path must never fall back to a mixed store for base and head.
+- **Risks**: Local projection runs on every command, so an invalid fact in the local store makes every command refuse, as an invalid acceptance fact does today. The memo keeps one changed-path computation per `(base, head)` per pass. The quarantine path must never fall back to a mixed store for base and head. Path (b) inputs must never be required for a fact that passes path (a), or a maintainer merge would start waiting for commits it did not need before. The shallow semantic matrix must hold a complete closure, or every row could pass through an unrelated gap (decision `01M5VSEHFV2K03JJY0NN6DFNAT`).
 
 ### IC-05: Local preview, execution and repair
 
 - **Purpose**: Let an executing actor preview and execute a rule with acceptance mode `rule` locally, record the rule merge fact, repair an interrupted merge with the same command, and stay refused everywhere else.
-- **Relevant requirements**: FR-005 (thresholds in both modes), FR-008, FR-009, FR-010 (recording), FR-011, FR-017 (local), FR-019, FR-020 (local), FR-021, NFR-003 (local), OQ-9.
+- **Relevant requirements**: FR-005 (thresholds in both modes), FR-008, FR-009, FR-010 (recording), FR-011, FR-017 (local), FR-019, FR-020 (local), FR-021, NFR-002 (preview and local execution agree), NFR-003 (local), OQ-9.
 - **Affected surfaces**: `automerge.go`, `governance.go`, `policy.go` (status line), `standing_automerge_test.go`, `docs/governance-v0.md` (execution, limits, repair).
 - **Sequencing/depends-on**: IC-03; end-to-end verification tests depend on IC-04.
 - **Risks**: `mergeProposal` is shared with `hn merge`. The rule authority must only replace the accepted and maintainer checks and must leave `hn merge` byte-identical in behavior. The executing actor must self-check the fact before signing, because a fact its own projection rejects would make every later command in that clone refuse.
@@ -244,7 +268,7 @@ hubnot/
 ### IC-06: hn serve rule advancement
 
 - **Purpose**: Let `hn serve` advance a protected branch for an executing actor that names a rule, after evaluating the rule and its vetoes from hosted facts, and leave direct pushes and maintainer advancement unchanged.
-- **Relevant requirements**: FR-016, FR-017 (server), FR-018, FR-020 (remote), NFR-002 (server agreement), NFR-003 (hosted refs), C-008, OQ-6, OQ-7.
+- **Relevant requirements**: FR-016, FR-017 (server), FR-018, FR-020 (remote repair and the publication-only rerun), FR-025 (interim `hn-rule` refusal), NFR-002 (rule-satisfaction agreement with the preview), NFR-003 (hosted refs), C-008, OQ-6, OQ-7.
 - **Affected surfaces**: `serve_wire.go`, `serve_hooks.go`, `serve_protected.go`, `serve_reasons.go`, `serve_client.go`, `automerge.go` (`automergeRemote`), `standing_serve_test.go`, `docs/serve-v0.md`, `docs/protocol-v0.md` (push option and reason table).
 - **Sequencing/depends-on**: IC-03 and IC-05 for the client; the published-fact acceptance tests depend on IC-04.
 - **Risks**: The server reads pipeline definitions and changed paths inside Git's quarantine environment; tests must cover a candidate whose code ref arrives in the same push. `TestServePushOptions` compares against `servePushOptionSentence`, so the constant can change text without editing the test. `serve_replication_test.go` pins the push options `hn merge --remote` sends, and that path must not send `hn-rule`.
@@ -255,7 +279,7 @@ hubnot/
 - **Relevant requirements**: FR-022, FR-023, NFR-004, NFR-006, NFR-007, SC-001 to SC-006, C-006, OQ-11.
 - **Affected surfaces**: `standing_compat_test.go`, `standing_quality_test.go`, `docs/threat-model.md`, `docs/governance-v0.md` (traceability section), example markers in all four documents.
 - **Sequencing/depends-on**: IC-01 to IC-06 for the end-to-end evidence. Documentation sections land with the concern that changes the behavior.
-- **Risks**: The older-client test builds commit `7a47e6952a427ad7e3a3766c221fd334d9331950` and must skip with a visible reason when that object is absent. The `docs/serve-v0.md` traceability section is pinned to `hn serve` IDs, so this mission's rows go in `docs/governance-v0.md`. New example names must be unique across all documents for `TestServeQualityDocumentedExamplesAreExecuted`.
+- **Risks**: The older-client test builds commit `7a47e6952a427ad7e3a3766c221fd334d9331950` inside one owning parent test whose subtests are every consumer, and must skip with a visible reason when that object is absent (decision `01M5VSEHFPWQWFBNTP9ZFYP3TR`). The pre-existing test audit runs against the implementation-start snapshot `d881d9b`, never against `7a47e69`, because the reviewed sync-speedup merge changed `replication_borrow_test.go` after `7a47e69` (decision `01M5VSEHF9P9VRVTY68PD8DZ7D`). The `docs/serve-v0.md` traceability section is pinned to `hn serve` IDs, so this mission's rows go in `docs/governance-v0.md`. New example names must be unique across all documents for `TestServeQualityDocumentedExamplesAreExecuted`.
 
 ### Cross-cutting: documentation
 
@@ -263,7 +287,7 @@ Documentation is updated in the concern that changes the behavior, as HN-005 and
 
 ## Validation and rollout
 
-Each concern lands with its tests and documentation. The integrated candidate on `feat/standing-acceptance` must pass `gofmt -l .` with no output, `go vet ./...`, `go build ./...`, `go test -race ./...` and `git diff --check`, with every pre-existing test unmodified. Rollout is opt-in by construction. Nothing changes for a repository until a maintainer-accepted amendment adds a rule with acceptance mode `rule`. Clients built before the mission reject such a policy and any rule merge fact, so a mixed team cannot mistake standing acceptance for a maintainer acceptance.
+Each concern lands with its tests and documentation, and each landing state fails closed (see Activation boundaries). The integrated candidate on `feat/standing-acceptance` must pass `gofmt -l .` with no output, `go vet ./...`, `go build ./...`, `go test -race ./...` and `git diff --check`, with every test present at `d881d9b` unmodified. Rollout is opt-in by construction. Nothing changes for a repository until a maintainer-accepted amendment adds a rule with acceptance mode `rule`. Clients built before the mission reject such a policy and every fact valid only through path (b), so a mixed team cannot mistake standing acceptance for a maintainer acceptance; old and new clients agree on every maintainer merge and every legacy event.
 
 ## Risks
 
@@ -277,3 +301,6 @@ The risks most likely to cause rework are listed with their mitigations. The ful
 | Frozen assertions pin catalogues and traceability | A reason code or traceability row breaks an existing test | Separate rule reason catalogue and table, the push-option sentence constant, and traceability in `docs/governance-v0.md` (Complexity Tracking and decisions `01M5VF0M0JGZKDM1MAESM0HCZ2`, `01M5VF0W7NWESJH5RAD46NSYMN`) |
 | A modified executing-actor client ignores vetoes on an ordinary remote | A rule merge that a change request should have blocked is recorded and verifies | Accepted by OQ-8: facts are judged by their own evidence, as acceptance facts are. `hn serve` enforces vetoes at advancement. The threat model documents the residual risk and recommends `hn serve` for protected branches |
 | Older servers refuse `hn-rule` | Rule advancement fails against an un-upgraded server | Fails closed with `unsupported-command`. The client message names the server upgrade, and the guide documents the minimum version |
+| A new rule-key rule rejects authenticated history | Users' repositories stop verifying after an upgrade | No `rule` key is ever a parse error; path (a) is unchanged; signed legacy fixtures L01 to L06 run on every surface and against the older client |
+| An intermediate landing state admits or interprets a rule on one surface only | Surfaces disagree, or a maintainer path accepts a request that names a rule | One shared `admitMergeFact`; shallow interim refusal until WP09; interim `hn-rule` refusal until WP14; boundary fixtures B1 to B5 |
+| A remote rerun after recording cannot publish | The fact stays local while the branch advanced | Authorized publication-only rerun before both merged blockers (WP19) |

@@ -1,6 +1,6 @@
 # Contract: hn serve rule advancement
 
-Covers FR-016, FR-017 (server), FR-018 and FR-020 (remote), and supersedes the sentence in `docs/serve-v0.md` that says the server does not evaluate automerge rules. The server still signs nothing (C-008) and still never creates a commit.
+Covers FR-016, FR-017 (server), FR-018, FR-020 (remote), FR-025 (server part) and the rule-satisfaction part of NFR-002, and supersedes the sentence in `docs/serve-v0.md` that says the server does not evaluate automerge rules. The server still signs nothing (C-008) and still never creates a commit.
 
 ## Push options
 
@@ -24,7 +24,11 @@ New refusals in `parseServePushOptions`:
 | `hn-rule` value fails the grammar | `hn-rule value "X" is not a valid rule name` |
 | `hn-rule` without `hn-advance` | `hn-rule requires hn-advance` |
 
-The existing shape rule still applies: an `hn-advance` push must have exactly one ref update, and it must be to a protected branch. A client sending `hn-rule` to a server built before this mission receives `unsupported-command`. The client then reports `REMOTE does not support rule advancement (hn-rule); upgrade hn on the server` and exits 1 with the branch unchanged.
+The existing shape rule still applies: an `hn-advance` push must have exactly one ref update, and it must be to a protected branch.
+
+### Interim refusal until the verdict lands (FR-025)
+
+WP13 lands the parser before WP14 lands the rule steps. In that interval `evaluateServePush` refuses every update of a push whose options carry `hn-rule` with `unsupported-command` and the sentence `this server does not evaluate hn-rule advancement yet.`, before any protected check runs, so a build in that state behaves like a server built before this mission and never applies the maintainer path to a request that names a rule. WP14 removes the interim refusal in the same change that adds the rule steps. Boundary fixture B5 of [rule-merge-fact.md](rule-merge-fact.md#activation-boundary-fixtures-fr-025) holds before and after WP14. A client sending `hn-rule` to a server built before this mission receives `unsupported-command`. The client then reports `REMOTE does not support rule advancement (hn-rule); upgrade hn on the server` and exits 1 with the branch unchanged.
 
 ## Protected-branch steps with hn-rule
 
@@ -96,6 +100,51 @@ hn-serve: refs/heads/main at <tip8> has policy sha256:<dest> and candidate sha25
 ## Atomicity and concurrency
 
 Rule advancement uses the existing repository lock, held from the advertisement until `receive-pack` exits. The race between two executing actors is decided at step 3: the loser receives `protected-stale-tip`, as two maintainers do today. Facts that reach the server after the client's import and before the advancement are visible at step 10, which is how US4-3 is met.
+
+## Agreement (NFR-002)
+
+Decision `01M5VSEHFH0B1BSJ1NA923FKAA`. Agreement compares rule satisfaction, the outcome of the derivation every surface shares, under identical inputs. It does not compare requester authorization or transport.
+
+### Matched inputs
+
+Every comparison fixture holds these equal on the compared surfaces:
+
+| Input | How the fixture holds it equal |
+|----|----|
+| Target branch and tip | E's checked-out `main` equals the hosted `main`, and both equal the candidate's signed base |
+| Base and target policy | the same commits, so the same digests; the fixtures that test FR-017 move both tips to the same amendment commit |
+| Candidate code | the head commit and the proposal code ref are present locally and on the server |
+| Fact set | E runs `hn sync origin` with the all-trusted selection immediately before the comparison, and no fact is published between E's preview and E's push |
+
+### Rule-satisfaction outcome
+
+Satisfied means, for the keyless preview, no blocker; for local execution by an authorized executing actor, the merge happens; for `hn serve`, no rejection from steps 7a, 8, 9 and 10. The fixtures cover a satisfied candidate; a trusted change request; a trusted failure; a maintainer rejection; a destination policy that differs from the base policy; a rule that does not exist; a rule with acceptance mode `maintainers`; a rule for another target branch; an author outside the rule; a path outside the rule; a policy or protected-check change; too few counted approvals; too few passing results.
+
+### Checks excluded from agreement and tested on their own
+
+| Check | Where it runs | Test |
+|----|----|----|
+| Executor authorization: identity listed in the rule's `actors` | `cmdAutomerge`, `proposalMergeGuard`, `serveAdvanceValidate` with a rule binding | WP12 T057 (local), WP15 T096 (remote client) |
+| Executor authorization: step 13 `advance-not-rule-executor` | `hn serve` | WP14 T068 step 5, WP15 T096 |
+| Remote identification and the `hn serve` upstream refusal | client | existing serve tests, WP15 T096 |
+| Selection covers every trusted actor | `automergeRemote` | existing tests, WP15 T096 |
+| Local target equals hosted tip; `hn-expected-tip` and stale tip (step 3) | client and `hn serve` | WP14 T068 step 9, WP15 T096 |
+| Deletion, creation, destination policy validity, fast-forward (steps 1, 2, 4, 5); candidate exists (step 6) | `hn serve` | existing serve tests, unchanged |
+| Protected baseline at the destination (step 12) | `hn serve` | existing serve tests, unchanged |
+| `hn-rule` support on the server | client mapping of `unsupported-command` | WP15 T071 unit test |
+| Clean worktree, unfinished operation, shallow or partial clone, expected-old ref lease | local execution | existing automerge tests, WP12 T057 |
+
+### Executable comparisons
+
+| Comparison | Test | WP |
+|----|----|----|
+| Four fact-admission surfaces on every fact fixture | `TestStandingFactMatrixAgreement` | WP16 T078 |
+| Keyless preview and local execution | `TestStandingAutomergeAgreementPreviewExecute` | WP11 T095 |
+| Keyless preview and `hn serve` verdict | `TestStandingServeAdvanceAgreementPreviewServer` | WP15 T096 |
+| Live evaluation and fact validation on generated worlds | `TestRuleAcceptanceFactProperty` | WP05 T024 |
+| Recorded facts and the four surfaces | `TestStandingFactMatrixExecutionAdmitted` | WP16 T080 |
+
+Local execution and `hn serve` are each compared with the same preview under the same inputs, so they agree with each other on rule satisfaction.
 
 ## Tested examples
 

@@ -117,7 +117,7 @@ hn automerge <candidate> --rule ordinary --execute                 # local
 hn automerge <candidate> --rule ordinary --execute --remote origin # hn serve
 ```
 
-The command checks the rule again and records the missing rule merge fact once, without a second merge or advancement. `hn merge` repair stays maintainer-only.
+The command checks the rule again and records the missing rule merge fact once, without a second merge or advancement. If E's client had already recorded the fact through `hn serve` but stopped before publishing it, or after publishing it, the same `--remote` command takes a publication-only path: it publishes the fact if the server lacks it, confirms that the hosted `main` contains the head, and signs, records and advances nothing. Without `--remote`, an already-merged candidate is refused as before. `hn merge` repair stays maintainer-only.
 
 ## What stays with maintainers
 

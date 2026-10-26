@@ -1,6 +1,6 @@
 # Contract: hn automerge under a standing rule
 
-Covers FR-005 (thresholds), FR-006, FR-008, FR-009, FR-011, FR-017 (local), FR-019, FR-020 and FR-021. The command grammar is unchanged:
+Covers FR-005 (thresholds), FR-006, FR-008, FR-009, FR-011, FR-017 (local), FR-019, FR-020 and FR-021, and the preview-to-execution part of NFR-002. The command grammar is unchanged:
 
 ```text
 hn automerge PROPOSAL --rule NAME [--execute [--remote REMOTE]]
@@ -103,20 +103,52 @@ On refusal the client prints each `hn-serve/1` line, as `hn merge --remote` does
 
 ### Remote repair
 
-When the hosted tip equals or descends from the head and the local target still equals the signed base, `automergeRemote` skips the local-equals-hosted check, inspects the rule again against the imported facts, and calls `mergeRemoteBound`. Step 5 then records the missing rule merge fact once:
+When the hosted tip equals or descends from the head, the candidate has no merge fact, and the local target still equals the signed base, `automergeRemote` skips the local-equals-hosted check, inspects the rule again against the imported facts, and calls `mergeRemoteBound`. Step 5 then records the missing rule merge fact once:
 
 ```text
 origin refs/heads/main already contains 9b2e4c6a8d0f for proposal 1c2d3e4f5a6b
 Recorded missing rule merge event 7d8e9f0a1b2c under rule ordinary with 2 evidence item(s)
 ```
 
+### Publication-only rerun
+
+Decision `01M5VSEHFCZGQHQ14CKJ3MAMP7`. Today both inspections stop a rerun with `proposal is already recorded as merged` before any publication step, so a rerun after recording needs its own path. `cmdAutomerge` takes it, before `inspection.eligible()`, when every one of these holds:
+
+1. the command is `hn automerge PROPOSAL --rule NAME --execute --remote REMOTE`;
+2. the identity loads and is listed in the `actors` of rule NAME in the candidate's base policy (authorization);
+3. the local store holds a `proposal.merged` for PROPOSAL whose `rule` is NAME, whose signer is that identity, whose `policy` is the base policy digest, and which projection admitted as a rule merge (path (b));
+4. REMOTE is identified as an `hn serve` remote.
+
+The path then:
+
+1. prints the preview as usual, followed by `Publication-only rerun: rule merge event <short ID> is already recorded`;
+2. skips the `proposal is already recorded as merged` blocker of the first inspection and of the inspection after import, and the local-equals-hosted check; every other refusal of the four conditions above still applies;
+3. publishes or republishes the identity's actor chain with the existing `publishLocalFacts(REMOTE)`;
+4. reads the hosted tip of the rule's target branch and requires it to equal or descend from the fact's `commit`.
+
+It signs nothing, appends no event and sends no branch update. Output:
+
+```text
+origin refs/heads/main contains 9b2e4c6a8d0f for proposal 1c2d3e4f5a6b
+Rule merge event 7d8e9f0a1b2c under rule ordinary is published on origin
+```
+
+When the hosted branch does not contain the fact's commit, the command exits 1 with `rule merge event <short ID> is recorded but REMOTE refs/heads/BRANCH does not contain <commit>; a publication-only rerun never advances the branch`, after publishing. A rerun without `--remote`, a rerun by any other identity, and a rerun when the only merge facts are acceptance merge facts or another actor's rule merge facts keep the existing `proposal is already recorded as merged` refusal.
+
+### Interruptions and reruns
+
 | Interrupted after | Hosted branch | Local fact | Rerun of the same command |
 |----|----|----|----|
 | Fact publication before the push | unchanged | absent | Full run |
 | Push, before the server applied it | unchanged | absent | Full run |
-| Push, after the server applied it | head | absent | Repair records the fact once |
-| Recording | head | present, unpublished | Reports already merged; the `hn sync` step publishes the fact |
-| Second publication | head | present, published | Reports already merged |
+| Push, after the server applied it | head | absent | Remote repair records the fact once |
+| Recording | head | present, unpublished | Publication-only rerun publishes the fact and confirms the branch; no new fact, no branch update |
+| Second publication | head | present, published | Publication-only rerun confirms the branch; no new fact, no branch update |
+| Completed run | head | present, published | Publication-only rerun, identical output; nothing changes |
+
+## Preview and execution agreement (NFR-002)
+
+The keyless preview and local execution run in the same clone, so they share the branch tip, the base and target policy, the candidate code and the fact set. For every rule advancement fixture, local execution by an authorized executing actor merges exactly when the preview reports no blocker, and when it refuses it names the same blockers. Executor authorization (`identity <actor> is not an executing actor ...`), the `hn serve` upstream refusal and the expected-old ref lease are execution-only checks and are tested on their own (see [serve-rule-advancement.md](serve-rule-advancement.md#agreement-nfr-002)).
 
 ## Commands an executing actor cannot use (FR-019)
 

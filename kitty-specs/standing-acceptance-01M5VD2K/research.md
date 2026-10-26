@@ -10,7 +10,7 @@ Planning read the current code at commit `c9c0194` (Go code identical to `7a47e6
 
 These facts shape the design. Line numbers refer to commit `c9c0194`.
 
-1. **Older clients drop the `rule` key and then reject the fact.** `verifyEvent` decodes non-resource events with plain `json.Unmarshal` (`event.go` lines 100 to 139), so an unknown key is ignored and the signed bytes are kept for the event ID. An older client then runs `validateMergeEvent` (`policy.go` lines 547 to 568). That check needs `requiredAccepts` maintainer acceptance decisions, and `validatePolicy` forces `requiredAccepts` to be at least 1 (`policy.go` line 137). A rule merge fact lists no decisions, so every older client rejects it (US7-3).
+1. **Older clients drop the `rule` key and then apply the maintainer check.** `verifyEvent` decodes non-resource events with plain `json.Unmarshal` (`event.go` lines 100 to 139), so an unknown key is ignored and the signed bytes are kept for the event ID. An older client then runs `validateMergeEvent` (`policy.go` lines 547 to 568). That check needs a maintainer signer and `requiredAccepts` maintainer acceptance decisions, and `validatePolicy` forces `requiredAccepts` to be at least 1 (`policy.go` line 137). A fact valid only through path (b) lists no decisions, so every older client rejects it (US7-3). A maintainer-signed fact that cites enough decisions passes on an older client whatever its `rule` field says (analysis finding I1), which is why decision `01M5VSEHEVA82N9T64ZH1P1Q2A` makes such a fact valid on new clients too (US7-4).
 2. **Older clients reject the new policy fields.** `parsePolicyBytes` uses `DisallowUnknownFields` (`policy.go` line 110), so `acceptance` and `reviewers` fail on older clients even with the value `maintainers` (US7-2).
 3. **Two merge-fact validators exist today.** Local projection calls `validateMergeEvent` from `validateEventRelationships` (`store.go` lines 357 to 367). Replication import calls `validateReplicationMergeAt` (`quarantine.go` lines 1207 to 1224 and 1346 to 1367). Both encode the same acceptance rule with different messages and object access.
 4. **The `hn serve` actor-chain check reuses replication import.** `checkServeActorDependencies` calls `replicationEventDependencyWithOptions` for every appended event (`serve_verdict_facts.go` lines 512 to 550). A change in the replication merge check therefore covers the fourth fact-admission surface without separate server code.
@@ -31,7 +31,10 @@ These facts shape the design. Line numbers refer to commit `c9c0194`.
 16. **The push-option test compares against a constant.** `TestServePushOptions` checks rejection sentences against `servePushOptionSentence` (`serve_push_test.go` lines 437 to 444). Changing the constant's text changes no assertion. The case with three options includes an unknown option and stays refused (line 741).
 17. **Existing output assertions are substring checks.** Policy, status and automerge tests use `assertOperationalContains` and `assertPolicyOutputContains` (for example `policy_rules_acceptance_test.go` line 262 and `serve_advance_test.go` line 292), so adding output lines leaves them passing.
 18. **Documented examples are guarded.** `TestServeQualityDocumentedExamplesAreExecuted` requires every `<!-- example: NAME -->` marker in `docs/*.md` to be unique and named by some test file (`serve_quality_test.go` lines 96 to 116).
-19. **`encoding/json` folds key case and treats null as absent.** A payload key `"RULE"` fills the `Rule` field, and `"rule": null` or `"rule": ""` decodes to the empty string. The parse-time rules in FR-010 therefore need a key scan (decision `01M5VEZKK32DXWNPRAYGDMY3ZK`).
+19. **`encoding/json` folds key case and treats null as absent.** A payload key `"RULE"` would fill a tagged `Rule` field, `"rule": null` or `"rule": ""` would decode to the empty string, and `"rule": 1` would be a decode error. A typed field therefore cannot tell a canonical claim from other shapes, and could turn a valid legacy fact into a decode error. Decision `01M5VSEHF1G2YQDQW7HPVBF95K` keeps `Rule` out of `encoding/json` and recognizes only the canonical claim with one token walk.
+20. **Legacy payloads may carry rule-named keys.** `verifyEvent` authenticates the original bytes and ignores unknown top-level keys of non-resource events, so a signed `review.submit` with `"rule": "annotation"` is valid today. A refusing key scan would reject the same authenticated bytes, and re-encoding cannot repair immutable history (analysis finding C2). Resource events are decoded strictly (`strictResourceJSON`, `resource_model.go` lines 157 to 182) and keep refusing unknown keys.
+21. **The frozen-test baseline moved.** `git diff --numstat 7a47e69 d881d9b -- '*_test.go'` reports `129 12 replication_borrow_test.go`, from the reviewed sync-speedup merge, and `git diff --numstat d881d9b HEAD -- '*_test.go'` is empty at analysis time. The audit snapshot is therefore `d881d9b` (decision `01M5VSEHF9P9VRVTY68PD8DZ7D`).
+22. **A remote rerun after recording stops at the merged blocker.** `inspectAutomerge` adds `proposal is already recorded as merged` (`automerge.go` lines 233 to 237), and both `cmdAutomerge` and `automergeRemote` return on `inspection.eligible()` before any publication step (lines 55 to 80 and 654 to 659). The publication-only rerun of decision `01M5VSEHFCZGQHQ14CKJ3MAMP7` runs before both.
 
 ## Decisions
 
@@ -39,17 +42,33 @@ These facts shape the design. Line numbers refer to commit `c9c0194`.
 
 Decision `01M5VEZEC0EGQWXKCPTJRECHAV`.
 
-- **Decision**: One new file, `rule_acceptance.go`, holds two pure functions. `evaluateRuleAcceptance` judges current evidence, including vetoes. `validateRuleMergeFact` judges a fact against only its listed evidence. Both take the base policy, digest, proposal, rule name, changed paths and pipeline definition digests from the caller and run no Git. `automerge.go` and `serve_protected.go` call the live function. `validateMergeEvent` in `policy.go` and `validateReplicationMergeAt` in `quarantine.go` call the fact function when `rule` is present. The acceptance-fact checks stay as they are.
+- **Decision**: One new file, `rule_acceptance.go`, holds two pure functions. `evaluateRuleAcceptance` judges current evidence, including vetoes. `validateRuleMergeFact` judges a fact against only its listed evidence. Both take the base policy, digest, proposal, rule name, changed paths and pipeline definition digests from the caller and run no Git. `automerge.go` and `serve_protected.go` call the live function. `validateMergeEvent` in `policy.go` and `validateReplicationMergeAt` in `quarantine.go` call the fact function when `rule` is present. The acceptance-fact checks stay as they are. After analysis, the order of the two checks is fixed by `admitMergeFact` (decision `01M5VSEHEVA82N9T64ZH1P1Q2A`): the acceptance-fact check runs first for every fact, and the fact function runs only when it fails and a canonical claim exists.
 - **Rationale**: NFR-002 requires the same verdict on every surface, and a single implementation gives that by construction. Callers already own different object sources (finding 3), so keeping I/O out of the functions avoids touching those sources.
 - **Alternatives considered**: Adding rule fields to `evaluateProposalEvidence` would change a function that `hn proposal status`, `hn decide`, `hn merge` and the server all use. Adding rule logic separately to each surface would copy the duplication of finding 3 a third time.
 
 ### Rule field representation and parse-time checks
 
-Decision `01M5VEZKK32DXWNPRAYGDMY3ZK`.
+Decision `01M5VEZKK32DXWNPRAYGDMY3ZK`, **superseded** by decision `01M5VSEHF1G2YQDQW7HPVBF95K` (rule claim recognition, next section). The text below is kept as the record of the original plan.
 
 - **Decision**: `Event` gains `Rule string` with JSON key `rule` and `omitempty`, after `Evidence`. Every existing payload therefore re-encodes byte-identically. `validateEventContent` refuses a non-empty `Rule` on every kind other than `proposal.merged`, and on `proposal.merged` requires the rule-name grammar (`validPipelineName`: 1 to 64 characters from `A-Z a-z 0-9 - _ .`, excluding `.` and `..`). `verifyEvent` also walks the top-level keys of each non-resource payload. It refuses any key equal to `rule` under Unicode case folding unless the key is exactly `rule`, appears once, sits on `proposal.merged` and holds a non-empty JSON string.
 - **Rationale**: FR-010 and the spec's edge cases require parse-time refusal of empty, invalid and misplaced `rule` values. Finding 19 shows that decoding alone cannot see them. One token walk per event costs much less than the ed25519 verification each event already gets.
 - **Alternatives considered**: A new event kind contradicts OQ-5 and C-004. Relying on decoding alone accepts `"rule": null` as an acceptance fact, and lets other implementations disagree with Go about case-variant keys.
+
+### Rule claim recognition and union validity
+
+Decisions `01M5VSEHEVA82N9T64ZH1P1Q2A` (specify, amends OQ-5) and `01M5VSEHF1G2YQDQW7HPVBF95K` (plan).
+
+- **Decision**: `Event.Rule` has the tag `json:"-"`. `verifyEvent` keeps every existing check and, for `proposal.merged` only, sets `Rule` through `parseMergeRuleClaim` when the payload carries exactly one top-level key equal to `rule` under case folding, spelled exactly `rule`, with a JSON string value that is a valid rule name. Every other shape yields no claim and no error. Every admission surface calls `admitMergeFact`: today's maintainer check first and unchanged, then path (b) only for a claim. `encodeAndSign` writes only canonical claims.
+- **Rationale**: findings 1, 19 and 20. Union validity keeps every fact that verified before the mission valid on every client, and lets old and new clients agree on every maintainer merge.
+- **Alternatives considered**: The refusing key scan of the superseded decision rejects legacy bytes (C2). Choosing the validator by the presence of `rule` lets a maintainer fact with enough decisions be valid on old clients and invalid on new ones (I1).
+
+### Activation boundaries
+
+Decision `01M5VSEHF5B1FM9TB52KWKQGWZ`.
+
+- **Decision**: every landing state fails closed through the unchanged path (a); shallow verification refuses rule-only facts until WP09; the `hn serve` hook refuses every `hn-rule` push until WP14; boundary fixtures B1 to B5 prove each state (plan "Activation boundaries").
+- **Rationale**: analysis finding C1. One shared combinator and validator leave no surface-specific variant.
+- **Alternatives considered**: Landing every admission surface in one work package would exceed one implementer session and still leave the parser and the hook staged separately.
 
 ### Decoding acceptance and reviewers
 
@@ -76,7 +95,7 @@ Decision `01M5VEZXQ7GD8JJ4XNDZD6B2XD`.
 
 Decision `01M5VF02KFTE4BX3G7THDHRGCV`.
 
-- **Decision**: Extract the one-complete-store lookup from `validateProtectedDecisionAt` into `changedPathsInOneStore` without changing behavior, and use it on the replication path. Local projection keeps `changedPathsAt("")`. Before evaluation, replication reports an absent base or head as a missing dependency naming the commit, with recovery `add exact proposal selection --proposal <candidate>`. For a rule fact, the shallow closure requires the base commit, the head commit, the base policy blob and every listed evidence fact. Each fact gets one changed-path computation, memoized per `(base, head)` within a validation pass.
+- **Decision**: Extract the one-complete-store lookup from `validateProtectedDecisionAt` into `changedPathsInOneStore` without changing behavior, and use it on the replication path. Local projection keeps `changedPathsAt("")`. Before path (b) evaluation, and only after path (a) failed, replication reports an absent base or head as a missing dependency naming the commit, with recovery `add exact proposal selection --proposal <candidate>`. For a rule fact, the shallow closure requires the base commit, the head commit, the base policy blob and every listed evidence fact. Each fact gets one changed-path computation, memoized per `(base, head)` within a validation pass.
 - **Rationale**: OQ-10 and FR-014 require failing closed with recovery guidance. Finding 12 shows that the right rule already exists.
 - **Alternatives considered**: Reading base and head from different stores could pair a quarantined head with an unrelated accepted base. Skipping path checks when commits are missing would accept a fact without checking its paths.
 
@@ -120,7 +139,7 @@ Decision `01M5VF0M0JGZKDM1MAESM0HCZ2`.
 
 ### Older-client evidence
 
-Decision `01M5VF0QVPQ871M0DA8Q0SG5CX`.
+Decision `01M5VF0QVPQ871M0DA8Q0SG5CX`, **amended** by decision `01M5VSEHFPWQWFBNTP9ZFYP3TR`: one owning parent test, `TestStandingCompatOlderClient`, builds the binary in its own temporary directory and runs every consumer as a subtest, with no process-wide cache, and the tests cover agreement on maintainer merges and legacy history. The pre-existing test audit uses the separate snapshot `d881d9b` (decision `01M5VSEHF9P9VRVTY68PD8DZ7D`).
 
 - **Decision**: `standing_compat_test.go` extracts commit `7a47e6952a427ad7e3a3766c221fd334d9331950` with `git archive` into `t.TempDir()`, builds it with `go build`, and drives it against repositories produced by the new binary. It skips with a visible reason under `-short` and when the commit object is absent.
 - **Rationale**: An executable check is stronger than a transcript, and a standard-library build needs no network.
@@ -136,7 +155,7 @@ Decision `01M5VF0W7NWESJH5RAD46NSYMN`.
 
 ### Remote repair
 
-Decision `01M5VF10Q3SQX8WTK2MEN92ZSC`.
+Decision `01M5VF10Q3SQX8WTK2MEN92ZSC`, **extended** by decision `01M5VSEHFCZGQHQ14CKJ3MAMP7`: an authorized publication-only rerun handles the recorded-but-unpublished states (finding 22), and both paths belong to WP19.
 
 - **Decision**: `automergeRemote` takes a repair branch when the hosted tip equals or descends from the head and the local target still equals the signed base. It re-runs the rule inspection against the imported facts and calls `mergeRemoteBound` with the rule binding, whose step 5 records the missing fact once with `commit` equal to the head.
 - **Rationale**: FR-020. Today a rerun stops at the local-equals-hosted check (`automerge.go` lines 669 to 676).
@@ -147,7 +166,7 @@ Decision `01M5VF10Q3SQX8WTK2MEN92ZSC`.
 | Spec assumption | Verification | Result |
 |----|----|----|
 | The advancement request can carry the rule name through the push-option channel | Finding 13; the wrapper advertises push options | Holds; new option `hn-rule` |
-| Older clients reject the new fields and rule facts | Findings 1 and 2 | Holds for every older client, because `requiredAccepts` is at least 1 |
+| Older clients reject the new fields and rule facts | Findings 1 and 2 | Holds for every fact valid only through path (b). An older client accepts a maintainer-signed fact with enough decisions whatever its `rule` field says; under union validity the new client accepts it too, so they agree |
 | The set of required pipelines is every pipeline in the base policy | `evaluateProposalEvidence` iterates `policy.Pipelines` (`policy.go` lines 383 to 425) | Holds |
 | D1 `requesters` is used as shipped | Finding 10 | Holds |
 | Manual `hn merge` and automerge under acceptance mode `maintainers` keep their behavior | Finding 6; the rule authority is present only for acceptance mode `rule` | Holds by design; NFR-004 tests confirm |
@@ -161,9 +180,9 @@ The question here is how this mission would fail if it shipped as planned, and w
 |----|----|----|
 | The executing actor signs a fact that its own projection rejects, and its clone refuses every later command | Medium without a guard | `appendRuleMergeEvent` builds the event, runs `validateRuleMergeFact` over the same events and only then calls `appendEvent`. A property test executes every valid fixture and admits every recorded fact on all four surfaces |
 | A verifier accepts a fact another verifier rejects | Low | One fact function; NFR-002 agreement test over every valid and invalid fixture |
-| The key scan rejects a historical event | Very low; no Hubnot client wrote a `rule` key | Full existing suite and fixtures run unchanged (NFR-004) |
+| A rule-key rule rejects a historical event | Removed by design: no `rule` key is ever a parse error | Signed legacy fixtures L01 to L06 on every surface and against the older client |
 | Projection slows in repositories with many rule merges | Medium for the lab use case | Memo per `(base, head)` and pipeline digests per head within a pass; NFR-006 timing; follow-up issue if the gate host measures above the bound |
-| The server and the client preview disagree about a veto | Medium, because they hold different fact sets | The client imports with an all-actor selection first (existing `automergeUnselectedActors`); the server judges its own facts and wins; the agreement test evaluates both on the same facts |
+| The server and the client preview disagree about a veto | Medium, because they hold different fact sets | The client imports with an all-actor selection first (existing `automergeUnselectedActors`); the server judges its own facts and wins; the agreement test holds branch, policy, code and facts identical and compares rule satisfaction only (decision `01M5VSEHFH0B1BSJ1NA923FKAA`) |
 | A rule with acceptance mode `rule` covers a protected path through an ancestor selector | Low | FR-003 checks equality, ancestor and descendant overlap. Runtime blockers for policy and protected changes stay in both modes |
 | The new step 7a refuses ordinary maintainer advancements | None; it runs only with `hn-rule` | The existing serve tests run unchanged |
 | A rule merge fact for a candidate whose code ref is not hosted reaches `hn serve` | Low | Missing base or head becomes `dependency-missing`; the actor push is refused until the code arrives |
@@ -179,7 +198,7 @@ No dependency is added, upgraded or removed, so the dependency rule of `contract
 | A2 | An executing actor omits a current change request from the evidence and records a merge on an ordinary remote with a modified client | `accepted` with documentation | OQ-8: facts are judged by their own evidence, as acceptance facts are today, and a malicious maintainer has the same power. `hn serve` enforces vetoes at advancement. `docs/threat-model.md` records the residual risk |
 | A3 | A rule allows `docs/` and the candidate replaces `docs` with a symlink into `.hn/` | `accepted` (covered) | `automergePathAllowed` never allows the ancestor `docs` itself (`automerge.go` lines 316 to 327). The policy is read from the `.hn/policy.json` tree path, and Git does not follow symlinks for `git show` |
 | A4 | A maintainer adopts a rule over `scripts/` while protected checks cover `scripts/lint.sh` | `changed` | The spec's overlap rule (FR-003) is implemented as equal, ancestor or descendant in either direction, with a fixture for each direction |
-| A5 | A rule merge fact uses `"RULE"` or `"rule": null` so that verifiers disagree | `changed` | The key scan of decision `01M5VEZKK32DXWNPRAYGDMY3ZK` was added during this challenge |
+| A5 | A rule merge fact uses `"RULE"` or `"rule": null` so that verifiers disagree | `changed` | The key scan of decision `01M5VEZKK32DXWNPRAYGDMY3ZK` was added during this challenge, and replaced after analysis by canonical-claim recognition (decision `01M5VSEHF1G2YQDQW7HPVBF95K`): every non-canonical shape is no claim on every verifier, so verifiers agree without refusing legacy bytes |
 | A6 | The executing actor is also a listed reviewer and approves its own author's candidate | `accepted` | Spec assumption: independence comes from excluding the author's own approval and from the one-approval minimum |
 | A7 | A case-variant directory such as `.HN/` evades the `.hn` refusal | `deferred_with_rationale` | Git tree paths are case-sensitive and Hubnot reads only `.hn/...`. A case-variant directory is ordinary content. Revisit if Hubnot ever reads policy case-insensitively |
 | A8 | An actor requests advancement under a rule whose target branch is a different branch | `accepted` (covered) | Step 10 refuses a rule whose `targetBranch` does not match the pushed ref, with `protected-rule-not-satisfied` |

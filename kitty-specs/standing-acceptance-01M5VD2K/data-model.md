@@ -55,9 +55,9 @@ The base policy is `.hn/policy.json` at the candidate's signed base. The target 
 
 ### Rule merge fact (new shape of an existing kind)
 
-A `proposal.merged` event whose `rule` field is set. The field is new; every other field already exists.
+A `proposal.merged` event that carries a canonical rule claim and is valid through path (b). The field is new; every other field already exists. No row below is a new parse-time refusal: decoding is unchanged, and a payload that does not meet the `rule` row simply carries no claim.
 
-| Field | Meaning for a rule merge fact | Parse-time rule |
+| Field | Meaning for a rule merge fact | Recognition rule |
 |----|----|----|
 | `kind` | `proposal.merged` | Existing |
 | `actor`, `publicKey`, `sequence`, `previous`, `timestamp` | The executing actor's chain position | Existing |
@@ -66,15 +66,19 @@ A `proposal.merged` event whose `rule` field is set. The field is new; every oth
 | `head` | Candidate's signed head | Existing: Git object ID; must equal the candidate head (`validateProposalMergeBinding`) |
 | `commit` | Result commit: a two-parent merge commit (local) or the head itself (`hn serve` fast-forward) | Existing: Git object ID |
 | `evidence` | Qualifying approval and passing run-result IDs, sorted, unique | Existing: unique full event IDs |
-| `rule` | Name of the rule in the base policy | New: present only on `proposal.merged`; non-empty JSON string matching the rule-name grammar; key exactly `rule`, at most once |
+| `rule` | Name of the rule in the base policy | New, `Event.Rule` with `json:"-"`: set by `parseMergeRuleClaim` only on `proposal.merged`, only when exactly one top-level key equals `rule` under case folding, that key is spelled exactly `rule`, and its value is a JSON string matching the rule-name grammar. Any other shape leaves it empty |
 
 ### Acceptance merge fact (existing, unchanged)
 
-A `proposal.merged` event without `rule`. Its evidence lists maintainer acceptance decisions, and every verifier runs today's check on it.
+A `proposal.merged` event valid through path (a): today's check passes, so a maintainer signed it and its evidence lists enough maintainer acceptance decisions. This holds whatever its `rule` field says. When it also carries a canonical rule claim, the claim is an unverified annotation that status may report and that never affects validity.
+
+### Merge authority (verdict)
+
+`admitMergeFact` returns `mergeByMaintainers` for a fact that passes path (a) and `mergeByRule` for a fact that fails path (a) and passes path (b). Status output, the publication-only rerun and the pre-sign self-check read it. A fact that passes neither is refused.
 
 ### Qualifying evidence
 
-An event ID in a rule merge fact's `evidence` qualifies when it meets one of these two descriptions. Anything else invalidates the fact.
+An event ID in a rule merge fact's `evidence` qualifies when it meets one of these two descriptions. Anything else fails path (b).
 
 | Evidence kind | Qualifies when |
 |----|----|
@@ -127,12 +131,14 @@ The rule authority carried in `proposalMergeGuard` for `hn automerge`. It holds 
 
 ## Invariants
 
-1. A rule merge fact is valid on a verifier only if `validateRuleMergeFact` returns nil for its base policy, candidate base and head, and listed evidence. The verifier must hold both commits in one store.
+0. A `proposal.merged` fact is valid when path (a) passes or, failing that, when it carries a canonical rule claim and path (b) passes. Path (a) is today's check, unchanged. Every event that verified before the mission still verifies with the same meaning.
+1. A fact is valid through path (b) on a verifier only if `validateRuleMergeFact` returns nil for its base policy, candidate base and head, and listed evidence. The verifier must hold both commits in one store, and only path (b) needs them.
 2. A rule merge fact's signer is an executing actor of the named rule in the base policy, and the rule's acceptance mode is `rule`.
 3. No rule with acceptance mode `rule` can authorize a change to `.hn/policy.json`, any `.hn/pipelines/*.json` required by policy, or any protected-check path. Validation forbids such selectors, and runtime refuses such changes in both modes.
 4. Standing acceptance moves a branch only when the target policy digest equals the base policy digest.
 5. A fact's validity never depends on events outside its evidence. Vetoes affect execution and advancement only.
 6. Policies and repositories without `acceptance` and `reviewers` produce the same eligibility, refusals and facts as before the mission.
+7. At every landing boundary, a surface without path (b) rejects every fact that only path (b) admits.
 
 ## Lifecycle of a candidate under a standing rule
 
@@ -144,14 +150,16 @@ stateDiagram-v2
     Open --> Eligible: evaluateRuleAcceptance passes, target equals base, target policy equals base policy
     Eligible --> Blocked: change request, failure or rejection arrives
     Eligible --> Advanced: native merge commit (local) or fast-forward (hn serve)
-    Advanced --> Merged: rule merge fact recorded after pre-sign self-check
+    Advanced --> Recorded: rule merge fact recorded after pre-sign self-check
     Advanced --> Advanced: interruption; rerun same hn automerge command (repair)
+    Recorded --> Merged: fact published (local merges need no publication step)
+    Recorded --> Recorded: interruption; rerun with --remote takes the publication-only path
     Open --> NeedsRevision: target moved or target policy changed
     NeedsRevision --> [*]: hn proposal revise (new candidate)
     Merged --> [*]
 ```
 
-`Advanced` with no fact is the repair state. The same `hn automerge --execute` command, with the same `--remote` when one was used, records the fact once under the existing repair conditions: not merged, not rejected, the rule still satisfied by current evidence, and the executing actor still listed.
+`Advanced` with no fact is the repair state. The same `hn automerge --execute` command, with the same `--remote` when one was used, records the fact once under the existing repair conditions: not merged, not rejected, the rule still satisfied by current evidence, and the executing actor still listed. `Recorded` is a remote rule merge whose fact exists locally but may not be on the server yet. The same command with `--remote` takes the publication-only path when the identity is an executing actor of the rule and signed that fact: it publishes or republishes the fact and confirms the hosted branch, and signs, records and advances nothing.
 
 ## Lifecycle of a standing rule
 
