@@ -1,7 +1,7 @@
 {
-  "event_count": 8,
-  "last_event_id": "01M5VHTX06R86T2E457K3WJ977",
-  "materialized_at": "2026-10-26T07:29:41.382091+00:00",
+  "event_count": 9,
+  "last_event_id": "01M5VHTXV30C9K94HPV4DTRP7Z",
+  "materialized_at": "2026-10-26T07:29:42.243461+00:00",
   "mission_number": "",
   "mission_slug": "standing-acceptance-01M5VD2K",
   "mission_type": "",
@@ -14,7 +14,7 @@
     "for_review": 0,
     "in_progress": 0,
     "in_review": 0,
-    "planned": 8
+    "planned": 9
   },
   "work_packages": {
     "WP01": {
@@ -72,6 +72,13 @@
       "lane": "planned",
       "last_event_id": "01M5VHTX06R86T2E457K3WJ977",
       "last_transition_at": "2026-10-26T07:29:41.382091+00:00"
+    },
+    "WP09": {
+      "actor": "finalize-tasks",
+      "force_count": 0,
+      "lane": "planned",
+      "last_event_id": "01M5VHTXV30C9K94HPV4DTRP7Z",
+      "last_transition_at": "2026-10-26T07:29:42.243461+00:00"
     }
   }
 }
