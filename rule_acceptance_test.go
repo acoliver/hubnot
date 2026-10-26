@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"math/rand"
 	"reflect"
@@ -693,4 +694,615 @@ func TestRuleAcceptanceLiveDeterministic(t *testing.T) {
 			t.Fatalf("shuffle %d changed the evaluation:\n got %+v\nwant %+v", i, got, baseline)
 		}
 	}
+}
+
+// Rule merge fact tests (WP05). The executing actor E is not a maintainer,
+// so every fact below can only be valid through path (b).
+var (
+	ruleTestExecutor = strings.Repeat("8", 64)
+	ruleTestRunner2  = strings.Repeat("7", 64)
+)
+
+const ruleTestResultCommit = "4444444444444444444444444444444444444444"
+
+// newRuleFactTestWorld is the User Story 1 world: E executes rule ordinary,
+// GPT approves and the trusted runner passes the test pipeline.
+func newRuleFactTestWorld(t *testing.T) (world *ruleAcceptanceTestWorld, approval, passed StoredEvent) {
+	t.Helper()
+	world = newRuleAcceptanceTestWorld(t)
+	world.rule().Actors = []string{ruleTestExecutor, ruleTestMaintainer}
+	approval = world.review(ruleTestGPT, "approve")
+	passed = world.passingRun()
+	return world, approval, passed
+}
+
+// fact builds the rule merge fact of the world's candidate without recording
+// it, because a fact is never its own evidence.
+func (w *ruleAcceptanceTestWorld) fact(actor string, evidence ...string) StoredEvent {
+	stored := w.event(Event{
+		Kind: "proposal.merged", Actor: actor, Subject: w.Proposal.ID, Head: ruleTestHead, Commit: ruleTestResultCommit,
+		Policy: ruleTestPolicyHash, Evidence: sortedUniqueStrings(evidence...), Rule: ruleTestRuleName,
+	})
+	w.Events = w.Events[:len(w.Events)-1]
+	return stored
+}
+
+func (w *ruleAcceptanceTestWorld) byID() map[string]StoredEvent {
+	byID := map[string]StoredEvent{w.Proposal.ID: w.Proposal}
+	for _, event := range w.Events {
+		byID[event.ID] = event
+	}
+	return byID
+}
+
+func (w *ruleAcceptanceTestWorld) validateFact(fact StoredEvent) error {
+	return validateRuleMergeFact(w.inputs(), fact, w.byID())
+}
+
+// ruleTestFactFailure asserts that err is a *ruleFactError for fact with the
+// given check and that its message names the full fact ID and the check.
+func ruleTestFactFailure(t *testing.T, err error, fact StoredEvent, check string) *ruleFactError {
+	t.Helper()
+	var failure *ruleFactError
+	if !errors.As(err, &failure) {
+		t.Fatalf("error = %v (%T), want a *ruleFactError with check %s", err, err, check)
+	}
+	if failure.Check != check || failure.FactID != fact.ID {
+		t.Fatalf("failure = %+v, want check %s for fact %s", failure, check, fact.ID)
+	}
+	message := err.Error()
+	if want := "rule merge " + fact.ID + " fails " + check + ": "; !strings.HasPrefix(message, want) {
+		t.Fatalf("message %q does not start with %q", message, want)
+	}
+	return failure
+}
+
+func TestRuleAcceptanceFactValid(t *testing.T) {
+	world, approval, passed := newRuleFactTestWorld(t)
+	evaluation := world.evaluate()
+	if !evaluation.Satisfied() || !reflect.DeepEqual(evaluation.Evidence, ruleTestIDs(approval, passed)) {
+		t.Fatalf("US1 evaluation = %+v", evaluation)
+	}
+	if err := world.validateFact(world.fact(ruleTestExecutor, evaluation.Evidence...)); err != nil {
+		t.Fatalf("valid rule merge fact refused: %v", err)
+	}
+	// A maintainer who is an executing actor also records a rule merge fact (FR-011).
+	if err := world.validateFact(world.fact(ruleTestMaintainer, evaluation.Evidence...)); err != nil {
+		t.Fatalf("rule merge fact by an executing maintainer refused: %v", err)
+	}
+}
+
+func TestRuleAcceptanceFactDefects(t *testing.T) {
+	cases := []struct {
+		id     string
+		check  string
+		detail string // substring of Detail
+		item   bool   // the failure names an evidence item
+		build  func(w *ruleAcceptanceTestWorld, approval, passed StoredEvent) StoredEvent
+	}{
+		{"F01 rule absent", ruleCheckRuleExists, `rule "absent" does not exist in the base policy`, false,
+			func(w *ruleAcceptanceTestWorld, approval, passed StoredEvent) StoredEvent {
+				fact := w.fact(ruleTestExecutor, approval.ID, passed.ID)
+				fact.Event.Rule = "absent"
+				return fact
+			}},
+		{"F01 automerge disabled", ruleCheckRuleExists, `rule "ordinary" does not exist in the base policy`, false,
+			func(w *ruleAcceptanceTestWorld, approval, passed StoredEvent) StoredEvent {
+				w.Policy.Automerge = nil
+				return w.fact(ruleTestExecutor, approval.ID, passed.ID)
+			}},
+		{"F02 maintainers acceptance", ruleCheckRuleAcceptance, `rule "ordinary" has acceptance "maintainers"`, false,
+			func(w *ruleAcceptanceTestWorld, approval, passed StoredEvent) StoredEvent {
+				w.rule().Acceptance = automergeAcceptanceOf(automergeAcceptanceMaintainers)
+				return w.fact(ruleTestExecutor, approval.ID, passed.ID)
+			}},
+		{"F02 acceptance absent", ruleCheckRuleAcceptance, `rule "ordinary" has acceptance "maintainers"`, false,
+			func(w *ruleAcceptanceTestWorld, approval, passed StoredEvent) StoredEvent {
+				w.rule().Acceptance = AutomergeAcceptance{}
+				return w.fact(ruleTestExecutor, approval.ID, passed.ID)
+			}},
+		{"F03 signer not an executing actor", ruleCheckRuleSigner, "signer " + ruleTestOutsider + ` is not an executing actor of rule "ordinary"`, false,
+			func(w *ruleAcceptanceTestWorld, approval, passed StoredEvent) StoredEvent {
+				return w.fact(ruleTestOutsider, approval.ID, passed.ID)
+			}},
+		{"F04 policy digest", ruleCheckPolicyDigest, "is not the base policy digest " + ruleTestPolicyHash, false,
+			func(w *ruleAcceptanceTestWorld, approval, passed StoredEvent) StoredEvent {
+				fact := w.fact(ruleTestExecutor, approval.ID, passed.ID)
+				fact.Event.Policy = eventID([]byte("another policy"))
+				return fact
+			}},
+		{"F05 approval of another proposal", ruleCheckEvidenceItem, "it reviews another proposal", true,
+			func(w *ruleAcceptanceTestWorld, approval, passed StoredEvent) StoredEvent {
+				other := w.event(Event{Kind: "review.submit", Actor: ruleTestSonnet, Subject: eventID([]byte("another proposal")), Verdict: "approve"})
+				return w.fact(ruleTestExecutor, approval.ID, passed.ID, other.ID)
+			}},
+		{"F06 proposal decision", ruleCheckEvidenceItem, "has kind proposal.decision, which a rule merge fact cannot cite", true,
+			func(w *ruleAcceptanceTestWorld, approval, passed StoredEvent) StoredEvent {
+				decision := w.decision(ruleTestMaintainer, "accept")
+				return w.fact(ruleTestExecutor, approval.ID, passed.ID, decision.ID)
+			}},
+		{"F07 request-changes review", ruleCheckEvidenceItem, `its verdict is "request-changes"`, true,
+			func(w *ruleAcceptanceTestWorld, approval, passed StoredEvent) StoredEvent {
+				change := w.review(ruleTestSonnet, "request-changes")
+				return w.fact(ruleTestExecutor, approval.ID, passed.ID, change.ID)
+			}},
+		{"F08 failed run result", ruleCheckEvidenceItem, `has outcome "failed", not "passed"`, true,
+			func(w *ruleAcceptanceTestWorld, approval, passed StoredEvent) StoredEvent {
+				failed := w.result(ruleTestRunner, w.request(ruleTestMaintainer, "test"), "failed")
+				return w.fact(ruleTestExecutor, approval.ID, passed.ID, failed.ID)
+			}},
+		{"F09 trusted reviewer outside rule reviewers", ruleCheckEvidenceItem, "reviewer " + ruleTestSonnet + " is not one of the rule's reviewers", true,
+			func(w *ruleAcceptanceTestWorld, approval, passed StoredEvent) StoredEvent {
+				w.rule().Reviewers = automergeReviewersOf(ruleTestGPT)
+				sonnet := w.review(ruleTestSonnet, "approve")
+				return w.fact(ruleTestExecutor, approval.ID, passed.ID, sonnet.ID)
+			}},
+		{"F10 author approval with allowAuthorApproval", ruleCheckEvidenceItem, "it is the candidate author's own approval", true,
+			func(w *ruleAcceptanceTestWorld, approval, passed StoredEvent) StoredEvent {
+				w.Policy.Proposals.AllowAuthorApproval = true
+				w.Policy.Proposals.TrustedReviewers = append(w.Policy.Proposals.TrustedReviewers, ruleTestAuthor)
+				own := w.review(ruleTestAuthor, "approve")
+				return w.fact(ruleTestExecutor, approval.ID, passed.ID, own.ID)
+			}},
+		{"F11 request by a non-requester", ruleCheckEvidenceItem, "who is neither a maintainer nor a requester of pipeline \"test\"", true,
+			func(w *ruleAcceptanceTestWorld, approval, passed StoredEvent) StoredEvent {
+				result := w.result(ruleTestRunner2, w.request(ruleTestOutsider, "test"), "passed")
+				pipeline := w.Policy.Pipelines["test"]
+				pipeline.TrustedRunners = []string{ruleTestRunner2, ruleTestRunner}
+				w.Policy.Pipelines = map[string]PipelinePolicy{"test": pipeline}
+				return w.fact(ruleTestExecutor, approval.ID, passed.ID, result.ID)
+			}},
+		{"F12 two approvals by one reviewer", ruleCheckEvidenceDuplicate, "are both by reviewer " + ruleTestGPT, true,
+			func(w *ruleAcceptanceTestWorld, approval, passed StoredEvent) StoredEvent {
+				again := w.review(ruleTestGPT, "approve")
+				return w.fact(ruleTestExecutor, approval.ID, passed.ID, again.ID)
+			}},
+		{"F13 approvals below the threshold", ruleCheckApprovals, "0 of 1 counted approvals", false,
+			func(w *ruleAcceptanceTestWorld, approval, passed StoredEvent) StoredEvent {
+				return w.fact(ruleTestExecutor, passed.ID)
+			}},
+		{"F14 pipeline below the threshold", ruleCheckPipelines, `pipeline "test" has 0 of 1 passing trusted results`, false,
+			func(w *ruleAcceptanceTestWorld, approval, passed StoredEvent) StoredEvent {
+				return w.fact(ruleTestExecutor, approval.ID)
+			}},
+		{"F15 author not allowed", ruleCheckRuleAuthor, "author " + ruleTestAuthor + ` is not allowed by rule "ordinary"`, false,
+			func(w *ruleAcceptanceTestWorld, approval, passed StoredEvent) StoredEvent {
+				w.rule().Authors = []string{ruleTestOutsider}
+				return w.fact(ruleTestExecutor, approval.ID, passed.ID)
+			}},
+		{"F16 path outside the rule", ruleCheckChangedPaths, `changed path "src/main.go" is outside rule "ordinary"`, false,
+			func(w *ruleAcceptanceTestWorld, approval, passed StoredEvent) StoredEvent {
+				w.Changed = []string{"docs/guide.md", "src/main.go"}
+				return w.fact(ruleTestExecutor, approval.ID, passed.ID)
+			}},
+		{"F16 no changed paths", ruleCheckChangedPaths, "the candidate has no changed paths", false,
+			func(w *ruleAcceptanceTestWorld, approval, passed StoredEvent) StoredEvent {
+				w.Changed = []string{}
+				return w.fact(ruleTestExecutor, approval.ID, passed.ID)
+			}},
+		{"F17 policy amendment", ruleCheckManualPath, `changed path ".hn/policy.json" requires manual merge`, false,
+			func(w *ruleAcceptanceTestWorld, approval, passed StoredEvent) StoredEvent {
+				w.rule().Paths = []string{"docs/", "src/"}
+				w.Changed = []string{".hn/policy.json", "src/main.go"}
+				return w.fact(ruleTestExecutor, approval.ID, passed.ID)
+			}},
+		{"F18 protected check change", ruleCheckManualPath, `changed path "scripts/check.sh" requires manual merge`, false,
+			func(w *ruleAcceptanceTestWorld, approval, passed StoredEvent) StoredEvent {
+				w.Policy.ProtectedChecks = &ProtectedChecksPolicy{Paths: []string{"scripts/"}, TrustedReviewers: []string{ruleTestGPT}, RequiredApprovals: 1}
+				w.rule().Paths = []string{"docs/", "src/"}
+				w.Changed = []string{"scripts/check.sh", "src/main.go"}
+				return w.fact(ruleTestExecutor, approval.ID, passed.ID)
+			}},
+		{"evidence unavailable", ruleCheckEvidenceItem, "is unavailable", true,
+			func(w *ruleAcceptanceTestWorld, approval, passed StoredEvent) StoredEvent {
+				return w.fact(ruleTestExecutor, approval.ID, passed.ID, eventID([]byte("absent evidence")))
+			}},
+		{"run request unavailable", ruleCheckEvidenceItem, "which is unavailable", true,
+			func(w *ruleAcceptanceTestWorld, approval, passed StoredEvent) StoredEvent {
+				orphan := w.event(Event{Kind: "run.result", Actor: ruleTestRunner, Subject: eventID([]byte("absent request")), Pipeline: "test", Definition: ruleTestDefinition, Commit: ruleTestHead, Outcome: "passed"})
+				return w.fact(ruleTestExecutor, approval.ID, passed.ID, orphan.ID)
+			}},
+		{"untrusted runner", ruleCheckEvidenceItem, "runner " + ruleTestRunner2 + ` is not a trusted runner of pipeline "test"`, true,
+			func(w *ruleAcceptanceTestWorld, approval, passed StoredEvent) StoredEvent {
+				untrusted := w.result(ruleTestRunner2, w.request(ruleTestMaintainer, "test"), "passed")
+				return w.fact(ruleTestExecutor, approval.ID, passed.ID, untrusted.ID)
+			}},
+		{"pipeline definition unavailable at head", ruleCheckEvidenceItem, `the definition of pipeline "test" is unavailable at the candidate head`, true,
+			func(w *ruleAcceptanceTestWorld, approval, passed StoredEvent) StoredEvent {
+				w.Definitions = map[string]string{}
+				return w.fact(ruleTestExecutor, approval.ID, passed.ID)
+			}},
+		{"wrong pipeline definition", ruleCheckEvidenceItem, "names definition", true,
+			func(w *ruleAcceptanceTestWorld, approval, passed StoredEvent) StoredEvent {
+				w.Definitions = map[string]string{"test": ruleTestOtherDefinition}
+				return w.fact(ruleTestExecutor, approval.ID, passed.ID)
+			}},
+		{"duplicate runner result", ruleCheckEvidenceDuplicate, `are both by runner ` + ruleTestRunner + ` for pipeline "test"`, true,
+			func(w *ruleAcceptanceTestWorld, approval, passed StoredEvent) StoredEvent {
+				again := w.passingRun()
+				return w.fact(ruleTestExecutor, approval.ID, passed.ID, again.ID)
+			}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.id, func(t *testing.T) {
+			world, approval, passed := newRuleFactTestWorld(t)
+			if err := world.validateFact(world.fact(ruleTestExecutor, approval.ID, passed.ID)); err != nil {
+				t.Fatalf("control fact refused: %v", err)
+			}
+			fact := tc.build(world, approval, passed)
+			failure := ruleTestFactFailure(t, world.validateFact(fact), fact, tc.check)
+			if !strings.Contains(failure.Detail, tc.detail) {
+				t.Fatalf("detail %q does not contain %q", failure.Detail, tc.detail)
+			}
+			if tc.item != (failure.EventID != "") {
+				t.Fatalf("EventID = %q, want an evidence item: %v", failure.EventID, tc.item)
+			}
+			if tc.item && !strings.Contains(failure.Detail, failure.EventID) {
+				t.Fatalf("detail %q does not name evidence %s", failure.Detail, failure.EventID)
+			}
+		})
+	}
+}
+
+func TestRuleAcceptanceFactCheckOrder(t *testing.T) {
+	t.Run("policy digest before rule existence", func(t *testing.T) {
+		world, approval, passed := newRuleFactTestWorld(t)
+		fact := world.fact(ruleTestOutsider, approval.ID, passed.ID)
+		fact.Event.Policy = eventID([]byte("another policy"))
+		fact.Event.Rule = "absent"
+		ruleTestFactFailure(t, world.validateFact(fact), fact, ruleCheckPolicyDigest)
+	})
+	t.Run("signer before author before paths", func(t *testing.T) {
+		world, approval, passed := newRuleFactTestWorld(t)
+		world.rule().Authors = []string{ruleTestOutsider}
+		world.Changed = []string{".hn/policy.json"}
+		fact := world.fact(ruleTestOutsider, approval.ID, passed.ID)
+		ruleTestFactFailure(t, world.validateFact(fact), fact, ruleCheckRuleSigner)
+		fact = world.fact(ruleTestExecutor, approval.ID, passed.ID)
+		ruleTestFactFailure(t, world.validateFact(fact), fact, ruleCheckRuleAuthor)
+	})
+	t.Run("evidence item before duplicate and thresholds", func(t *testing.T) {
+		world, approval, _ := newRuleFactTestWorld(t)
+		again := world.review(ruleTestGPT, "approve")
+		change := world.review(ruleTestSonnet, "request-changes")
+		fact := world.fact(ruleTestExecutor, approval.ID, again.ID, change.ID)
+		failure := ruleTestFactFailure(t, world.validateFact(fact), fact, ruleCheckEvidenceItem)
+		if failure.EventID != change.ID {
+			t.Fatalf("EventID = %s, want %s", failure.EventID, change.ID)
+		}
+	})
+	t.Run("pipelines in sorted order", func(t *testing.T) {
+		world, approval, passed := newRuleFactTestWorld(t)
+		world.Policy.Pipelines = map[string]PipelinePolicy{
+			"test": world.Policy.Pipelines["test"],
+			"lint": {RequiredResults: 1, TrustedRunners: []string{ruleTestRunner}},
+			"docs": {RequiredResults: 1, TrustedRunners: []string{ruleTestRunner}},
+		}
+		world.Definitions = map[string]string{"test": ruleTestDefinition, "lint": ruleTestDefinition, "docs": ruleTestDefinition}
+		lint := world.result(ruleTestRunner, world.request(ruleTestMaintainer, "lint"), "passed")
+		fact := world.fact(ruleTestExecutor, approval.ID, passed.ID, lint.ID)
+		failure := ruleTestFactFailure(t, world.validateFact(fact), fact, ruleCheckPipelines)
+		if want := `pipeline "docs" has 0 of 1 passing trusted results`; failure.Detail != want {
+			t.Fatalf("detail = %q, want %q", failure.Detail, want)
+		}
+		docs := world.result(ruleTestRunner, world.request(ruleTestMaintainer, "docs"), "passed")
+		if err := world.validateFact(world.fact(ruleTestExecutor, approval.ID, passed.ID, lint.ID, docs.ID)); err != nil {
+			t.Fatalf("fact with every pipeline refused: %v", err)
+		}
+	})
+	t.Run("detail is safe text", func(t *testing.T) {
+		world, approval, passed := newRuleFactTestWorld(t)
+		world.Changed = []string{"docs/a.md", "docs\x1b[31m/b.md"}
+		world.rule().Paths = []string{"docs/a.md"}
+		fact := world.fact(ruleTestExecutor, approval.ID, passed.ID)
+		failure := ruleTestFactFailure(t, world.validateFact(fact), fact, ruleCheckChangedPaths)
+		if strings.ContainsRune(failure.Error(), '\x1b') {
+			t.Fatalf("message %q carries a control character", failure.Error())
+		}
+	})
+}
+
+// TestRuleAcceptanceFactImmutable proves FR-015: events outside the evidence,
+// even later vetoes, never change a fact's validity.
+func TestRuleAcceptanceFactImmutable(t *testing.T) {
+	world, approval, passed := newRuleFactTestWorld(t)
+	fact := world.fact(ruleTestExecutor, approval.ID, passed.ID)
+	world.review(ruleTestGPT, "request-changes")
+	world.decision(ruleTestMaintainer, "reject")
+	world.result(ruleTestRunner, world.request(ruleTestMaintainer, "test"), "failed")
+	if world.evaluate().Satisfied() {
+		t.Fatal("the vetoed live evaluation is satisfied")
+	}
+	if err := world.validateFact(fact); err != nil {
+		t.Fatalf("a later veto invalidated the fact: %v", err)
+	}
+}
+
+// TestRuleAcceptanceFactProperty checks that both entry points agree
+// (NFR-002 preparation): the evidence of a live evaluation with no unmet
+// condition makes a valid fact, and an unmet threshold makes the fact fail
+// the matching threshold check.
+func TestRuleAcceptanceFactProperty(t *testing.T) {
+	random := rand.New(rand.NewSource(20261026))
+	chance := func(percent int) bool { return random.Intn(100) < percent }
+	subset := func(values ...string) []string {
+		var chosen []string
+		for _, value := range values {
+			if chance(75) {
+				chosen = append(chosen, value)
+			}
+		}
+		return sortedUniqueStrings(chosen...)
+	}
+	pickOne := func(values ...string) string { return values[random.Intn(len(values))] }
+
+	var valid, satisfied, approvalShort, pipelineShort int
+	for i := 0; i < 500; i++ {
+		world := newRuleAcceptanceTestWorld(t)
+		world.rule().Actors = []string{ruleTestExecutor, ruleTestMaintainer}
+		world.Policy.Proposals.TrustedReviewers = subset(ruleTestGPT, ruleTestSonnet, ruleTestAuthor)
+		world.Policy.Proposals.AllowAuthorApproval = chance(50)
+		world.Policy.Proposals.RequiredApprovals = 1
+		if chance(30) {
+			world.Policy.Proposals.RequiredApprovals = 2
+		}
+		if chance(40) {
+			world.rule().Reviewers = automergeReviewersOf(subset(ruleTestGPT, ruleTestSonnet, ruleTestAuthor)...)
+		}
+		names := []string{"test"}
+		if chance(50) {
+			names = append(names, "lint")
+		}
+		world.Policy.Pipelines = make(map[string]PipelinePolicy)
+		world.Definitions = make(map[string]string)
+		for _, name := range names {
+			runners := subset(ruleTestRunner, ruleTestRunner2)
+			if len(runners) == 0 {
+				runners = []string{ruleTestRunner}
+			}
+			pipeline := PipelinePolicy{RequiredResults: 1 + random.Intn(len(runners)), TrustedRunners: runners}
+			if chance(40) {
+				pipeline.Requesters = []string{ruleTestGPT}
+			}
+			world.Policy.Pipelines[name] = pipeline
+			world.Definitions[name] = ruleTestDefinition
+		}
+
+		for reviews := 1 + random.Intn(6); reviews > 0; reviews-- {
+			verdict := "approve"
+			if chance(15) {
+				verdict = "request-changes"
+			}
+			world.review(pickOne(ruleTestGPT, ruleTestSonnet, ruleTestGPT, ruleTestSonnet, ruleTestAuthor, ruleTestOutsider), verdict)
+		}
+		var requests []StoredEvent
+		for count := random.Intn(5); count > 0; count-- {
+			requests = append(requests, world.request(pickOne(ruleTestMaintainer, ruleTestMaintainer, ruleTestGPT, ruleTestOutsider), pickOne(names...)))
+		}
+		// Results arrive in random order across requests and runners.
+		for count := random.Intn(9); count > 0 && len(requests) > 0; count-- {
+			outcome := "passed"
+			if chance(15) {
+				outcome = "failed"
+			}
+			world.result(pickOne(ruleTestRunner, ruleTestRunner2, ruleTestOutsider), requests[random.Intn(len(requests))], outcome)
+		}
+
+		evaluation := world.evaluate()
+		for _, unmet := range evaluation.Unmet {
+			if unmet.Kind != ruleUnmetApprovals && unmet.Kind != ruleUnmetPipeline {
+				t.Fatalf("world %d: unexpected unmet condition %+v", i, unmet)
+			}
+		}
+		fact := world.fact(ruleTestExecutor, evaluation.Evidence...)
+		err := world.validateFact(fact)
+		switch {
+		case len(evaluation.Unmet) == 0:
+			if err != nil {
+				t.Fatalf("world %d: evidence %v of an evaluation with no unmet condition made an invalid fact: %v", i, evaluation.Evidence, err)
+			}
+			valid++
+			if evaluation.Satisfied() {
+				satisfied++
+			}
+		case len(evaluation.UnmetOf(ruleUnmetApprovals)) > 0:
+			ruleTestFactFailure(t, err, fact, ruleCheckApprovals)
+			approvalShort++
+		default:
+			ruleTestFactFailure(t, err, fact, ruleCheckPipelines)
+			pipelineShort++
+		}
+	}
+	t.Logf("generated worlds: %d valid (%d satisfied), %d approval short, %d pipeline short", valid, satisfied, approvalShort, pipelineShort)
+	if satisfied < 10 || valid == satisfied || approvalShort < 10 || pipelineShort < 10 {
+		t.Fatalf("generated worlds are too narrow: %d valid (%d satisfied), %d approval short, %d pipeline short", valid, satisfied, approvalShort, pipelineShort)
+	}
+}
+
+// ruleTestAccess serves the world's objects and counts nothing itself: the
+// memo's own counters prove the bound.
+func ruleTestAccess(world *ruleAcceptanceTestWorld) ruleObjectAccess {
+	return ruleObjectAccess{
+		PolicyAt: func(commit string) (PolicyDocument, string, error) {
+			if commit != ruleTestBase {
+				return PolicyDocument{}, "", fmt.Errorf("no policy at %s", commit)
+			}
+			return world.Policy, ruleTestPolicyHash, nil
+		},
+		ChangedPaths: func(base, head string) ([]string, error) {
+			return world.Changed, nil
+		},
+		PipelineDigest: func(head, pipeline string) (string, error) {
+			definition, exists := world.Definitions[pipeline]
+			if !exists {
+				return "", fmt.Errorf("pipeline %q does not exist at commit %s", pipeline, head)
+			}
+			return definition, nil
+		},
+	}
+}
+
+func TestRuleAcceptanceFactMemo(t *testing.T) {
+	t.Run("one computation per pass", func(t *testing.T) {
+		world, approval, passed := newRuleFactTestWorld(t)
+		world.Policy.Pipelines["lint"] = PipelinePolicy{RequiredResults: 1, TrustedRunners: []string{ruleTestRunner}}
+		world.Definitions["lint"] = ruleTestDefinition
+		lint := world.result(ruleTestRunner, world.request(ruleTestMaintainer, "lint"), "passed")
+		memo := newRuleValidationMemo(ruleTestAccess(world))
+		byID := world.byID()
+
+		facts := []struct {
+			fact  StoredEvent
+			check string
+		}{
+			{world.fact(ruleTestExecutor, approval.ID, passed.ID, lint.ID), ""},
+			{world.fact(ruleTestExecutor, passed.ID, lint.ID), ruleCheckApprovals},
+			{world.fact(ruleTestExecutor, approval.ID, lint.ID), ruleCheckPipelines},
+		}
+		for _, tc := range facts {
+			err := validateRuleMergeFactWith(memo, tc.fact, world.Proposal, byID)
+			if tc.check == "" {
+				if err != nil {
+					t.Fatalf("valid fact refused: %v", err)
+				}
+				continue
+			}
+			ruleTestFactFailure(t, err, tc.fact, tc.check)
+		}
+		if memo.policyCalls != 1 || memo.changedPathCalls != 1 || memo.pipelineDigestCalls != 2 {
+			t.Fatalf("calls: policy %d, changed paths %d, pipeline digests %d; want 1, 1, 2", memo.policyCalls, memo.changedPathCalls, memo.pipelineDigestCalls)
+		}
+
+		other := world.event(Event{Kind: "proposal.open", Actor: ruleTestAuthor, Base: ruleTestBase, Head: ruleTestOtherHead})
+		otherFact := world.fact(ruleTestExecutor, approval.ID, passed.ID, lint.ID)
+		otherFact.Event.Subject, otherFact.Event.Head = other.ID, ruleTestOtherHead
+		// The cited approval reviews the first candidate, so it cannot count here.
+		ruleTestFactFailure(t, validateRuleMergeFactWith(memo, otherFact, other, byID), otherFact, ruleCheckEvidenceItem)
+		if memo.policyCalls != 1 || memo.changedPathCalls != 2 || memo.pipelineDigestCalls != 4 {
+			t.Fatalf("calls after a second candidate: policy %d, changed paths %d, pipeline digests %d; want 1, 2, 4", memo.policyCalls, memo.changedPathCalls, memo.pipelineDigestCalls)
+		}
+	})
+	t.Run("inputs carry the fact's rule", func(t *testing.T) {
+		world, approval, passed := newRuleFactTestWorld(t)
+		fact := world.fact(ruleTestExecutor, approval.ID, passed.ID)
+		fact.Event.Rule = "absent"
+		inputs, err := newRuleValidationMemo(ruleTestAccess(world)).inputsForFact(fact, world.Proposal)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if inputs.RuleName != "absent" || inputs.PolicyDigest != ruleTestPolicyHash || !reflect.DeepEqual(inputs.Changed, world.Changed) ||
+			!reflect.DeepEqual(inputs.PipelineDefinitions, world.Definitions) || inputs.Proposal.ID != world.Proposal.ID {
+			t.Fatalf("inputs = %+v", inputs)
+		}
+	})
+	t.Run("errors are cached and never become an empty change list", func(t *testing.T) {
+		world, approval, passed := newRuleFactTestWorld(t)
+		fact := world.fact(ruleTestExecutor, approval.ID, passed.ID)
+		byID := world.byID()
+		missing := errors.New("missing dependency " + ruleTestHead)
+		access := ruleTestAccess(world)
+		access.ChangedPaths = func(base, head string) ([]string, error) { return nil, missing }
+		memo := newRuleValidationMemo(access)
+		for i := 0; i < 2; i++ {
+			err := validateRuleMergeFactWith(memo, fact, world.Proposal, byID)
+			var failure *ruleFactError
+			if !errors.Is(err, missing) || errors.As(err, &failure) {
+				t.Fatalf("pass %d: error = %v, want the changed-path error unchanged", i, err)
+			}
+		}
+		if memo.changedPathCalls != 1 || memo.pipelineDigestCalls != 0 {
+			t.Fatalf("changed path calls %d, pipeline digest calls %d; want 1, 0", memo.changedPathCalls, memo.pipelineDigestCalls)
+		}
+
+		access = ruleTestAccess(world)
+		policyErr := errors.New("no .hn/policy.json at commit " + ruleTestBase)
+		access.PolicyAt = func(string) (PolicyDocument, string, error) { return PolicyDocument{}, "", policyErr }
+		memo = newRuleValidationMemo(access)
+		for i := 0; i < 2; i++ {
+			if err := validateRuleMergeFactWith(memo, fact, world.Proposal, byID); !errors.Is(err, policyErr) {
+				t.Fatalf("pass %d: error = %v, want the policy error unchanged", i, err)
+			}
+		}
+		if memo.policyCalls != 1 || memo.changedPathCalls != 0 {
+			t.Fatalf("policy calls %d, changed path calls %d; want 1, 0", memo.policyCalls, memo.changedPathCalls)
+		}
+	})
+	t.Run("pipeline digest error leaves the pipeline unavailable", func(t *testing.T) {
+		world, approval, passed := newRuleFactTestWorld(t)
+		fact := world.fact(ruleTestExecutor, approval.ID, passed.ID)
+		access := ruleTestAccess(world)
+		access.PipelineDigest = func(head, pipeline string) (string, error) { return "", errors.New("pipeline blob is missing") }
+		memo := newRuleValidationMemo(access)
+		for i := 0; i < 2; i++ {
+			failure := ruleTestFactFailure(t, validateRuleMergeFactWith(memo, fact, world.Proposal, world.byID()), fact, ruleCheckEvidenceItem)
+			if failure.EventID != passed.ID {
+				t.Fatalf("EventID = %s, want %s", failure.EventID, passed.ID)
+			}
+		}
+		if memo.pipelineDigestCalls != 1 {
+			t.Fatalf("pipeline digest calls = %d, want 1", memo.pipelineDigestCalls)
+		}
+		withoutResult := world.fact(ruleTestExecutor, approval.ID)
+		ruleTestFactFailure(t, validateRuleMergeFactWith(memo, withoutResult, world.Proposal, world.byID()), withoutResult, ruleCheckPipelines)
+	})
+}
+
+func TestRuleAcceptanceAdmitMergeFact(t *testing.T) {
+	maintainerErr := errors.New("merge abc is not authorized by the proposal policy")
+	ruleErr := &ruleFactError{FactID: "sha256:fact", Check: ruleCheckRuleExists, Detail: "rule \"x\" does not exist in the base policy"}
+	cases := []struct {
+		name          string
+		rule          string
+		maintainer    error
+		rulePath      error
+		want          mergeAuthority
+		wantErr       error
+		wantRuleCalls int
+	}{
+		{"maintainer path passes without a claim", "", nil, ruleErr, mergeByMaintainers, nil, 0},
+		{"maintainer path passes with a claim", "nosuch", nil, ruleErr, mergeByMaintainers, nil, 0},
+		{"maintainer path fails without a claim", "", maintainerErr, nil, "", maintainerErr, 0},
+		{"rule path passes", ruleTestRuleName, maintainerErr, nil, mergeByRule, nil, 1},
+		{"both paths fail", ruleTestRuleName, maintainerErr, ruleErr, "", ruleErr, 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var maintainerCalls, ruleCalls int
+			merge := StoredEvent{ID: "sha256:fact", Event: Event{Kind: "proposal.merged", Rule: tc.rule}}
+			got, err := admitMergeFact(merge,
+				func() error { maintainerCalls++; return tc.maintainer },
+				func() error { ruleCalls++; return tc.rulePath })
+			if got != tc.want || err != tc.wantErr {
+				t.Fatalf("admitMergeFact = %q, %v; want %q, %v", got, err, tc.want, tc.wantErr)
+			}
+			if maintainerCalls != 1 || ruleCalls != tc.wantRuleCalls {
+				t.Fatalf("calls: maintainer %d, rule %d; want 1, %d", maintainerCalls, ruleCalls, tc.wantRuleCalls)
+			}
+		})
+	}
+}
+
+func TestRuleAcceptanceAdmitMergeFactWithValidator(t *testing.T) {
+	world, approval, passed := newRuleFactTestWorld(t)
+	maintainerPath := func(merge StoredEvent) func() error {
+		return func() error {
+			return fmt.Errorf("merge %s is not authorized by the proposal policy", shortID(merge.ID))
+		}
+	}
+	rulePath := func(merge StoredEvent) func() error {
+		return func() error { return world.validateFact(merge) }
+	}
+
+	valid := world.fact(ruleTestExecutor, approval.ID, passed.ID)
+	if got, err := admitMergeFact(valid, maintainerPath(valid), rulePath(valid)); got != mergeByRule || err != nil {
+		t.Fatalf("valid rule merge fact: %q, %v; want rule", got, err)
+	}
+
+	absent := world.fact(ruleTestExecutor, approval.ID, passed.ID)
+	absent.Event.Rule = "absent"
+	got, err := admitMergeFact(absent, maintainerPath(absent), rulePath(absent))
+	if got != "" {
+		t.Fatalf("defective fact admitted as %q", got)
+	}
+	ruleTestFactFailure(t, err, absent, ruleCheckRuleExists)
 }

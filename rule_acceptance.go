@@ -126,20 +126,35 @@ func ruleCountedReviewers(policy PolicyDocument, rule *AutomergeRule) []string {
 // whatever allowAuthorApproval says; under maintainers it matches
 // evaluateProposalEvidence.
 func ruleApprovalCounts(policy PolicyDocument, rule *AutomergeRule, proposal StoredEvent, review StoredEvent) bool {
-	if rule == nil || review.Event.Kind != "review.submit" || review.Event.Subject != proposal.ID || review.Event.Verdict != "approve" {
-		return false
+	return ruleApprovalDefect(policy, rule, proposal, review) == ""
+}
+
+// ruleApprovalDefect is the single predicate behind ruleApprovalCounts. It
+// returns "" for a counting approval and otherwise the first reason it does
+// not count, which the fact validator reports (check 8).
+func ruleApprovalDefect(policy PolicyDocument, rule *AutomergeRule, proposal StoredEvent, review StoredEvent) string {
+	switch {
+	case rule == nil:
+		return "no rule counts it"
+	case review.Event.Kind != "review.submit":
+		return fmt.Sprintf("it has kind %q", review.Event.Kind)
+	case review.Event.Subject != proposal.ID:
+		return "it reviews another proposal"
+	case review.Event.Verdict != "approve":
+		return fmt.Sprintf("its verdict is %q", review.Event.Verdict)
 	}
 	actor := review.Event.Actor
 	if !actorListed(actor, policy.Proposals.TrustedReviewers) {
-		return false
+		return fmt.Sprintf("reviewer %s is not a trusted reviewer", actor)
 	}
 	if !rule.Reviewers.IsZero() && !actorListed(actor, rule.Reviewers.Actors()) {
-		return false
+		return fmt.Sprintf("reviewer %s is not one of the rule's reviewers", actor)
 	}
-	if rule.Acceptance.Standing() {
-		return actor != proposal.Event.Actor
+	authorCounts := !rule.Acceptance.Standing() && policy.Proposals.AllowAuthorApproval
+	if actor == proposal.Event.Actor && !authorCounts {
+		return "it is the candidate author's own approval"
 	}
-	return policy.Proposals.AllowAuthorApproval || actor != proposal.Event.Actor
+	return ""
 }
 
 // ruleRequestQualifies reports whether request is a run request whose results
@@ -147,34 +162,60 @@ func ruleApprovalCounts(policy PolicyDocument, rule *AutomergeRule, proposal Sto
 // whose definition digest at the head is known and matches, and a signer
 // allowed by mayRequestRun (C-009).
 func ruleRequestQualifies(policy PolicyDocument, proposal StoredEvent, definitions map[string]string, request StoredEvent) bool {
-	if request.Event.Kind != "run.request" || request.Event.Subject != proposal.ID || request.Event.Commit != proposal.Event.Head {
-		return false
+	return ruleRequestDefect(policy, proposal, definitions, request) == ""
+}
+
+// ruleRequestDefect is the single predicate behind ruleRequestQualifies: ""
+// when request qualifies, otherwise the first reason it does not.
+func ruleRequestDefect(policy PolicyDocument, proposal StoredEvent, definitions map[string]string, request StoredEvent) string {
+	switch {
+	case request.Event.Kind != "run.request":
+		return fmt.Sprintf("request %s has kind %q", request.ID, request.Event.Kind)
+	case request.Event.Subject != proposal.ID:
+		return fmt.Sprintf("request %s is for another proposal", request.ID)
+	case request.Event.Commit != proposal.Event.Head:
+		return fmt.Sprintf("request %s names commit %q, not the candidate head %s", request.ID, request.Event.Commit, proposal.Event.Head)
 	}
 	pipeline := request.Event.Pipeline
 	if _, exists := policy.Pipelines[pipeline]; !exists {
-		return false
+		return fmt.Sprintf("request %s names pipeline %q, which the base policy does not define", request.ID, pipeline)
 	}
 	definition, known := definitions[pipeline]
-	if !known || definition != request.Event.Definition {
-		return false
+	if !known {
+		return fmt.Sprintf("the definition of pipeline %q is unavailable at the candidate head", pipeline)
 	}
-	return mayRequestRun(policy, pipeline, request.Event.Actor)
+	if definition != request.Event.Definition {
+		return fmt.Sprintf("request %s names definition %q, not the pipeline %q definition %s at the candidate head", request.ID, request.Event.Definition, pipeline, definition)
+	}
+	if !mayRequestRun(policy, pipeline, request.Event.Actor) {
+		return fmt.Sprintf("request %s is signed by %s, who is neither a maintainer nor a requester of pipeline %q", request.ID, request.Event.Actor, pipeline)
+	}
+	return ""
 }
 
 // ruleResultQualifies reports whether result answers a qualifying request
 // with the same pipeline, commit and definition and is signed by a trusted
 // runner of that pipeline. The caller checks the outcome.
 func ruleResultQualifies(policy PolicyDocument, proposal StoredEvent, definitions map[string]string, result, request StoredEvent) bool {
+	return ruleResultDefect(policy, proposal, definitions, result, request) == ""
+}
+
+// ruleResultDefect is the single predicate behind ruleResultQualifies: ""
+// when result qualifies, otherwise the first reason it does not.
+func ruleResultDefect(policy PolicyDocument, proposal StoredEvent, definitions map[string]string, result, request StoredEvent) string {
 	if result.Event.Kind != "run.result" || result.Event.Subject != request.ID {
-		return false
+		return fmt.Sprintf("it does not answer request %s", request.ID)
 	}
-	if !ruleRequestQualifies(policy, proposal, definitions, request) {
-		return false
+	if defect := ruleRequestDefect(policy, proposal, definitions, request); defect != "" {
+		return defect
 	}
 	if result.Event.Pipeline != request.Event.Pipeline || result.Event.Commit != request.Event.Commit || result.Event.Definition != request.Event.Definition {
-		return false
+		return fmt.Sprintf("its pipeline, commit or definition differs from request %s", request.ID)
 	}
-	return actorListed(result.Event.Actor, policy.Pipelines[request.Event.Pipeline].TrustedRunners)
+	if !actorListed(result.Event.Actor, policy.Pipelines[request.Event.Pipeline].TrustedRunners) {
+		return fmt.Sprintf("runner %s is not a trusted runner of pipeline %q", result.Event.Actor, request.Event.Pipeline)
+	}
+	return ""
 }
 
 // ruleLater reports whether candidate supersedes previous for one actor.
@@ -191,11 +232,7 @@ func ruleLater(candidate, previous StoredEvent) bool {
 // result of each trusted runner, mirroring the pipeline loop of
 // evaluateProposalEvidence with the stricter qualification above.
 func ruleLivePipelines(inputs ruleInputs) []rulePipeline {
-	names := make([]string, 0, len(inputs.Policy.Pipelines))
-	for name := range inputs.Policy.Pipelines {
-		names = append(names, name)
-	}
-	sort.Strings(names)
+	names := rulePipelineNames(inputs.Policy)
 	pipelines := make([]rulePipeline, 0, len(names))
 	for _, name := range names {
 		latestByRunner := make(map[string]StoredEvent)
@@ -375,4 +412,336 @@ func evaluateRuleAcceptance(inputs ruleInputs) *ruleAcceptance {
 	}
 	result.Evidence = sortedUniqueStrings(evidence...)
 	return result
+}
+
+// Rule merge fact check names, in the order validateRuleMergeFact runs them
+// (contracts/rule-merge-fact.md "Check names"). The names are stable: every
+// surface reports them and tests match them.
+const (
+	ruleCheckPolicyDigest      = "policy-digest"
+	ruleCheckRuleExists        = "rule-exists"
+	ruleCheckRuleAcceptance    = "rule-acceptance"
+	ruleCheckRuleSigner        = "rule-signer"
+	ruleCheckRuleAuthor        = "rule-author"
+	ruleCheckManualPath        = "manual-path"
+	ruleCheckChangedPaths      = "changed-paths"
+	ruleCheckEvidenceItem      = "evidence-item"
+	ruleCheckEvidenceDuplicate = "evidence-duplicate"
+	ruleCheckApprovals         = "approval-threshold"
+	ruleCheckPipelines         = "pipeline-threshold"
+)
+
+// ruleFactError is the first failed check of a rule merge fact. Surfaces wrap
+// it in their own style and recover it with errors.As.
+type ruleFactError struct {
+	FactID  string // full event ID of the rule merge fact
+	Check   string
+	EventID string // the evidence item, when the check is about one
+	Detail  string
+}
+
+func (e *ruleFactError) Error() string {
+	return fmt.Sprintf("rule merge %s fails %s: %s", e.FactID, e.Check, e.Detail)
+}
+
+// ruleFactFailure builds a ruleFactError. Details can quote event-supplied
+// text, so they always pass through safeText.
+func ruleFactFailure(merge StoredEvent, check, eventID, format string, args ...any) *ruleFactError {
+	return &ruleFactError{FactID: merge.ID, Check: check, EventID: eventID, Detail: safeText(fmt.Sprintf(format, args...))}
+}
+
+// rulePipelineNames returns the base-policy pipeline names in sorted order.
+func rulePipelineNames(policy PolicyDocument) []string {
+	names := make([]string, 0, len(policy.Pipelines))
+	for name := range policy.Pipelines {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// ruleFactResult is a passing run result cited by a fact, with the request
+// it answers.
+type ruleFactResult struct {
+	Result, Request StoredEvent
+}
+
+// validateRuleMergeFact is path (b) of the merge fact invariant: it judges a
+// rule merge fact against its base policy, the candidate's changed paths, the
+// pipeline definition digests at the head and the fact's listed evidence
+// only (FR-012, FR-015), and returns nil or the first failed check as a
+// *ruleFactError. The rule judged is the fact's own claim, merge.Event.Rule;
+// inputs.RuleName and inputs.Events are not read. Callers have already run
+// validateProposalMergeBinding, and reach this only through admitMergeFact.
+func validateRuleMergeFact(inputs ruleInputs, merge StoredEvent, byID map[string]StoredEvent) error {
+	name := merge.Event.Rule
+	if merge.Event.Policy != inputs.PolicyDigest {
+		return ruleFactFailure(merge, ruleCheckPolicyDigest, "", "policy %s is not the base policy digest %s", merge.Event.Policy, inputs.PolicyDigest)
+	}
+	rule := ruleByName(inputs.Policy, name)
+	if rule == nil {
+		return ruleFactFailure(merge, ruleCheckRuleExists, "", "rule %q does not exist in the base policy", name)
+	}
+	if !rule.Acceptance.Standing() {
+		return ruleFactFailure(merge, ruleCheckRuleAcceptance, "", "rule %q has acceptance %q", name, rule.Acceptance.Mode())
+	}
+	if !actorListed(merge.Event.Actor, rule.Actors) {
+		return ruleFactFailure(merge, ruleCheckRuleSigner, "", "signer %s is not an executing actor of rule %q", merge.Event.Actor, name)
+	}
+	if !ruleAuthorAllowed(rule, inputs.Proposal) {
+		return ruleFactFailure(merge, ruleCheckRuleAuthor, "", "author %s is not allowed by rule %q", inputs.Proposal.Event.Actor, name)
+	}
+	for _, p := range inputs.Changed {
+		// The manual-path predicate is per path, so asking it one path at a
+		// time names the first offending path without a second predicate.
+		if policyAmendment, protectedChange := ruleManualPathChanges(inputs.Policy, []string{p}); policyAmendment || protectedChange {
+			return ruleFactFailure(merge, ruleCheckManualPath, "", "changed path %q requires manual merge", p)
+		}
+	}
+	if len(inputs.Changed) == 0 {
+		return ruleFactFailure(merge, ruleCheckChangedPaths, "", "the candidate has no changed paths")
+	}
+	if disallowed := ruleDisallowedPaths(rule, inputs.Changed); len(disallowed) > 0 {
+		return ruleFactFailure(merge, ruleCheckChangedPaths, "", "changed path %q is outside rule %q", disallowed[0], name)
+	}
+
+	approvals, results, failure := ruleFactEvidence(inputs, rule, merge, byID)
+	if failure != nil {
+		return failure
+	}
+
+	reviewers := make(map[string]string, len(approvals))
+	for _, approval := range approvals {
+		actor := approval.Event.Actor
+		if previous, exists := reviewers[actor]; exists {
+			return ruleFactFailure(merge, ruleCheckEvidenceDuplicate, approval.ID, "approvals %s and %s are both by reviewer %s", previous, approval.ID, actor)
+		}
+		reviewers[actor] = approval.ID
+	}
+	runnersByPipeline := make(map[string]map[string]string)
+	for _, cited := range results {
+		pipeline, runner := cited.Request.Event.Pipeline, cited.Result.Event.Actor
+		runners := runnersByPipeline[pipeline]
+		if runners == nil {
+			runners = make(map[string]string)
+			runnersByPipeline[pipeline] = runners
+		}
+		if previous, exists := runners[runner]; exists {
+			return ruleFactFailure(merge, ruleCheckEvidenceDuplicate, cited.Result.ID, "run results %s and %s are both by runner %s for pipeline %q", previous, cited.Result.ID, runner, pipeline)
+		}
+		runners[runner] = cited.Result.ID
+	}
+
+	if required := inputs.Policy.Proposals.RequiredApprovals; len(reviewers) < required {
+		return ruleFactFailure(merge, ruleCheckApprovals, "", "%d of %d counted approvals", len(reviewers), required)
+	}
+	for _, pipeline := range rulePipelineNames(inputs.Policy) {
+		if required := inputs.Policy.Pipelines[pipeline].RequiredResults; len(runnersByPipeline[pipeline]) < required {
+			return ruleFactFailure(merge, ruleCheckPipelines, "", "pipeline %q has %d of %d passing trusted results", pipeline, len(runnersByPipeline[pipeline]), required)
+		}
+	}
+	return nil
+}
+
+// ruleFactEvidence runs check 8 over the evidence in listed order. Every
+// item must be a counting approval or a passing run result; qualification
+// uses the same predicates as evaluateRuleAcceptance. It reads byID only for
+// the listed items and the requests their results answer (FR-015).
+func ruleFactEvidence(inputs ruleInputs, rule *AutomergeRule, merge StoredEvent, byID map[string]StoredEvent) ([]StoredEvent, []ruleFactResult, *ruleFactError) {
+	var approvals []StoredEvent
+	var results []ruleFactResult
+	for _, id := range merge.Event.Evidence {
+		item, exists := byID[id]
+		if !exists {
+			return nil, nil, ruleFactFailure(merge, ruleCheckEvidenceItem, id, "evidence %s is unavailable", id)
+		}
+		switch item.Event.Kind {
+		case "review.submit":
+			if defect := ruleApprovalDefect(inputs.Policy, rule, inputs.Proposal, item); defect != "" {
+				return nil, nil, ruleFactFailure(merge, ruleCheckEvidenceItem, id, "review %s is not a counting approval of rule %q: %s", id, rule.Name, defect)
+			}
+			approvals = append(approvals, item)
+		case "run.result":
+			if item.Event.Outcome != "passed" {
+				return nil, nil, ruleFactFailure(merge, ruleCheckEvidenceItem, id, "run result %s has outcome %q, not \"passed\"", id, item.Event.Outcome)
+			}
+			request, exists := byID[item.Event.Subject]
+			if !exists {
+				return nil, nil, ruleFactFailure(merge, ruleCheckEvidenceItem, id, "run result %s answers request %s, which is unavailable", id, item.Event.Subject)
+			}
+			if defect := ruleResultDefect(inputs.Policy, inputs.Proposal, inputs.PipelineDefinitions, item, request); defect != "" {
+				return nil, nil, ruleFactFailure(merge, ruleCheckEvidenceItem, id, "run result %s does not qualify: %s", id, defect)
+			}
+			results = append(results, ruleFactResult{Result: item, Request: request})
+		default:
+			return nil, nil, ruleFactFailure(merge, ruleCheckEvidenceItem, id, "evidence %s has kind %s, which a rule merge fact cannot cite", id, item.Event.Kind)
+		}
+	}
+	return approvals, results, nil
+}
+
+// ruleObjectAccess is how one surface reads the Git objects path (b) needs:
+// the policy and its digest at a commit, the sorted changed paths between two
+// commits (bounded by the changed-path limit), and a pipeline definition
+// digest at a commit. Each surface supplies its own store and error style.
+type ruleObjectAccess struct {
+	PolicyAt       func(commit string) (PolicyDocument, string, error)
+	ChangedPaths   func(base, head string) ([]string, error)
+	PipelineDigest func(head, pipeline string) (string, error)
+}
+
+type ruleMemoPolicy struct {
+	policy PolicyDocument
+	digest string
+	err    error
+}
+
+type ruleMemoPaths struct {
+	paths []string
+	err   error
+}
+
+type ruleMemoDigest struct {
+	digest string
+	err    error
+}
+
+// ruleValidationMemo caches object reads for one validation pass (NFR-005,
+// tasks decision 5): the base policy per commit, changed paths per
+// (base, head) and pipeline digests per (head, pipeline). Errors are cached
+// too, so a failure is not retried within the pass. A memo belongs to one
+// pass on one goroutine; create a new one for each pass.
+type ruleValidationMemo struct {
+	access   ruleObjectAccess
+	policies map[string]ruleMemoPolicy
+	changed  map[[2]string]ruleMemoPaths
+	digests  map[[2]string]ruleMemoDigest
+
+	// Calls made to access, read by tests to prove the bound.
+	policyCalls         int
+	changedPathCalls    int
+	pipelineDigestCalls int
+}
+
+func newRuleValidationMemo(access ruleObjectAccess) *ruleValidationMemo {
+	return &ruleValidationMemo{
+		access:   access,
+		policies: make(map[string]ruleMemoPolicy),
+		changed:  make(map[[2]string]ruleMemoPaths),
+		digests:  make(map[[2]string]ruleMemoDigest),
+	}
+}
+
+func (m *ruleValidationMemo) policyAt(commit string) (PolicyDocument, string, error) {
+	entry, cached := m.policies[commit]
+	if !cached {
+		m.policyCalls++
+		if m.access.PolicyAt == nil {
+			entry.err = fmt.Errorf("rule merge validation cannot read the policy at %s", commit)
+		} else {
+			entry.policy, entry.digest, entry.err = m.access.PolicyAt(commit)
+		}
+		m.policies[commit] = entry
+	}
+	return entry.policy, entry.digest, entry.err
+}
+
+func (m *ruleValidationMemo) changedPaths(base, head string) ([]string, error) {
+	key := [2]string{base, head}
+	entry, cached := m.changed[key]
+	if !cached {
+		m.changedPathCalls++
+		if m.access.ChangedPaths == nil {
+			entry.err = fmt.Errorf("rule merge validation cannot read the changed paths from %s to %s", base, head)
+		} else {
+			entry.paths, entry.err = m.access.ChangedPaths(base, head)
+		}
+		m.changed[key] = entry
+	}
+	return entry.paths, entry.err
+}
+
+func (m *ruleValidationMemo) pipelineDigest(head, pipeline string) (string, error) {
+	key := [2]string{head, pipeline}
+	entry, cached := m.digests[key]
+	if !cached {
+		m.pipelineDigestCalls++
+		if m.access.PipelineDigest == nil {
+			entry.err = fmt.Errorf("rule merge validation cannot read pipeline %q at %s", pipeline, head)
+		} else {
+			entry.digest, entry.err = m.access.PipelineDigest(head, pipeline)
+		}
+		m.digests[key] = entry
+	}
+	return entry.digest, entry.err
+}
+
+// inputsForFact loads the path (b) inputs of merge for proposal: the policy at
+// the candidate base, the changed paths base..head and the digest of every
+// base-policy pipeline at the head. A pipeline digest error leaves that
+// pipeline out of PipelineDefinitions, so its results cannot qualify. A
+// policy or changed-path error is returned unchanged for the caller to wrap
+// in its own style; it never becomes an empty change list (FR-014).
+func (m *ruleValidationMemo) inputsForFact(merge, proposal StoredEvent) (ruleInputs, error) {
+	policy, digest, err := m.policyAt(proposal.Event.Base)
+	if err != nil {
+		return ruleInputs{}, err
+	}
+	changed, err := m.changedPaths(proposal.Event.Base, proposal.Event.Head)
+	if err != nil {
+		return ruleInputs{}, err
+	}
+	definitions := make(map[string]string, len(policy.Pipelines))
+	for _, pipeline := range rulePipelineNames(policy) {
+		if definition, err := m.pipelineDigest(proposal.Event.Head, pipeline); err == nil {
+			definitions[pipeline] = definition
+		}
+	}
+	return ruleInputs{
+		Policy:              policy,
+		PolicyDigest:        digest,
+		Proposal:            proposal,
+		RuleName:            merge.Event.Rule,
+		Changed:             changed,
+		PipelineDefinitions: definitions,
+	}, nil
+}
+
+// validateRuleMergeFactWith loads the inputs of merge through memo and runs
+// validateRuleMergeFact. Surfaces call it from the rulePath of admitMergeFact
+// after reporting any missing path (b) object in their own dependency style.
+func validateRuleMergeFactWith(memo *ruleValidationMemo, merge, proposal StoredEvent, byID map[string]StoredEvent) error {
+	inputs, err := memo.inputsForFact(merge, proposal)
+	if err != nil {
+		return err
+	}
+	return validateRuleMergeFact(inputs, merge, byID)
+}
+
+// mergeAuthority names the path through which a proposal.merged fact is valid.
+type mergeAuthority string
+
+const (
+	mergeByMaintainers mergeAuthority = "maintainers"
+	mergeByRule        mergeAuthority = "rule"
+)
+
+// admitMergeFact applies the union validity of proposal.merged facts
+// (decision 01M5VSEHEVA82N9T64ZH1P1Q2A). maintainerPath is the caller's
+// existing acceptance merge fact check, unchanged. rulePath reports any
+// missing path (b) input in the caller's own dependency style and then
+// calls validateRuleMergeFact. Every fact-admission surface calls this;
+// none orders the two paths itself (FR-024).
+func admitMergeFact(merge StoredEvent, maintainerPath, rulePath func() error) (mergeAuthority, error) {
+	maintainerErr := maintainerPath()
+	if maintainerErr == nil {
+		return mergeByMaintainers, nil
+	}
+	if merge.Event.Rule == "" {
+		return "", maintainerErr
+	}
+	if err := rulePath(); err != nil {
+		return "", err
+	}
+	return mergeByRule, nil
 }
