@@ -297,3 +297,8 @@ Each item was decided by the specifying agent because the brief does not settle 
 9. **OQ-9: Interrupted rule merge** (decision `01M5VD67BH29FYVRTH2AMCZPYS`; FR-020). Recommendation: the executing actor reruns the same `hn automerge --execute` command, which re-verifies and records the missing fact exactly once under the existing repair conditions; `hn merge` repair stays maintainer-only.
 10. **OQ-10: Missing commits during verification** (decision `01M5VD69EDJJC7BGGZCQRD5R6Q`; FR-014). Recommendation: fail closed with a missing-dependency or shallow-refusal message and recovery guidance; never treat a missing side as an empty diff.
 11. **OQ-11: Documentation scope** (decision `01M5VD6BR68AH9Z2BP5CW0C6HX`; FR-023). Recommendation: the three documents the brief names plus the trust-boundary text of `docs/threat-model.md`, because acceptance authority moves from maintainers to a policy rule.
+
+## Maintainer confirmation
+
+Confirmed by the maintainer (delegated) on 2026-10-26: OQ-1 through OQ-11 are
+accepted as recommended. Requirements marked Open above are confirmed.
