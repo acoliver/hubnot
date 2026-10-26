@@ -124,11 +124,11 @@ Satisfied means, for the keyless preview, no blocker; for local execution by an 
 
 | Check | Where it runs | Test |
 |----|----|----|
-| Executor authorization: identity listed in the rule's `actors` | `cmdAutomerge`, `proposalMergeGuard`, `serveAdvanceValidate` with a rule binding | WP12 T057 (local), WP15 T096 (remote client) |
-| Executor authorization: step 13 `advance-not-rule-executor` | `hn serve` | WP14 T068 step 5, WP15 T096 |
-| Remote identification and the `hn serve` upstream refusal | client | existing serve tests, WP15 T096 |
-| Selection covers every trusted actor | `automergeRemote` | existing tests, WP15 T096 |
-| Local target equals hosted tip; `hn-expected-tip` and stale tip (step 3) | client and `hn serve` | WP14 T068 step 9, WP15 T096 |
+| Executor authorization: identity listed in the rule's `actors` | `cmdAutomerge`, `proposalMergeGuard`, `serveAdvanceValidate` with a rule binding | WP12 T057 (local), WP15 T095 (remote client) |
+| Executor authorization: step 13 `advance-not-rule-executor` | `hn serve` | WP14 T068 step 5, WP15 T095 |
+| Remote identification and the `hn serve` upstream refusal | client | existing serve tests, WP15 T095 |
+| Selection covers every trusted actor | `automergeRemote` | existing tests, WP15 T095 |
+| Local target equals hosted tip; `hn-expected-tip` and stale tip (step 3) | client and `hn serve` | WP14 T068 step 9, WP15 T095 |
 | Deletion, creation, destination policy validity, fast-forward (steps 1, 2, 4, 5); candidate exists (step 6) | `hn serve` | existing serve tests, unchanged |
 | Protected baseline at the destination (step 12) | `hn serve` | existing serve tests, unchanged |
 | `hn-rule` support on the server | client mapping of `unsupported-command` | WP15 T071 unit test |
@@ -139,8 +139,8 @@ Satisfied means, for the keyless preview, no blocker; for local execution by an 
 | Comparison | Test | WP |
 |----|----|----|
 | Four fact-admission surfaces on every fact fixture | `TestStandingFactMatrixAgreement` | WP16 T078 |
-| Keyless preview and local execution | `TestStandingAutomergeAgreementPreviewExecute` | WP11 T095 |
-| Keyless preview and `hn serve` verdict | `TestStandingServeAdvanceAgreementPreviewServer` | WP15 T096 |
+| Keyless preview and local execution | `TestStandingAutomergeAgreementPreviewExecute` | WP11 T094 |
+| Keyless preview and `hn serve` verdict | `TestStandingServeAdvanceAgreementPreviewServer` | WP15 T095 |
 | Live evaluation and fact validation on generated worlds | `TestRuleAcceptanceFactProperty` | WP05 T024 |
 | Recorded facts and the four surfaces | `TestStandingFactMatrixExecutionAdmitted` | WP16 T080 |
 
