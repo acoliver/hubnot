@@ -1,7 +1,7 @@
 {
-  "event_count": 27,
-  "last_event_id": "01M5VYXV8VJ1QZJRDKEBT9P779",
-  "materialized_at": "2026-10-26T11:18:29.403319+00:00",
+  "event_count": 30,
+  "last_event_id": "01M5W1DTER6JRK35Z1QXMX614Z",
+  "materialized_at": "2026-10-26T12:02:09.982671+00:00",
   "mission_number": "",
   "mission_slug": "standing-acceptance-01M5VD2K",
   "mission_type": "software-dev",
@@ -12,8 +12,8 @@
     "claimed": 0,
     "done": 0,
     "for_review": 0,
-    "in_progress": 0,
-    "in_review": 2,
+    "in_progress": 1,
+    "in_review": 1,
     "planned": 17
   },
   "work_packages": {
@@ -32,8 +32,8 @@
       ],
       "provider": "__resolved_provider_absent__",
       "role": "reviewer",
-      "shell_pid": 1268659,
-      "shell_pid_created_at": "1793013264.34",
+      "shell_pid": 2479390,
+      "shell_pid_created_at": "1793015903.18",
       "subtasks": {
         "T001": "done",
         "T002": "done",
@@ -52,26 +52,34 @@
     },
     "WP03": {
       "actor": "llxprt",
-      "agent": "llxprt",
+      "agent": null,
       "agent_profile": "__resolved_profile_absent__",
       "agent_profile_version": "__resolved_profile_version_absent__",
-      "force_count": 0,
-      "lane": "in_review",
-      "last_event_id": "01M5VYXV8VJ1QZJRDKEBT9P779",
-      "last_transition_at": "2026-10-26T11:18:29.403319+00:00",
+      "force_count": 1,
+      "lane": "in_progress",
+      "last_event_id": "01M5W1DTER6JRK35Z1QXMX614Z",
+      "last_transition_at": "2026-10-26T12:02:09.982671+00:00",
       "model": "__resolved_model_absent__",
       "notes": [
-        "WP03 implemented in cef2dec (event.go, standing_event_test.go). Event.Rule is tagged json:\"-\"; verifyEvent keeps every check and sets Rule only on proposal.merged via parseMergeRuleClaim (canonical claim only; every other shape is no claim, never an error); encodeAndSign appends rule last and refuses rule on other kinds ('rule is only valid on proposal.merged') or an invalid name ('proposal merge rule must be a valid rule name'). L06 still refused with 'invalid resource event JSON: unknown field \"rule\"'. The claim walk is a depth-counting byte walk (decoder form ~15% of verifyEvent; byte walk ~1%), checked against the decoder reference by a differential test and a fuzz target. Wiring: parseMergeRuleClaim runs on the live verifyEvent path; Event.Rule is consumed by WP05/WP07 (admitMergeFact) and written by WP11 (appendRuleMergeEvent). No admission surface or document changed. Lane setup: merged planning commit b201105 into lane-c, kitty-specs conflict resolved from feat/standing-acceptance (c22a63c); planning-artifact cleanup f5d6059 per move-task. Gate: gofmt -l clean; go vet ./... and go build ./... pass; go test -race -count=1 -timeout 60m -skip TestMemoryIndexTenThousandRecordsPerformanceAndRecovery ./... pass (hubnot 1087s); go test -count=1 -run '^TestMemoryIndexTenThousandRecordsPerformanceAndRecovery$' . pass (17.3s)."
+        "WP03 implemented in cef2dec (event.go, standing_event_test.go). Event.Rule is tagged json:\"-\"; verifyEvent keeps every check and sets Rule only on proposal.merged via parseMergeRuleClaim (canonical claim only; every other shape is no claim, never an error); encodeAndSign appends rule last and refuses rule on other kinds ('rule is only valid on proposal.merged') or an invalid name ('proposal merge rule must be a valid rule name'). L06 still refused with 'invalid resource event JSON: unknown field \"rule\"'. The claim walk is a depth-counting byte walk (decoder form ~15% of verifyEvent; byte walk ~1%), checked against the decoder reference by a differential test and a fuzz target. Wiring: parseMergeRuleClaim runs on the live verifyEvent path; Event.Rule is consumed by WP05/WP07 (admitMergeFact) and written by WP11 (appendRuleMergeEvent). No admission surface or document changed. Lane setup: merged planning commit b201105 into lane-c, kitty-specs conflict resolved from feat/standing-acceptance (c22a63c); planning-artifact cleanup f5d6059 per move-task. Gate: gofmt -l clean; go vet ./... and go build ./... pass; go test -race -count=1 -timeout 60m -skip TestMemoryIndexTenThousandRecordsPerformanceAndRecovery ./... pass (hubnot 1087s); go test -count=1 -run '^TestMemoryIndexTenThousandRecordsPerformanceAndRecovery$' . pass (17.3s).",
+        "Review blocked: required full race gate failed in TestServeQualityPushVerdictTimeNFR001 at serve_quality_test.go:280 (hn sync origin fixture timeout). No source defect established; preserve frozen tests and rerun exact full gate successfully. Dependency notice to WP05, WP06, WP13, WP17 agents: WP03 returned to planned; rebase on its corrected/revalidated revision before consuming it. Anti-pattern checklist: all eight PASS; details and passing checks in review-feedback-1.md."
       ],
       "provider": "__resolved_provider_absent__",
-      "role": "reviewer",
-      "shell_pid": 1388477,
-      "shell_pid_created_at": "1793013506.83",
+      "review": null,
+      "review_result": {
+        "feedback_path": "/home/acoliver/projects/appaday/gitium/hubnot/kitty-specs/standing-acceptance-01M5VD2K/tasks/WP03-rule-field-on-proposal-merged/review-cycle-1.md",
+        "reference": "review-cycle://standing-acceptance-01M5VD2K/WP03-rule-field-on-proposal-merged/review-cycle-1.md",
+        "reviewer": "user",
+        "verdict": "changes_requested"
+      },
+      "role": "implementer",
+      "shell_pid": null,
+      "shell_pid_created_at": null,
       "subtasks": {
-        "T011": "done",
-        "T012": "done",
-        "T013": "done",
-        "T014": "done"
+        "T011": "planned",
+        "T012": "planned",
+        "T013": "planned",
+        "T014": "planned"
       }
     },
     "WP04": {
