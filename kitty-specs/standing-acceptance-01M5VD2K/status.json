@@ -1,19 +1,19 @@
 {
-  "event_count": 63,
-  "last_event_id": "01M5X8CVFN8FXG1TZ762MM38M3",
-  "materialized_at": "2026-10-26T23:23:12.757377+00:00",
+  "event_count": 64,
+  "last_event_id": "01M5XA99GKPE45TPBBC0EPFA48",
+  "materialized_at": "2026-10-26T23:56:13.203704+00:00",
   "mission_number": "",
   "mission_slug": "standing-acceptance-01M5VD2K",
   "mission_type": "",
   "summary": {
-    "approved": 7,
+    "approved": 8,
     "blocked": 0,
     "canceled": 0,
     "claimed": 0,
     "done": 0,
     "for_review": 0,
     "in_progress": 0,
-    "in_review": 1,
+    "in_review": 0,
     "planned": 11
   },
   "work_packages": {
@@ -215,19 +215,25 @@
       }
     },
     "WP07": {
-      "actor": "llxprt",
+      "actor": "user",
       "agent": "llxprt",
       "agent_profile": "__resolved_profile_absent__",
       "agent_profile_version": "__resolved_profile_version_absent__",
       "force_count": 0,
-      "lane": "in_review",
-      "last_event_id": "01M5X8CVFN8FXG1TZ762MM38M3",
-      "last_transition_at": "2026-10-26T23:23:12.757377+00:00",
+      "lane": "approved",
+      "last_event_id": "01M5XA99GKPE45TPBBC0EPFA48",
+      "last_transition_at": "2026-10-26T23:56:13.203704+00:00",
       "model": "__resolved_model_absent__",
       "notes": [
         "WP07 commit e4a1bf0. T031: maintainerMergeCheck is the former validateMergeEvent body byte for byte (diff only adds lines); validateMergeEventWith orders paths only through admitMergeFact with localRuleObjectAccess (loadPolicy, changedPathsAt, loadPipeline); a ruleFactError is returned unwrapped, other path (b) errors become \"merge <full ID>: ...\"; shallow or shallow-probe failure refuses path (b) with the interim message; validateMergeEvent wraps a fresh memo; validateEventRelationships (all projecting commands, incl. issue_read.go) creates one memo per pass. T032: protocol-v0 Runs and governance events gains union rule, rule fact fields, claim table, check names, older clients and repair; Optional policy rules untouched. T033: TestStandingFactLocalDefects refuses F01-F20 (all F19/F20 shapes isolated) via proposal status, log and issue list with refs unchanged, each with its matched valid control accepted; fact-only rows share one harness and other rows get a fresh one (2m24s vs 6m41s shared, recorded); TestStandingFactLocalValidRuleMerge also covers an absent head (FR-014). Memo: no HN_INTERNAL_TESTING counter exists, so TestStandingFactLocalMemoSharedAcrossFacts reads the WP05 memo counters in-process (E and X facts, 1 read each). T034: acceptance fact unchanged, rule claims on maintainer merges (no path (b) reads), legacy L01-L06. T092: TestStandingFactBoundary with standingFactRulePathSurfaces local=true import=false shallow=false; B1 shallow asserts the interim message through hn proposal status. Non-vacuity: with projection forced to path (a), ValidRuleMerge and Boundary fail. Gates: gofmt clean, go vet and go build pass, git diff --check clean, race suite ok (hubnot 1558s), perf test ok (11.2s)."
       ],
       "provider": "__resolved_provider_absent__",
+      "review_result": {
+        "feedback_path": "/home/acoliver/projects/appaday/gitium/hubnot/kitty-specs/standing-acceptance-01M5VD2K/tasks/WP07-local-projection-admission/review-cycle-1.md",
+        "reference": "review-cycle://standing-acceptance-01M5VD2K/WP07-local-projection-admission/review-cycle-1.md",
+        "reviewer": "user",
+        "verdict": "approved"
+      },
       "role": "reviewer",
       "shell_pid": 1501385,
       "shell_pid_created_at": "1793056990.59",
