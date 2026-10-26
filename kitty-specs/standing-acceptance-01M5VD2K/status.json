@@ -125,6 +125,9 @@
       "last_event_id": "01M5WVJJ1S77A0E0PZ7C4Q0Y5C",
       "last_transition_at": "2026-10-26T19:39:08.217885+00:00",
       "model": "__resolved_model_absent__",
+      "notes": [
+        "Implemented T015-T019 in rule_acceptance.go and rule_acceptance_test.go (commit f9f9eb0). evaluateRuleAcceptance is pure (imports fmt and sort only). It counts approvals per FR-005/FR-006 (rule reviewers when set, author never counted under acceptance mode rule, allowAuthorApproval honored under maintainers), qualifies requests through mayRequestRun (C-009) plus head commit and head definition digest, qualifies results on pipeline/commit/definition and trusted runner, and keeps the latest result per trusted runner as evaluateProposalEvidence does; event ID breaks equal-sequence ties so the result is deterministic. Vetoes cover change requests from any trusted reviewer (author included), latest trusted failures and current maintainer rejections under the base digest. Unmet kinds and texts follow the T018 order; evidence is approvals plus passing results, sorted and unique. Callers are scheduled in WP05, WP10, WP11 and WP14. Lane setup: merged planning commit b201105 and dependency lane-a into lane-d; only kitty-specs/ conflicted and was restored from feat/standing-acceptance; planning artifacts then removed from the lane branch (947e5cd). Gate: gofmt -l clean; git diff --check clean; go vet ./... and go build ./... pass; go test -race -count=1 -timeout 60m -skip TestMemoryIndexTenThousandRecordsPerformanceAndRecovery ./... pass (hubnot 972s; the local go-wrapper raised the timeout to 150m); TestMemoryIndexTenThousandRecordsPerformanceAndRecovery without -race pass (11.3s). 13 TestRuleAcceptanceLive tests with 33 subtests pass; no pre-existing test changed."
+      ],
       "provider": "__resolved_provider_absent__",
       "role": "implementer",
       "shell_pid": 2446073,
