@@ -227,6 +227,9 @@
       "last_event_id": "01M5X26SMEKE8GP255DBNHE888",
       "last_transition_at": "2026-10-26T21:35:02.798870+00:00",
       "model": "__resolved_model_absent__",
+      "notes": [
+        "WP10 implemented in 74b3ba8 on lane-b. inspectAutomerge stores evaluateRuleAcceptance (inputs from the inspection, pipeline digests via loadPipeline at head, TargetBranch empty); under acceptance mode rule the readiness blocker is replaced in place by the approvals/pipeline threshold texts and the acceptance blocker is dropped; a maintainers-mode rule with reviewers appends the approvals threshold after the acceptance position; every other append is unchanged, so a maintainers rule without reviewers keeps the exact old list. printAutomergeRuleAcceptance adds the Acceptance, Counted reviewers and Counted approvals lines after the executing actors. Live path: cmdAutomerge preview and its merge guard (execution still refuses via mergeProposal until WP11). Tests: standing_automerge_test.go covers US1-3, US1-4, US5-1..4, US6-1..3, US6-7, US2-3, FR-017 local and the opt-out with exact blocker lists, a no-ref/no-event check on every preview, and TestStandingAutomergeDocumentedPreview for the new standing-preview example in docs/governance-v0.md. Mutation checks: disabling standing mode or the US5-4 threshold makes the tests fail. Gate: gofmt clean; go vet and go build pass; race suite passes (hubnot 1295.8s, no data races); TestMemoryIndexTenThousandRecordsPerformanceAndRecovery passes without -race (11.5s). Lane-d was merged into lane-b first (only kitty-specs/status.json conflicted, restored from feat/standing-acceptance). Note for reviewer: docs/governance-v0.md already had an empty \"Commit path, publication and recovery\" heading directly above \"Standing acceptance rule fields\" (from WP02); I left it as it was."
+      ],
       "provider": "__resolved_provider_absent__",
       "role": "implementer",
       "shell_pid": 1514739,
