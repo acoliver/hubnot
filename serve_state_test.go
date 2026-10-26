@@ -358,12 +358,12 @@ func TestServeStateUsageListsServeCommands(t *testing.T) {
 	if !strings.Contains(output, "Usage:\n  hn init") {
 		t.Fatalf("usage lost the hn init line:\n%s", output)
 	}
-	want := "  hn merge PROPOSAL\n" +
+	want := "  hn automerge PROPOSAL --rule NAME [--execute [--remote REMOTE]]\n" +
 		"  hn serve repo create|list|show|set|lock-exec ...\n" +
 		"  hn serve key add|remove|list ...\n" +
 		"  hn serve git --key FINGERPRINT\n"
 	if !strings.Contains(output, want) {
-		t.Fatalf("usage does not list hn serve after hn merge:\n%s", output)
+		t.Fatalf("usage does not list hn serve after hn automerge:\n%s", output)
 	}
 }
 
