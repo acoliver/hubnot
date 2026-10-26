@@ -309,7 +309,9 @@ hn policy check --base main --file .hn/policy.json
 ```
 
 Inspection and comparison expose activation, protected paths, designated
-reviewers, thresholds and every automerge rule's actors, authors, paths and target.
+reviewers, thresholds and every automerge rule's actors, authors, paths and target,
+along with its acceptance mode and counted reviewers (see
+[Inspecting a standing rule](#inspecting-a-standing-rule)).
 Older clients that do not recognize these fields reject policies containing
 them, including a `null` field. Omit the fields for compatibility with such
 clients. Existing signed bytes and historical facts are not rewritten.
@@ -374,7 +376,9 @@ path remains governed by the original signed base and evidence.
 
 An automerge policy contains 1–64 uniquely named rules. Every rule explicitly
 names a local target branch, 1–64 executing actors, 1–64 authors and 1–64 literal
-allowed paths. Executing actors must also be base-policy maintainers. Directory
+allowed paths. Executing actors must also be base-policy maintainers unless the
+rule has acceptance mode `rule` (see
+[Standing acceptance rule fields](#standing-acceptance-rule-fields)). Directory
 allowlists permit descendants only; allowing `docs/` does not permit replacing
 the `docs` ancestor itself. Every changed path must match a rule selector.
 
@@ -411,6 +415,200 @@ that suffices for an ordinary manual merge does not waive this full-repository
 requirement. Automerge does not fetch or invoke shallow recovery.
 
 ### Commit path, publication and recovery
+### Standing acceptance rule fields
+
+An automerge rule may carry two optional fields, `acceptance` and `reviewers`.
+
+`acceptance` sets the rule's acceptance mode. Its value is exactly the string
+`"maintainers"` or the string `"rule"`. A rule without the field uses
+`maintainers`, which is the behavior described above: every executing actor
+must be a base-policy maintainer, and every proposal still needs its maintainer
+acceptances.
+
+A rule with `"acceptance": "rule"` is a standing rule. The maintainer-accepted
+policy amendment that adopted the rule is the standing acceptance for every
+proposal that satisfies it, so maintainers do not accept those proposals one
+by one. They grant this acceptance once, when they accept the amendment. The
+executing actors of a standing rule need not be maintainers; an automation
+identity can execute the rule and sign its merge fact. Listing an actor in a
+rule's `actors` lets it execute that rule and grants it nothing else. Under a
+standing rule the candidate author's own approval never counts, even when
+`allowAuthorApproval` is true.
+
+`reviewers` lists the trusted reviewers whose approvals count toward the rule,
+in either acceptance mode. It holds 1 to 64 distinct full actor fingerprints.
+Each one must also appear in `proposals.trustedReviewers`, and the list needs
+at least `proposals.requiredApprovals` entries. A current change request from
+any trusted reviewer still blocks the rule, whether or not the reviewer is in
+the list. Without the field, approvals from every trusted reviewer count.
+
+Policy validation adds three limits to a standing rule:
+
+- `proposals.requiredApprovals` must be at least 1, so every proposal merged
+  under the rule carries at least one independent approval.
+- No path selector may be `.hn` or `.hn/` or start with `.hn/`. Policy and
+  pipeline definitions stay under maintainer acceptance, so a standing rule
+  cannot change the rules that govern it.
+- No path selector may overlap a `protectedChecks.paths` selector. Remove one
+  trailing `/` from each selector; the two overlap when they are equal, when
+  the protected selector starts with the rule selector followed by `/`, or when
+  the rule selector starts with the protected selector followed by `/`. With
+  the protected path `scripts/lint.sh`, the rule paths `scripts/` and
+  `scripts/lint.sh` overlap, and `scripts/lint.sh.bak` and `script/` do not.
+  With the protected path `scripts/`, the rule path `scripts/lint/run.sh`
+  overlaps and `scriptsx/` does not. Changes to protected checks keep their
+  designated review and maintainer acceptance because a standing rule could
+  otherwise weaken a check without any maintainer decision.
+
+Policy amendments and protected-check changes still take the manual path under
+both acceptance modes.
+
+A rule without either field keeps its policy bytes, validation and behavior
+exactly as before. Clients that predate these fields reject any policy that
+contains either one, including `"acceptance": "maintainers"`. Omit both fields
+while such clients must still read the policy.
+
+#### Refused standing rules
+
+Each draft below starts from a valid policy with the maintainer
+`<maintainer-actor>`, the trusted reviewers `<reviewer-actor>` and
+`<second-reviewer-actor>`, one required approval, one required acceptance, no
+pipelines, and one rule named `ordinary` for the target `main` with the actor
+`<maintainer-actor>`, the author `<author-actor>` and the path `docs/`. The
+`rule:` line lists the fields the draft sets on that rule, `proposals:` lists
+the fields it sets in `proposals`, and `policy:` lists the sections it adds to
+the policy. `hn policy check --base main --file .hn/policy.json` refuses each
+draft with the message on its `refusal:` line and changes nothing.
+
+<!-- example: standing-policy-refusals -->
+```text
+# A standing rule needs at least one required approval.
+rule: {"acceptance": "rule", "actors": ["<executor-actor>"]}
+proposals: {"requiredApprovals": 0}
+refusal: automerge rule "ordinary" has acceptance "rule", which requires proposals.requiredApprovals of at least 1
+
+# A present reviewers list needs 1 to 64 entries.
+rule: {"acceptance": "rule", "actors": ["<executor-actor>"], "reviewers": []}
+refusal: automerge rule "ordinary" requires 1 to 64 reviewers when reviewers is present
+
+# Reviewers are distinct full actor fingerprints.
+rule: {"acceptance": "rule", "actors": ["<executor-actor>"], "reviewers": ["<reviewer-actor>", "<reviewer-actor>"]}
+refusal: automerge reviewers contains duplicate actor <reviewer-actor>
+
+# Every reviewer is a trusted reviewer.
+rule: {"acceptance": "rule", "actors": ["<executor-actor>"], "reviewers": ["<untrusted-actor>"]}
+refusal: automerge rule "ordinary" reviewer <untrusted-actor> is not a trusted reviewer
+
+# Reviewers can supply the required approvals.
+rule: {"acceptance": "rule", "actors": ["<executor-actor>"], "reviewers": ["<reviewer-actor>"]}
+proposals: {"requiredApprovals": 2}
+refusal: automerge rule "ordinary" lists 1 reviewers, fewer than proposals.requiredApprovals (2)
+
+# A standing rule cannot cover .hn.
+rule: {"acceptance": "rule", "actors": ["<executor-actor>"], "paths": ["docs/", ".hn/pipelines/"]}
+refusal: automerge rule "ordinary" path ".hn/pipelines/" covers .hn, which a rule with acceptance "rule" cannot cover
+
+# A standing rule cannot overlap a protected check path.
+rule: {"acceptance": "rule", "actors": ["<executor-actor>"], "paths": ["docs/", "scripts/"]}
+policy: {"protectedChecks": {"paths": ["scripts/lint.sh"], "trustedReviewers": ["<reviewer-actor>"], "requiredApprovals": 1}}
+refusal: automerge rule "ordinary" path "scripts/" overlaps protected check path "scripts/lint.sh"
+```
+
+#### Inspecting a standing rule
+
+`hn policy show` prints an `Acceptance:` line for every rule, followed by the
+executing actors, the proposal authors, the counted reviewers and the allowed
+paths. A standing rule reads `Acceptance: rule (standing acceptance; no
+maintainer acceptance per proposal)` and lists its actors under `Executing
+actors:`. A rule in mode `maintainers` reads `Acceptance: maintainers
+(maintainer acceptance required)` and keeps the `Executing maintainers:`
+heading. A rule without `reviewers` prints `Counted reviewers: all trusted
+reviewers`.
+
+`hn policy check` adds three lines after each rule's path lines: the
+acceptance mode and the reviewers added and removed. The acceptance value is
+`added (MODE)` or `removed (MODE)` when the whole rule is added or removed,
+`unchanged (MODE)` when the mode stays the same, and `changed (OLD -> NEW)`
+when it moves between modes. A rule without `acceptance` compares as
+`maintainers`, so adding `"acceptance": "maintainers"` to an existing rule
+reports `unchanged (maintainers)`. A rule without `reviewers` compares as an
+empty list. Rules appear in name order.
+
+Read these lines before accepting a policy amendment. Accepting an amendment
+that adds a standing rule, or moves a rule to acceptance mode `rule`, is the
+one maintainer act that grants standing acceptance. The lines show who can
+execute the rule, whose proposals it covers, whose approvals count and which
+paths it reaches, all as full identities.
+
+The policy below adds the standing rule `ordinary`. On a `main` whose policy
+is the same document without the `automerge` section, `hn policy check` ends
+with the lines shown. After the amendment lands on `main`, `hn policy show
+main` ends with the rule as shown.
+
+<!-- example: standing-policy-rule -->
+```json
+{
+  "version": "hn.policy/0",
+  "maintainers": ["<maintainer-actor>"],
+  "proposals": {
+    "requiredApprovals": 1,
+    "requiredAccepts": 1,
+    "trustedReviewers": ["<reviewer-actor>"],
+    "allowAuthorApproval": false
+  },
+  "pipelines": {},
+  "automerge": {
+    "rules": [
+      {
+        "name": "ordinary",
+        "targetBranch": "main",
+        "acceptance": "rule",
+        "actors": ["<executor-actor>"],
+        "authors": ["<author-actor>"],
+        "reviewers": ["<reviewer-actor>"],
+        "paths": ["src/", "tests/", "docs/"]
+      }
+    ]
+  }
+}
+```
+
+```text
+$ hn policy check --base main --file .hn/policy.json
+...
+  automerge rule ordinary enabled: changed (false -> true)
+  automerge rule ordinary target branch: "" -> "main"
+  automerge rule ordinary actors added: <executor-actor>
+  automerge rule ordinary actors removed: (none)
+  automerge rule ordinary authors added: <author-actor>
+  automerge rule ordinary authors removed: (none)
+  automerge rule ordinary paths added: docs/, src/, tests/
+  automerge rule ordinary paths removed: (none)
+  automerge rule ordinary acceptance: added (rule)
+  automerge rule ordinary reviewers added: <reviewer-actor>
+  automerge rule ordinary reviewers removed: (none)
+```
+
+```text
+$ hn policy show main
+...
+Automerge: enabled (explicit execution only)
+Rule ordinary; target branch main:
+  Acceptance: rule (standing acceptance; no maintainer acceptance per proposal)
+  Executing actors:
+  <executor-actor>
+  Proposal authors:
+  <author-actor>
+  Counted reviewers:
+  <reviewer-actor>
+  Allowed literal paths:
+    "docs/"
+    "src/"
+    "tests/"
+Pipelines:
+  (none)
+```
+
 
 Automatic execution creates a native two-parent merge commit from the verified
 head tree and uses an expected-old Git ref transaction for the actual target

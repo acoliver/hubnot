@@ -291,8 +291,21 @@ base bytes. It does not reinterpret historical decisions or contained-merge
 repair under a later policy.
 
 Automerge introduces no event kind, implicit role or automatic decision. A named
-base-policy rule restricts executing maintainers, authors, target branch and
-allowed paths in addition to existing current review/run/acceptance requirements.
+base-policy rule restricts executing actors, authors, target branch and allowed
+paths. In acceptance mode `maintainers`, the default, the executing actors must
+be maintainers and the existing current review, run and acceptance requirements
+all apply. In acceptance mode `rule`, the maintainer-accepted amendment that
+adopted the rule stands in for per-proposal maintainer acceptance, and the
+current review and run requirements still apply.
+
+A rule's optional `acceptance` field is `"maintainers"` or `"rule"`. Its optional
+`reviewers` field lists the trusted reviewers whose approvals count toward the
+rule. A rule in mode `rule` requires at least one approval and may not cover
+`.hn` or overlap a protected-check path. Clients that predate these fields
+reject a policy that contains either one. See
+[Standing acceptance rule fields](governance-v0.md#standing-acceptance-rule-fields)
+for the limits and inspection output.
+
 Default preview is keyless and read-only; execution is explicit. Version-one
 automation requires a full non-promisor repository, a clean checked-out rule
 target equal to the signed base, and no unfinished Git operation. It refuses
