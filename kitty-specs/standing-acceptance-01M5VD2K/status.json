@@ -1,7 +1,7 @@
 {
-  "event_count": 47,
-  "last_event_id": "01M5WXQM6PHC8E21Y9BAPS0E2A",
-  "materialized_at": "2026-10-26T20:16:51.414506+00:00",
+  "event_count": 49,
+  "last_event_id": "01M5WXSCYNMWEBMCMESDG8C1PP",
+  "materialized_at": "2026-10-26T20:17:49.513595+00:00",
   "mission_number": "",
   "mission_slug": "standing-acceptance-01M5VD2K",
   "mission_type": "",
@@ -12,9 +12,9 @@
     "claimed": 0,
     "done": 0,
     "for_review": 1,
-    "in_progress": 0,
+    "in_progress": 1,
     "in_review": 0,
-    "planned": 14
+    "planned": 13
   },
   "work_packages": {
     "WP01": {
@@ -148,11 +148,19 @@
       }
     },
     "WP05": {
-      "actor": "finalize-tasks",
+      "actor": "llxprt",
+      "agent": "llxprt",
+      "agent_profile": "__resolved_profile_absent__",
+      "agent_profile_version": "__resolved_profile_version_absent__",
       "force_count": 0,
-      "lane": "planned",
-      "last_event_id": "01M5VHTTE1R5DTSN8NC75AH4GD",
-      "last_transition_at": "2026-10-26T07:29:38.753866+00:00"
+      "lane": "in_progress",
+      "last_event_id": "01M5WXSCYNMWEBMCMESDG8C1PP",
+      "last_transition_at": "2026-10-26T20:17:49.513595+00:00",
+      "model": "__resolved_model_absent__",
+      "provider": "__resolved_provider_absent__",
+      "role": "implementer",
+      "shell_pid": 774683,
+      "shell_pid_created_at": "1793045867.29"
     },
     "WP06": {
       "actor": "llxprt",
