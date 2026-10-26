@@ -88,8 +88,8 @@
         "verdict": "changes_requested"
       },
       "role": "implementer",
-      "shell_pid": null,
-      "shell_pid_created_at": null,
+      "shell_pid": 4175775,
+      "shell_pid_created_at": "1793032802.28",
       "subtasks": {
         "T011": "planned",
         "T012": "planned",
