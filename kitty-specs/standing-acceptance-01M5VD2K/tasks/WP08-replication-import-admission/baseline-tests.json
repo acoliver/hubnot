@@ -1,0 +1,19 @@
+{
+  "wp_id": "WP08",
+  "captured_at": "2026-10-26T23:56:50Z",
+  "base_branch": "feat/standing-acceptance",
+  "base_commit": "09486e4ab7c978f98716499fad1e97b1664e7495",
+  "test_runner": "pytest",
+  "total": 1,
+  "passed": 0,
+  "failed": 1,
+  "skipped": 0,
+  "failures": [
+    {
+      "test": "<gate-coverage-junit>",
+      "error": "no JUnit XML artifact produced by the scoped run",
+      "file": "unknown"
+    }
+  ],
+  "source_identity": "GateCoverageScopeSource/junit_xml"
+}
