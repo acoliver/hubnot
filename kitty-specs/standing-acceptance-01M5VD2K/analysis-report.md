@@ -4,7 +4,7 @@ artifact_type: spec-kitty.analysis-report
 command: /spec-kitty.analyze
 mission_slug: standing-acceptance-01M5VD2K
 mission_id: 01M5VD2K9G554Y2CVBMGPN30MQ
-generated_at: '2026-10-26T10:25:29.715921+00:00'
+generated_at: '2026-10-26T10:26:12.935555+00:00'
 analyzer_agent: gpt-6.1-sol
 input_artifacts:
   spec.md:
@@ -21,9 +21,9 @@ input_artifacts:
     sha256: 404c65fe9e64919858d009c763644aefbfd369884d573d1986e3db7fa1f14bc9
 verdict: blocked
 issue_counts:
-  low: 0
-  medium: 2
   high: 2
+  medium: 2
+  low: 0
   critical: 0
   info: 0
 findings:
@@ -47,8 +47,8 @@ findings:
 
 ## Specification Analysis Report
 
-**Mission:** `standing-acceptance-01M5VD2K`  
-**Round:** 2  
+**Mission:** `standing-acceptance-01M5VD2K`
+**Round:** 2
 **Verdict:** **NOT READY** for implementation. Two HIGH findings leave contradictory executable-test instructions. Two MEDIUM findings need fixture-construction refinements.
 
 ### Scope and evidence
