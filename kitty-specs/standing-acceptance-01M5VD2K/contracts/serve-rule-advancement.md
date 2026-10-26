@@ -107,12 +107,12 @@ Decision `01M5VSEHFH0B1BSJ1NA923FKAA`. Agreement compares rule satisfaction, the
 
 ### Matched inputs
 
-Every comparison fixture holds these equal on the compared surfaces:
+Every comparison fixture declares its target tip and holds these inputs equal on the compared surfaces. The preview and local execution run in the same clone, so they share every input. Agreement requires equality across the compared surfaces; the declared tip may differ from the signed base where the fixture says so.
 
 | Input | How the fixture holds it equal |
 |----|----|
-| Target branch and tip | E's checked-out `main` equals the hosted `main`, and both equal the candidate's signed base |
-| Base and target policy | the same commits, so the same digests; the fixtures that test FR-017 move both tips to the same amendment commit |
+| Target branch and tip | E's checked-out `main` equals the hosted `main`, and both equal the fixture's declared tip. The declared tip is the candidate's signed base, except in the FR-017 fixture |
+| Base and target policy | the same commits on both surfaces, so the same digests. The FR-017 fixture puts both targets at the same amendment commit H1 and builds the candidate's head on top of H1 with its signed base at the older commit, so the target differs from the signed base, the server reaches step 7a, and both surfaces see a target policy that differs from the base policy |
 | Candidate code | the head commit and the proposal code ref are present locally and on the server |
 | Fact set | E runs `hn sync origin` with the all-trusted selection immediately before the comparison, and no fact is published between E's preview and E's push |
 

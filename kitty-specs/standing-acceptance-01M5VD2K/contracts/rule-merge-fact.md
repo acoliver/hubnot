@@ -159,9 +159,11 @@ Merged by maintainers in fact sha256:<fact ID>; its rule annotation "<name>" is 
 
 In F17 and F18 the candidate changes the manual-path file together with a path under `src/`, which the rule allows, so check 6 reports before check 7. F01 to F20 are the semantic rows; F21 and F22, and the shallow gap cases of WP09, are a separate missing-dependency table.
 
+Each semantic row has a matched valid control that the same surface accepts with the same selection and hydration strategy. For a fact-only defect (F01 to F14, F19, F20) the control is the valid fact for the same candidate with the defect removed. F15 to F18 are candidate-shape defects that no change to the fact can remove, so their control is a corresponding valid candidate (the same base and files with the defect removed) with its own reviews, run requests, run results and merge fact. Both the row and its control run with a complete closure, and the row must name its intended check.
+
 ## Legacy history fixtures (C-004, FR-022)
 
-Each is a raw signed payload that the older-client reference build of `7a47e69` accepts. Every admission surface of the new client must accept it exactly as before, and the older client must accept it too (WP17). The policy is one the older client can read: maintainers-mode rules only.
+Each is a raw signed payload, and each test asserts the fixture's declared outcome from the table. L01 to L05 are accepted by the older-client reference build of `7a47e69`; every admission surface of the new client must accept them exactly as before, and the older client must accept them too (WP17). L06 is a negative control that both builds refuse with the existing strict-resource error `invalid resource event JSON: unknown field "rule"`; every surface and both clients must keep refusing it. The policy is one the older client can read: maintainers-mode rules only.
 
 | ID | Legacy event | Expected verdict on every surface and client |
 |----|----|----|

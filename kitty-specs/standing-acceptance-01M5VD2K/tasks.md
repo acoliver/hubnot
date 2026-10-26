@@ -188,6 +188,15 @@ These choices were made by the tasks agent under the delegated non-interactive i
 
 Dependency and ownership changes: WP11 now depends on WP09 (both edit `policy.go`); WP09 owns `policy.go` for the rule path only; WP14 owns `serve_verdict.go` to remove the interim refusal; WP16 and WP18 depend on WP19 instead of WP15; WP19 depends on WP15 and owns `automerge.go`, `serve_client.go`, `standing_serve_test.go` and `docs/serve-v0.md` after WP15. Lanes were recomputed with `finalize-tasks`.
 
+Analysis round 2 found four contradictory or underspecified test instructions. The maintainer accepted the report's recommendation for each. No dependency or owned file changed, so `finalize-tasks` was not rerun.
+
+| Finding | Decision record | Tasks change |
+|----|----|----|
+| I4 Agreement fixtures require target equal to base and a different target policy | `01M5VWE2PV2R1N81SCMR46JQZ0` | WP11 T094 and WP15 T095 declare a target tip per fixture and require it equal across the compared surfaces; the target-policy fixture puts both targets at the amendment commit with the head descending from it (WP14 T068 step 6 recipe) |
+| I5 Harness requires every legacy payload to verify, including L06 | `01M5VWE2Q03GKFCWDA2WGS8MPZ` | WP06 T030 and T091 and WP03 T013 assert each fixture's declared outcome: L01 to L05 verify, L06 fails with the existing unknown-field error |
+| U2 Same-candidate controls for candidate-shape defects | `01M5VWE2Q3AVA8NPGRCSKBFW5M` | WP06 adds a `Control` builder per semantic row; WP09 T041 and WP16 T076 use the same candidate for fact-only rows and a corresponding valid candidate with rebound evidence for F15 to F18 |
+| U3 F21 recovery uses an uncounted approval | `01M5VWE2Q9J3GEQHZQ0HF4F70W` | WP06 F21 withholds an otherwise qualifying R approval (`h.ApproveUnpublished`, `h.Publish`); WP08 T038 asserts missing dependency before publication and admission after |
+
 ## Subtask Index
 
 | ID | Description | WP | Parallel |
