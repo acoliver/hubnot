@@ -420,7 +420,8 @@ hn run execute REQUEST [--backend sandbox|host] [--allow-unsafe-host-execution] 
 hn runner once|watch --accept-pipeline NAME --accept-actor ACTOR
 hn decide PROPOSAL <--accept|--reject> [--body TEXT]
 hn merge PROPOSAL
-hn automerge PROPOSAL --rule NAME [--execute]
+hn merge PROPOSAL --remote REMOTE [--branch BRANCH]
+hn automerge PROPOSAL --rule NAME [--execute [--remote REMOTE]]
 hn memory record|handoff|supersede|retract|challenge|show|recall|index
 hn replication select|show [REMOTE] [--memory STREAM]...
 hn sync [REMOTE] [--recover-shallow]
@@ -494,6 +495,7 @@ promise global erasure from every replica.
 - [CI and runner threat model](docs/ci-v0.md)
 - [Hosted Git compatibility](docs/host-compatibility.md)
 - [Operational self-hosting proof](docs/self-hosting-alpha.md)
+- [hn serve: governed local Git hosting](docs/serve-v0.md)
 
 ## License
 

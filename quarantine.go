@@ -21,6 +21,10 @@ const (
 	replicationRelationshipBad   = "relationship-invalid"
 	replicationPromotable        = "promotable"
 	replicationPromoted          = "promoted"
+	// replicationNotAdvertised marks an exact actor or proposal selector of an
+	// all-trusted selection that the remote does not advertise yet. It is not a
+	// failure: nothing is requested and nothing is promoted.
+	replicationNotAdvertised = "not-advertised"
 )
 
 type replicationRequest struct {
@@ -66,7 +70,7 @@ type replicationTransactionResult struct {
 
 func (result replicationTransactionResult) hasFailures() bool {
 	for _, outcome := range result.Outcomes {
-		if outcome.Status != replicationPromoted {
+		if outcome.Status != replicationPromoted && outcome.Status != replicationNotAdvertised {
 			return true
 		}
 	}
@@ -190,6 +194,10 @@ func runReplicationTransaction(selection ReplicationSelection) (replicationTrans
 	if err != nil {
 		return result, replicationPhaseError(selection.Remote, "repository setup")
 	}
+	// The quarantine fetch runs with --git-dir set to the quarantine, which
+	// has none of the clone's configuration, so the clone's transport
+	// settings travel with it (core.sshCommand selects a per-clone key).
+	transportEnv := cloneTransportConfigEnvironment()
 	requests, initialOutcomes, err := resolveReplicationRequests(selection, remoteURL)
 	if err != nil {
 		return result, err
@@ -226,7 +234,7 @@ func runReplicationTransaction(selection ReplicationSelection) (replicationTrans
 
 	fetched := make([]replicationRequest, 0, len(requests))
 	for _, request := range requests {
-		if _, err := gitOutputAt(quarantineDir, "fetch", "--no-tags", "--no-write-fetch-head", "--", remoteURL,
+		if _, err := gitInputWithDirectory(quarantineDir, nil, transportEnv, "fetch", "--no-tags", "--no-write-fetch-head", "--", remoteURL,
 			"+"+request.SourceRef+":"+request.QuarantineRef); err != nil {
 			result.Outcomes = append(result.Outcomes, failedReplicationOutcome(request, replicationStructuralInvalid,
 				fmt.Sprintf("selection %s %s failed exact fetch from remote %s", request.Kind, request.ID, selection.Remote)))
@@ -646,6 +654,58 @@ func resolveReplicationRequests(selection ReplicationSelection, remoteURL string
 				}
 			}
 		}
+	} else if selection.AllTrusted {
+		// Every advertised actor chain and proposal is requested, never memory.
+		// The requests then take the same quarantine, budget and validation
+		// path as every other mode.
+		refs := make([]string, 0, len(advertised))
+		for ref := range advertised {
+			refs = append(refs, ref)
+		}
+		sort.Strings(refs)
+		requested := make(map[string]bool)
+		for _, ref := range refs {
+			var request replicationRequest
+			switch {
+			case strings.HasPrefix(ref, "refs/hn/actors/"):
+				id := strings.TrimPrefix(ref, "refs/hn/actors/")
+				if !validActorFingerprint(id) {
+					continue
+				}
+				request = newReplicationRequest(replicationActor, id, ref, advertised[ref])
+			case strings.HasPrefix(ref, "refs/hn/proposals/"):
+				id := "sha256:" + strings.TrimPrefix(ref, "refs/hn/proposals/")
+				if !validEventID(id) {
+					continue
+				}
+				request = newReplicationRequest(replicationProposal, id, ref, advertised[ref])
+			default:
+				continue
+			}
+			wanted = append(wanted, request)
+			requested[request.key()] = true
+		}
+		exact := make([]replicationRequest, 0, len(selection.Actors)+len(selection.Proposals))
+		for _, actor := range selection.Actors {
+			ref := actorRef(actor)
+			exact = append(exact, newReplicationRequest(replicationActor, actor, ref, advertised[ref]))
+		}
+		for _, proposal := range selection.Proposals {
+			ref := proposalRef(proposal)
+			exact = append(exact, newReplicationRequest(replicationProposal, proposal, ref, advertised[ref]))
+		}
+		for _, request := range exact {
+			if requested[request.key()] {
+				continue
+			}
+			if request.OID == "" {
+				outcomes = append(outcomes, ReplicationOutcome{Kind: request.Kind, ID: request.ID, Status: replicationNotAdvertised, request: request})
+				continue
+			}
+			wanted = append(wanted, request)
+			requested[request.key()] = true
+		}
+		wanted, outcomes = appendExactMemoryRequests(selection, advertised, memoryRefs, wanted, outcomes)
 	} else {
 		for _, actor := range selection.Actors {
 			ref := actorRef(actor)
@@ -655,20 +715,7 @@ func resolveReplicationRequests(selection ReplicationSelection, remoteURL string
 			ref := proposalRef(proposal)
 			wanted = append(wanted, newReplicationRequest(replicationProposal, proposal, ref, advertised[ref]))
 		}
-		for _, stream := range selection.Memories {
-			refs := memoryRefs[stream]
-			if len(refs) == 1 {
-				wanted = append(wanted, newReplicationRequest(replicationMemory, stream, refs[0], advertised[refs[0]]))
-				continue
-			}
-			request := newReplicationRequest(replicationMemory, stream, "", "")
-			if len(refs) > 1 {
-				outcomes = append(outcomes, failedReplicationOutcome(request, replicationStructuralInvalid,
-					fmt.Sprintf("selected memory %s has ambiguous owners on remote %s", stream, selection.Remote)))
-				continue
-			}
-			wanted = append(wanted, request)
-		}
+		wanted, outcomes = appendExactMemoryRequests(selection, advertised, memoryRefs, wanted, outcomes)
 	}
 	requests := make([]replicationRequest, 0, len(wanted))
 	for _, request := range wanted {
@@ -683,6 +730,28 @@ func resolveReplicationRequests(selection ReplicationSelection, remoteURL string
 		requests = append(requests, request)
 	}
 	return requests, outcomes, nil
+}
+
+// appendExactMemoryRequests resolves exact --memory selectors to their one
+// advertised owner. An unadvertised stream is left without an object ID so it
+// reports dependency-missing; several owners report an ambiguity failure.
+func appendExactMemoryRequests(selection ReplicationSelection, advertised map[string]string, memoryRefs map[string][]string,
+	wanted []replicationRequest, outcomes []ReplicationOutcome) ([]replicationRequest, []ReplicationOutcome) {
+	for _, stream := range selection.Memories {
+		refs := memoryRefs[stream]
+		if len(refs) == 1 {
+			wanted = append(wanted, newReplicationRequest(replicationMemory, stream, refs[0], advertised[refs[0]]))
+			continue
+		}
+		request := newReplicationRequest(replicationMemory, stream, "", "")
+		if len(refs) > 1 {
+			outcomes = append(outcomes, failedReplicationOutcome(request, replicationStructuralInvalid,
+				fmt.Sprintf("selected memory %s has ambiguous owners on remote %s", stream, selection.Remote)))
+			continue
+		}
+		wanted = append(wanted, request)
+	}
+	return wanted, outcomes
 }
 
 func newReplicationRequest(kind, id, sourceRef, oid string) replicationRequest {
@@ -883,6 +952,62 @@ func validateQuarantinedActor(gitDir, actor, head string) ([]StoredEvent, error)
 	return events, nil
 }
 
+// validateQuarantinedActorRange validates the commits in oldHead..newHead of
+// one actor chain and joins them to the hosted prefix. hostedPrefix holds the
+// actor's already-hosted events in sequence order, ending at oldHead. Only the
+// appended commits are read from gitDir, so a push costs work proportional to
+// what it adds rather than to the hosted history. The caller checks that
+// oldHead is an ancestor of newHead; the parent check here still rejects any
+// non-linear range.
+func validateQuarantinedActorRange(gitDir, actor, oldHead, newHead string, hostedPrefix []StoredEvent) ([]StoredEvent, error) {
+	if oldHead == "" {
+		return validateQuarantinedActor(gitDir, actor, newHead)
+	}
+	if len(hostedPrefix) == 0 || hostedPrefix[len(hostedPrefix)-1].Commit != oldHead {
+		return nil, fmt.Errorf("hosted actor prefix does not end at %s", oldHead)
+	}
+	for _, event := range hostedPrefix {
+		if event.Event.Actor != actor {
+			return nil, fmt.Errorf("hosted actor prefix event %s belongs to actor %s", event.ID, event.Event.Actor)
+		}
+	}
+	joined := append([]StoredEvent(nil), hostedPrefix...)
+	text, err := gitTextAt(gitDir, "rev-list", "--reverse", oldHead+".."+newHead)
+	if err != nil {
+		return nil, fmt.Errorf("list appended actor events: %w", err)
+	}
+	commits := strings.Fields(text)
+	if len(commits) == 0 {
+		return joined, nil
+	}
+	previousCommit := oldHead
+	for _, commit := range commits {
+		stored, err := loadStoredEventAt(gitDir, commit)
+		if err != nil {
+			return nil, err
+		}
+		if stored.Event.Actor != actor {
+			return nil, fmt.Errorf("event %s belongs to actor %s", stored.ID, stored.Event.Actor)
+		}
+		if err := validateQuarantinedEventTree(gitDir, *stored); err != nil {
+			return nil, err
+		}
+		parents, err := gitTextAt(gitDir, "show", "-s", "--format=%P", commit)
+		if err != nil {
+			return nil, fmt.Errorf("inspect event commit parents for %s: %w", stored.ID, err)
+		}
+		if parents != previousCommit {
+			return nil, fmt.Errorf("event %s commit parent does not match its actor predecessor", stored.ID)
+		}
+		previousCommit = commit
+		joined = append(joined, *stored)
+	}
+	if err := validateActorChains(joined); err != nil {
+		return nil, err
+	}
+	return joined, nil
+}
+
 func validateQuarantinedEventTree(gitDir string, event StoredEvent) error {
 	contents, err := gitOutputAt(gitDir, "ls-tree", "-z", event.Commit)
 	if err != nil {
@@ -947,7 +1072,50 @@ func acceptedProposalHeads() (map[string]string, map[string]string, error) {
 	return heads, owners, nil
 }
 
+type replicationDependencyOptions struct {
+	// AllowAbsentProposalCode accepts a proposal.open or proposal.revise event
+	// whose code ref is absent from codeHeads. The base must exist, and the head
+	// must descend from it whenever the head commit is present.
+	AllowAbsentProposalCode bool
+}
+
 func replicationEventDependency(gitDir, acceptedGitDir string, event StoredEvent, byID map[string]StoredEvent, codeHeads, eventOwners, codeOwners map[string]string) (*replicationDependency, error) {
+	return replicationEventDependencyWithOptions(gitDir, acceptedGitDir, event, byID, codeHeads, eventOwners, codeOwners, replicationDependencyOptions{})
+}
+
+// replicationCommitPresent reports whether commit names a commit object in
+// either the quarantine or the accepted repository.
+func replicationCommitPresent(gitDir, acceptedGitDir, commit string) bool {
+	if _, err := gitOutputAt(gitDir, "cat-file", "-e", commit+"^{commit}"); err == nil {
+		return true
+	}
+	_, err := gitOutputAt(acceptedGitDir, "cat-file", "-e", commit+"^{commit}")
+	return err == nil
+}
+
+// absentProposalCodeDependency checks a proposal event whose code ref is not
+// hosted and not in the same push. The base commit must be present; the head
+// must descend from it when the head commit is present. The event still cannot
+// advance a protected branch, which requires matching hosted code.
+func absentProposalCodeDependency(gitDir, acceptedGitDir string, event StoredEvent, codeOwners map[string]string) (*replicationDependency, error) {
+	e := event.Event
+	if !replicationCommitPresent(gitDir, acceptedGitDir, e.Base) {
+		return &replicationDependency{EventID: event.ID, EventKind: e.Kind, Missing: e.Base,
+			Recovery: "push the proposal base commit " + e.Base, Key: codeOwners[event.ID], Reason: "proposal base commit is absent"}, nil
+	}
+	if !replicationCommitPresent(gitDir, acceptedGitDir, e.Head) {
+		return nil, nil
+	}
+	_, quarantineAncestryErr := gitOutputAt(gitDir, "merge-base", "--is-ancestor", e.Base, e.Head)
+	_, acceptedAncestryErr := gitOutputAt(acceptedGitDir, "merge-base", "--is-ancestor", e.Base, e.Head)
+	if quarantineAncestryErr != nil && acceptedAncestryErr != nil {
+		return nil, fmt.Errorf("proposal head %s does not descend from base %s", e.Head, e.Base)
+	}
+	return nil, nil
+}
+
+func replicationEventDependencyWithOptions(gitDir, acceptedGitDir string, event StoredEvent, byID map[string]StoredEvent,
+	codeHeads, eventOwners, codeOwners map[string]string, options replicationDependencyOptions) (*replicationDependency, error) {
 	require := func(id, description string, predicate func(StoredEvent) bool) (*replicationDependency, error) {
 		stored, exists := byID[id]
 		if !exists {
@@ -982,7 +1150,12 @@ func replicationEventDependency(gitDir, acceptedGitDir string, event StoredEvent
 		}
 		return nil, validateIssueReferences(event, byID)
 	}
-	if isProposalKind(e.Kind) {
+	if _, exists := codeHeads[event.ID]; isProposalKind(e.Kind) && !exists && options.AllowAbsentProposalCode {
+		dependency, err := absentProposalCodeDependency(gitDir, acceptedGitDir, event, codeOwners)
+		if err != nil || dependency != nil {
+			return dependency, err
+		}
+	} else if isProposalKind(e.Kind) {
 		head, exists := codeHeads[event.ID]
 		if !exists {
 			return &replicationDependency{EventID: event.ID, EventKind: e.Kind, Missing: event.ID,
@@ -1608,9 +1781,11 @@ func memoryReplicationRecovery(selection ReplicationSelection, dependency Memory
 		selected := selection.All
 		switch kind {
 		case replicationActor:
-			selected = selected || stringInSlice(id, selection.Actors)
+			// All-trusted requests every advertised actor chain and proposal;
+			// memory streams still need exact selection.
+			selected = selected || selection.AllTrusted || stringInSlice(id, selection.Actors)
 		case replicationProposal:
-			selected = selected || stringInSlice(id, selection.Proposals)
+			selected = selected || selection.AllTrusted || stringInSlice(id, selection.Proposals)
 		case replicationMemory:
 			selected = selected || stringInSlice(id, selection.Memories)
 		}

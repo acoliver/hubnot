@@ -89,10 +89,26 @@ func cmdSync(args []string) error {
 	if err != nil {
 		return err
 	}
-	result, importErr := runReplicationTransaction(selection)
+	// Only all-trusted selections depend on identification, and it is rechecked
+	// on every sync. Losing it skips the import, while publication still runs.
+	identificationLost := false
+	if selection.AllTrusted {
+		identified, _ := serveRemoteIdentifies(remote)
+		identificationLost = !identified
+	}
+	var result replicationTransactionResult
+	var importErr error
+	if identificationLost {
+		result = replicationTransactionResult{Remote: remote}
+		importErr = fmt.Errorf("remote %s no longer identifies as hn serve; reselect with hn replication select", remote)
+	} else {
+		result, importErr = runReplicationTransaction(selection)
+	}
 	for _, outcome := range result.Outcomes {
 		if outcome.Status == replicationPromoted {
 			fmt.Printf("Replication %s %s: promoted\n", outcome.Kind, outcome.ID)
+		} else if outcome.Status == replicationNotAdvertised {
+			fmt.Printf("Replication %s %s: not advertised yet\n", outcome.Kind, outcome.ID)
 		} else {
 			fmt.Printf("Replication %s %s: failed (%s): %s\n", outcome.Kind, outcome.ID, outcome.Status, oneLine(outcome.Diagnostic))
 		}
@@ -136,8 +152,8 @@ func publishLocalFacts(remote string, verifiedActorHeads map[string]string) erro
 		if actorPublicationCovered(ref, verifiedActorHeads[ref]) {
 			continue
 		}
-		if _, err := gitOutput("push", remote, ref+":"+ref); err != nil {
-			return replicationPhaseError(remote, "actor publication")
+		if err := servePushRef(remote, ref, replicationPhaseError(remote, "actor publication")); err != nil {
+			return err
 		}
 	}
 	proposalRefs, err := gitText("for-each-ref", "--format=%(refname)", "refs/hn/proposals")
@@ -145,8 +161,8 @@ func publishLocalFacts(remote string, verifiedActorHeads map[string]string) erro
 		return replicationPhaseError(remote, "proposal publication inspection")
 	}
 	for _, ref := range strings.Fields(proposalRefs) {
-		if _, err := gitOutput("push", remote, ref+":"+ref); err != nil {
-			return replicationPhaseError(remote, "proposal publication")
+		if err := servePushRef(remote, ref, replicationPhaseError(remote, "proposal publication")); err != nil {
+			return err
 		}
 	}
 	memoryRefs, err := gitText("for-each-ref", "--format=%(refname)", memoryRefPrefix)
@@ -157,8 +173,8 @@ func publishLocalFacts(remote string, verifiedActorHeads map[string]string) erro
 		if _, _, ok := parseMemoryRef(ref); !ok {
 			return replicationPhaseError(remote, "memory publication inspection")
 		}
-		if _, err := gitOutput("push", remote, ref+":"+ref); err != nil {
-			return replicationPhaseError(remote, "memory publication")
+		if err := servePushRef(remote, ref, replicationPhaseError(remote, "memory publication")); err != nil {
+			return err
 		}
 	}
 	return nil

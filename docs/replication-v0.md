@@ -12,7 +12,7 @@ hn replication select [REMOTE] \
   [--actor <full-64-hex-actor>]... \
   [--proposal <full-sha256-candidate-event-id>]... \
   [--memory <full-sha256-stream-id>]... \
-  [--all] \
+  [--all | --all-trusted] \
   [--max-events N] \
   [--max-objects N] \
   [--max-object-bytes N] \
@@ -49,6 +49,111 @@ enumerates advertised `refs/hn/actors/*`, `refs/hn/proposals/*`, and
 discovered ref through the same quarantine, budgets, validation, and promotion
 path. A memory stream ID must resolve to one unambiguous actor owner. An
 explicit saved selection remains authoritative until replaced.
+
+## All-trusted selection for hn serve remotes
+
+```text
+hn replication select [REMOTE] --all-trusted [--actor ACTOR]... [--proposal ID]... [--memory STREAM]... [budgets]
+```
+
+An `hn serve` remote accepts actor chains and proposal refs only after they
+pass its push checks. Runners and verifiers that follow such a remote can save
+an all-trusted selection and skip naming each actor and candidate. On every
+`hn sync REMOTE`, the selection requests each advertised
+`refs/hn/actors/<full-actor>` and `refs/hn/proposals/<candidate-hash>` ref
+with a well-formed name, in sorted ref order, followed by each exact `--actor`
+and `--proposal` selector. An exact selector for an advertised ref is
+requested once.
+
+### How the client identifies an hn serve remote
+
+A remote identifies as `hn serve` when
+`git ls-remote --refs REMOTE refs/hn/serve/v1` returns exactly one line whose
+object ID equals the local `git hash-object` result for the 11-byte blob
+`hn-serve/1
+`. Any other answer, including a transport error, means the
+remote does not identify. `hn replication select --all-trusted` checks
+identification before it saves anything and refuses an ordinary remote:
+
+```text
+hn: remote origin does not identify as hn serve; --all-trusted requires an hn serve remote
+```
+
+Identification only decides whether the mode may run. Anyone who can push to
+an ordinary remote can write the marker ref, so the marker grants no trust.
+Every requested ref goes through the quarantine transaction described below:
+the saved per-ref budgets, structural validation, relationship and dependency
+validation, identity continuity, and atomic promotion into
+`refs/hn/remotes/REMOTE/...`. An actor chain with a broken signature fails as
+`structurally-invalid` and promotes nothing, exactly as under an exact
+selection. The marker ref lies outside the advertised patterns that
+replication reads, so it is never imported.
+
+`hn sync` checks identification again on every run. When the remote no longer
+identifies, the import phase fetches nothing and stops with
+`remote REMOTE no longer identifies as hn serve; reselect with hn replication select`.
+The publication phase still runs, and the command exits 1. Exact selections,
+`--all` and the no-selection compatibility mode never check identification and
+behave the same against an `hn serve` remote and an ordinary remote holding
+the same refs.
+
+### Selector rules and unadvertised refs
+
+- `--all-trusted` cannot be combined with `--all`. The command refuses with
+  `--all-trusted is mutually exclusive with --all` before it contacts the
+  remote.
+- Exact `--actor`, `--proposal` and `--memory` selectors may be added. They
+  are validated exactly as in an exact selection. Budget flags, defaults and
+  validation are unchanged.
+- An exact actor or proposal selector that the remote does not advertise yet
+  reports `not-advertised` and prints, for example,
+  `Replication actor <full-actor>: not advertised yet`. Nothing is requested
+  or promoted for it, and it does not count as a failure, so `hn sync` can
+  still exit 0. The status exists only in all-trusted mode, where a named
+  participant who has not pushed yet is an ordinary situation. A participant
+  who has never pushed and is not named produces no request and no outcome.
+- Memory streams are never discovered by this mode. Only exact `--memory`
+  selectors import memory, and an exact memory selector that is not advertised
+  still reports `dependency-missing`. Recovery guidance for a memory stream
+  asks only for missing `--memory` selectors, because advertised actor chains
+  and proposals are already requested.
+
+### Storage, compatibility and shallow recovery
+
+The selection file keeps `"version": 1` and adds `"allTrusted": true`. The
+field is omitted when the mode is off, so selection files saved without
+`--all-trusted` are byte-identical to files written by earlier versions.
+`hn replication show` prints `all-trusted: true` directly after the
+`compatibility-all:` line only when the mode is set; every other line is
+unchanged.
+
+An older `hn` binary rejects unknown fields when it reads a selection file. It
+therefore fails closed on an all-trusted file: `hn sync` and
+`hn replication show` stop with `json: unknown field "allTrusted"`, and
+`hn sync` imports and publishes nothing until the selection is replaced.
+
+`hn sync REMOTE --recover-shallow` still requires exact selectors. It recovers
+only a supplier that the saved selection names exactly, so a pure all-trusted
+selection is refused with the existing `is not in the saved exact selection`
+diagnostic. To recover, save the exact supplier selectors next to
+`--all-trusted` and retry.
+
+### Example
+
+<!-- example: all-trusted-select -->
+```text
+$ hn replication select origin --all-trusted
+Saved replication selection for origin
+remote: origin
+saved: true
+compatibility-all: false
+all-trusted: true
+max-events: 10000
+max-objects: 100000
+max-object-bytes: 67108864
+max-attachment-bytes: 16777216
+max-total-bytes: 1073741824
+```
 
 ## Exact fetch and quarantine lifecycle
 
@@ -124,6 +229,35 @@ unreferenced residue, but they are not accepted roots and trust-sensitive
 operations remain fail-closed. Durable anchors/receipts prevent an interrupted
 copy from being mistaken for acceptance; retry reconciles exact transaction
 state.
+
+### Transport settings for the quarantine fetch
+
+Hubnot fetches each selection into a temporary bare repository under
+`.git/hn/replication/quarantine/`, and that repository has no configuration of
+its own. So that the fetch reaches the remote the way `git fetch` in the clone
+does, Hubnot reads the clone's local and worktree configuration, includes
+followed, and passes the transport settings to the fetch: `core.sshCommand`,
+`core.gitProxy`, `core.askPass` and every `ssh.*`, `http.*`, `credential.*` and
+`protocol.*` key. A clone that selects its SSH key with
+`git config core.sshCommand "ssh -i KEY -o IdentitiesOnly=yes"` therefore
+imports with that key. System and global configuration already apply to the
+fetch.
+
+The settings travel in `GIT_CONFIG_COUNT` environment entries, so a value such
+as an `http.extraHeader` token never appears in a process argument list.
+Settings already in the environment keep their precedence. `GIT_SSH_COMMAND`
+overrides `core.sshCommand`, and `GIT_CONFIG_COUNT` entries or `git -c` values
+that hn inherits override the clone's settings, as they do for any Git command
+in the clone. Refs, hooks, remotes, `url.*` rewrites and every other key stay
+out of the quarantine. `git remote get-url` has already applied `url.*` rewrites
+to the URL that Hubnot fetches.
+
+The environment entries need Git 2.31 or later, which added `GIT_CONFIG_COUNT`
+([2.31.0 release notes](https://github.com/git/git/blob/master/Documentation/RelNotes/2.31.0.adoc)),
+and reading the configuration by scope needs Git 2.26
+([2.26.0 release notes](https://github.com/git/git/blob/master/Documentation/RelNotes/2.26.0.adoc)).
+With an older Git the quarantine fetch sees only system, global and
+environment settings, so export `GIT_SSH_COMMAND` to choose a key.
 
 ## Budget semantics
 
@@ -255,3 +389,10 @@ or that a remote cannot advertise hostile data. Its guarantee is narrower:
 selected data is not an accepted projection root until bounded validation and
 atomic promotion succeed. Memory recall consumes only local and promoted
 accepted roots, never quarantine.
+
+All-trusted selection lets the remote decide which actor chains and proposals
+are requested. A malicious or misconfigured server can therefore make a client
+fetch more refs, each bounded by the saved per-ref budgets, and it can withhold
+refs so that facts arrive late or never. It cannot make the client accept an
+invalid fact, because every requested ref passes the same validation before
+promotion.

@@ -65,6 +65,8 @@ func run(args []string) error {
 		return cmdMerge(args[1:])
 	case "automerge":
 		return cmdAutomerge(args[1:])
+	case "serve":
+		return cmdServe(args[1:])
 	case "sync":
 		return cmdSync(args[1:])
 	case "log":
@@ -121,8 +123,12 @@ Usage:
   hn runner once --accept-pipeline NAME --accept-actor ACTOR
   hn runner watch --accept-pipeline NAME --accept-actor ACTOR
   hn decide PROPOSAL <--accept|--reject> [--body TEXT]
+  hn merge PROPOSAL --remote REMOTE [--branch BRANCH]
   hn merge PROPOSAL
-  hn automerge PROPOSAL --rule NAME [--execute]
+  hn automerge PROPOSAL --rule NAME [--execute [--remote REMOTE]]
+  hn serve repo create|list|show|set|lock-exec ...
+  hn serve key add|remove|list ...
+  hn serve git --key FINGERPRINT
   hn replication select|show [REMOTE] [full actor fingerprints and event IDs] [budgets]
   hn sync [REMOTE] [--recover-shallow]
   hn log

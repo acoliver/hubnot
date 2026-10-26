@@ -1,0 +1,245 @@
+{
+  "event_count": 164,
+  "last_event_id": "01M5TBCYYDQ6K1T7EKBW7DAGS4",
+  "materialized_at": "2026-10-25T20:17:58.733600+00:00",
+  "mission_number": "",
+  "mission_slug": "hn-serve-01M5P0NP",
+  "mission_type": "",
+  "summary": {
+    "approved": 0,
+    "blocked": 0,
+    "canceled": 0,
+    "claimed": 0,
+    "done": 14,
+    "for_review": 0,
+    "in_progress": 0,
+    "in_review": 0,
+    "planned": 0
+  },
+  "work_packages": {
+    "WP01": {
+      "actor": "merge",
+      "agent": "llxprt",
+      "force_count": 2,
+      "lane": "done",
+      "last_event_id": "01M5TBCH8NQDM5M6J821Y3E3CY",
+      "last_transition_at": "2026-10-25T20:17:44.725415+00:00",
+      "review_result": {
+        "feedback_path": "/home/acoliver/projects/appaday/gitium/hubnot/kitty-specs/hn-serve-01M5P0NP/tasks/WP01-server-state-foundation/review-cycle-3.md",
+        "reference": "review-cycle://hn-serve-01M5P0NP/WP01-server-state-foundation/review-cycle-3.md",
+        "reviewer": "user",
+        "verdict": "approved"
+      },
+      "shell_pid": 1250773,
+      "shell_pid_created_at": "1792900294.42"
+    },
+    "WP02": {
+      "actor": "merge",
+      "agent": "llxprt",
+      "force_count": 0,
+      "lane": "done",
+      "last_event_id": "01M5TBCJX7K37E13Z80Q0V9AYC",
+      "last_transition_at": "2026-10-25T20:17:46.407364+00:00",
+      "review_result": {
+        "feedback_path": "/home/acoliver/projects/appaday/gitium/hubnot/kitty-specs/hn-serve-01M5P0NP/tasks/WP02-ssh-keys-authorized-keys/review-cycle-1.md",
+        "reference": "review-cycle://hn-serve-01M5P0NP/WP02-ssh-keys-authorized-keys/review-cycle-1.md",
+        "reviewer": "user",
+        "verdict": "approved"
+      },
+      "shell_pid": 2520929,
+      "shell_pid_created_at": "1792909721.21"
+    },
+    "WP03": {
+      "actor": "merge",
+      "agent": "llxprt",
+      "force_count": 2,
+      "lane": "done",
+      "last_event_id": "01M5TBCCAFYH2C3X60A1XCMND4",
+      "last_transition_at": "2026-10-25T20:17:39.663858+00:00",
+      "review_result": {
+        "feedback_path": "/home/acoliver/projects/appaday/gitium/hubnot/kitty-specs/hn-serve-01M5P0NP/tasks/WP03-rejection-protocol-and-marker/review-cycle-3.md",
+        "reference": "review-cycle://hn-serve-01M5P0NP/WP03-rejection-protocol-and-marker/review-cycle-3.md",
+        "reviewer": "user",
+        "verdict": "approved"
+      },
+      "shell_pid": 878269,
+      "shell_pid_created_at": "1792897713.58"
+    },
+    "WP04": {
+      "actor": "merge",
+      "agent": "llxprt",
+      "force_count": 1,
+      "lane": "done",
+      "last_event_id": "01M5TBCDZ94670QEEF3M2TYPV1",
+      "last_transition_at": "2026-10-25T20:17:41.353456+00:00",
+      "review_result": {
+        "feedback_path": "/home/acoliver/projects/appaday/gitium/hubnot/kitty-specs/hn-serve-01M5P0NP/tasks/WP04-validation-seams/review-cycle-2.md",
+        "reference": "review-cycle://hn-serve-01M5P0NP/WP04-validation-seams/review-cycle-2.md",
+        "reviewer": "user",
+        "verdict": "approved"
+      },
+      "shell_pid": 3468716,
+      "shell_pid_created_at": "1792913447.13"
+    },
+    "WP05": {
+      "actor": "merge",
+      "agent": "llxprt",
+      "force_count": 1,
+      "lane": "done",
+      "last_event_id": "01M5TBCMH2RZKXWK4GF5WFGZY9",
+      "last_transition_at": "2026-10-25T20:17:48.066739+00:00",
+      "review_result": {
+        "feedback_path": "/home/acoliver/projects/appaday/gitium/hubnot/kitty-specs/hn-serve-01M5P0NP/tasks/WP05-repository-and-key-administration/review-cycle-2.md",
+        "reference": "review-cycle://hn-serve-01M5P0NP/WP05-repository-and-key-administration/review-cycle-2.md",
+        "reviewer": "user",
+        "verdict": "approved"
+      },
+      "shell_pid": 3723677,
+      "shell_pid_created_at": "1792914393.45"
+    },
+    "WP06": {
+      "actor": "merge",
+      "agent": "llxprt",
+      "force_count": 0,
+      "lane": "done",
+      "last_event_id": "01M5TBCP7JVA1G8TAVX69ARNY6",
+      "last_transition_at": "2026-10-25T20:17:49.810822+00:00",
+      "review_result": {
+        "feedback_path": "/home/acoliver/projects/appaday/gitium/hubnot/kitty-specs/hn-serve-01M5P0NP/tasks/WP06-forced-command-session/review-cycle-1.md",
+        "reference": "review-cycle://hn-serve-01M5P0NP/WP06-forced-command-session/review-cycle-1.md",
+        "reviewer": "user",
+        "verdict": "approved"
+      },
+      "shell_pid": 254411,
+      "shell_pid_created_at": "1792918081.64"
+    },
+    "WP07": {
+      "actor": "merge",
+      "agent": "llxprt",
+      "force_count": 1,
+      "lane": "done",
+      "last_event_id": "01M5TBCQH1VSMDJFTWHW1GHD69",
+      "last_transition_at": "2026-10-25T20:17:51.137216+00:00",
+      "review_result": {
+        "feedback_path": "/home/acoliver/projects/appaday/gitium/hubnot/kitty-specs/hn-serve-01M5P0NP/tasks/WP07-hook-and-verdict-framework/review-cycle-2.md",
+        "reference": "review-cycle://hn-serve-01M5P0NP/WP07-hook-and-verdict-framework/review-cycle-2.md",
+        "reviewer": "user",
+        "verdict": "approved"
+      },
+      "shell_pid": 1449927,
+      "shell_pid_created_at": "1792923729.02"
+    },
+    "WP08": {
+      "actor": "merge",
+      "agent": "llxprt",
+      "force_count": 2,
+      "lane": "done",
+      "last_event_id": "01M5TBCRMPZSZ3S5MGE78F23KY",
+      "last_transition_at": "2026-10-25T20:17:52.278536+00:00",
+      "review_result": {
+        "feedback_path": "/home/acoliver/projects/appaday/gitium/hubnot/kitty-specs/hn-serve-01M5P0NP/tasks/WP08-hubnot-fact-ref-rules/review-cycle-3.md",
+        "reference": "review-cycle://hn-serve-01M5P0NP/WP08-hubnot-fact-ref-rules/review-cycle-3.md",
+        "reviewer": "user",
+        "verdict": "approved"
+      },
+      "shell_pid": 2439163,
+      "shell_pid_created_at": "1792929617.57"
+    },
+    "WP09": {
+      "actor": "merge",
+      "agent": "llxprt",
+      "force_count": 0,
+      "lane": "done",
+      "last_event_id": "01M5TBCSS3EQPZ57XXKJ2KE0GB",
+      "last_transition_at": "2026-10-25T20:17:53.443133+00:00",
+      "review_result": {
+        "feedback_path": "/home/acoliver/projects/appaday/gitium/hubnot/kitty-specs/hn-serve-01M5P0NP/tasks/WP09-protected-branch-governance/review-cycle-1.md",
+        "reference": "review-cycle://hn-serve-01M5P0NP/WP09-protected-branch-governance/review-cycle-1.md",
+        "reviewer": "llxprt",
+        "verdict": "approved"
+      },
+      "shell_pid": 2732536,
+      "shell_pid_created_at": "1792931149.31"
+    },
+    "WP10": {
+      "actor": "merge",
+      "agent": "llxprt",
+      "force_count": 0,
+      "lane": "done",
+      "last_event_id": "01M5TBCV384EH7AYQRB9TTBK5G",
+      "last_transition_at": "2026-10-25T20:17:54.792891+00:00",
+      "review_result": {
+        "feedback_path": "/home/acoliver/projects/appaday/gitium/hubnot/kitty-specs/hn-serve-01M5P0NP/tasks/WP10-advancement-and-merge-fact/review-cycle-1.md",
+        "reference": "review-cycle://hn-serve-01M5P0NP/WP10-advancement-and-merge-fact/review-cycle-1.md",
+        "reviewer": "user",
+        "verdict": "approved"
+      },
+      "shell_pid": 3553402,
+      "shell_pid_created_at": "1792934120.04"
+    },
+    "WP11": {
+      "actor": "merge",
+      "agent": "llxprt",
+      "force_count": 0,
+      "lane": "done",
+      "last_event_id": "01M5TBCFKN6XC02JMEEV46SYWS",
+      "last_transition_at": "2026-10-25T20:17:43.029299+00:00",
+      "review_result": {
+        "feedback_path": "/home/acoliver/projects/appaday/gitium/hubnot/kitty-specs/hn-serve-01M5P0NP/tasks/WP11-all-trusted-selection/review-cycle-1.md",
+        "reference": "review-cycle://hn-serve-01M5P0NP/WP11-all-trusted-selection/review-cycle-1.md",
+        "reviewer": "user",
+        "verdict": "approved"
+      },
+      "shell_pid": 3854634,
+      "shell_pid_created_at": "1792915004.23"
+    },
+    "WP12": {
+      "actor": "merge",
+      "agent": "llxprt",
+      "force_count": 1,
+      "lane": "done",
+      "last_event_id": "01M5TBCWFEFWWV7CKFB9DJ8W7V",
+      "last_transition_at": "2026-10-25T20:17:56.206992+00:00",
+      "review_result": {
+        "feedback_path": "/home/acoliver/projects/appaday/gitium/hubnot/kitty-specs/hn-serve-01M5P0NP/tasks/WP12-fan-out-and-phase0-flow/review-cycle-3.md",
+        "reference": "review-cycle://hn-serve-01M5P0NP/WP12-fan-out-and-phase0-flow/review-cycle-3.md",
+        "reviewer": "user",
+        "verdict": "approved"
+      },
+      "shell_pid": 2980716,
+      "shell_pid_created_at": "1792955368.03"
+    },
+    "WP13": {
+      "actor": "merge",
+      "agent": "llxprt",
+      "force_count": 0,
+      "lane": "done",
+      "last_event_id": "01M5TBCXP9EC7XYAAHMWJ95NCZ",
+      "last_transition_at": "2026-10-25T20:17:57.449865+00:00",
+      "review_result": {
+        "feedback_path": "/home/acoliver/projects/appaday/gitium/hubnot/kitty-specs/hn-serve-01M5P0NP/tasks/WP13-quality-evidence-and-threat-model/review-cycle-1.md",
+        "reference": "review-cycle://hn-serve-01M5P0NP/WP13-quality-evidence-and-threat-model/review-cycle-1.md",
+        "reviewer": "user",
+        "verdict": "approved"
+      },
+      "shell_pid": 1082786,
+      "shell_pid_created_at": "1792939886.62"
+    },
+    "WP14": {
+      "actor": "merge",
+      "agent": "llxprt",
+      "force_count": 3,
+      "lane": "done",
+      "last_event_id": "01M5TBCYYDQ6K1T7EKBW7DAGS4",
+      "last_transition_at": "2026-10-25T20:17:58.733600+00:00",
+      "review_result": {
+        "feedback_path": "/home/acoliver/projects/appaday/gitium/hubnot/kitty-specs/hn-serve-01M5P0NP/tasks/WP14-git-lfs-transfer-and-quota/review-cycle-4.md",
+        "reference": "review-cycle://hn-serve-01M5P0NP/WP14-git-lfs-transfer-and-quota/review-cycle-4.md",
+        "reviewer": "user",
+        "verdict": "approved"
+      },
+      "shell_pid": 801742,
+      "shell_pid_created_at": "1792950927.79"
+    }
+  }
+}

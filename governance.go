@@ -121,7 +121,16 @@ type proposalMergeGuard struct {
 	Advance       func(*StoredEvent, *ProposalEvaluation, string, string, string) (string, error)
 }
 
-func cmdMerge(args []string) error { return mergeProposal(args, nil) }
+func cmdMerge(args []string) error {
+	if mergeRemoteRequested(args) {
+		proposalID, remote, branchRef, err := parseMergeRemoteArgs(args)
+		if err != nil {
+			return err
+		}
+		return cmdMergeRemote(proposalID, remote, branchRef)
+	}
+	return mergeProposal(args, nil)
+}
 
 func mergeProposal(args []string, guard *proposalMergeGuard) error {
 	if len(args) != 1 {

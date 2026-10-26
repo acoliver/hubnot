@@ -147,6 +147,51 @@ Only actors listed as base-policy maintainers can publish qualifying decisions.
 A maintainer's latest decision is current; a current rejection blocks merge.
 The required number of distinct current acceptances must be present.
 
+## Destination policy on a protected branch
+
+When a protected branch on an `hn serve` remote moves, the update must satisfy
+two policies: the candidate's signed base policy, and the policy at the branch
+tip that the update replaces. The first check is the readiness and acceptance
+evaluation described above. The second check, the destination check, counts
+the same signed reviews, CI results and decisions under the destination
+policy:
+
+- reviews count only from the destination policy's trusted reviewers, and an
+  author's own approval counts only when the destination policy allows it;
+- run requests count only when a destination maintainer signed them, results
+  count only from each destination pipeline's trusted runners, and each
+  pipeline needs the destination's required number of passing results;
+- decisions count only when a destination maintainer signed them, and the
+  destination's required number of acceptances applies.
+
+Decisions and merge facts are still matched against the base policy digest,
+because that is the digest maintainers signed. The destination policy supplies
+the actor lists and thresholds. Evidence signed by an actor that the
+destination policy no longer lists does not count toward the destination
+check, even when the base policy still lists that actor.
+
+A pipeline that only the destination policy requires is loaded from the
+candidate's signed head, the same place base-policy pipelines are loaded from.
+If the head has no valid definition for it, the destination check fails. See
+[protected branches](serve-v0.md#protected-branches) for how `hn serve`
+reports these refusals.
+
+## Fast-forward merge facts
+
+A `proposal.merged` fact names the candidate's signed `head` and a resulting
+`commit`. Two shapes are valid:
+
+- `commit` equal to `head` records that a protected branch was fast-forwarded
+  to the exact tested head;
+- `commit` different from `head` records a `--no-ff` merge commit whose second
+  parent is the head.
+
+Validation is the same for both shapes. Hubnot checks that the fact binds the
+candidate's immutable head, that a base-policy maintainer signed it against
+the base policy digest, and that it cites enough current acceptance decisions.
+It does not inspect the ancestry of `commit`. `hn merge PROPOSAL` without
+`--remote` keeps producing the second shape.
+
 ## Merge and conflict recovery
 
 `hn merge <full-candidate-id>` requires:
@@ -363,14 +408,22 @@ native pipelines and configure their trusted runners in policy; a local Git
 merge hook is not an automerge acceptance gate. Operator-controlled Git
 `reference-transaction` hooks retain their normal behavior.
 
-No command here starts a daemon, executes a pipeline, creates an approval or
-acceptance, synchronizes, or pushes. Publication remains explicit:
+Without `--remote`, no command here starts a daemon, executes a pipeline,
+creates an approval or acceptance, synchronizes, or pushes. Publication
+remains explicit:
 
 ```sh
 hn sync origin
 
 git push origin main:main
 ```
+
+An `hn serve` remote accepts no local merge commit on a protected branch, so
+the explicit publication above cannot land an automerge there. Use
+`hn automerge PROPOSAL --rule NAME --execute --remote REMOTE`, which imports
+the hosted facts, inspects the rule again against them and asks the server to
+advance the branch to the signed head. See
+[Automerge rules](serve-v0.md#automerge-rules).
 
 If code merged but its signed fact could not be recorded, inspect the target
 and retry `hn merge C` for the existing manual repair. Repair requires current

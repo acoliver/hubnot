@@ -14,7 +14,7 @@ import (
 	"time"
 )
 
-const automergeUsage = "usage: hn automerge PROPOSAL --rule NAME [--execute]"
+const automergeUsage = "usage: hn automerge PROPOSAL --rule NAME [--execute [--remote REMOTE]]"
 
 // Process seams permit deterministic race/recovery tests. They are never loaded
 // from repository configuration or exposed as policy authority.
@@ -45,10 +45,11 @@ func cmdAutomerge(args []string) error {
 	flags := quietFlags("automerge")
 	rule := flags.String("rule", "", "explicit automerge rule name")
 	execute := flags.Bool("execute", false, "execute a locally eligible native merge")
+	remote := flags.String("remote", "", "advance the rule's target branch on this hn serve remote")
 	if err := flags.Parse(args[1:]); err != nil {
 		return err
 	}
-	if flags.NArg() != 0 || *rule == "" {
+	if flags.NArg() != 0 || *rule == "" || (*remote != "" && !*execute) {
 		return usageError(automergeUsage)
 	}
 	inspection, err := inspectAutomerge(args[0], *rule)
@@ -68,6 +69,25 @@ func cmdAutomerge(args []string) error {
 	}
 	if !actorListed(identity.Actor, inspection.Rule.Actors) {
 		return fmt.Errorf("identity %s is not an executing actor for automerge rule %q", identity.Actor, *rule)
+	}
+	// An hn serve remote advances its protected branch only to the signed
+	// proposal head and never accepts a local merge commit. With --remote,
+	// the advancement is bound to the executing actor and to the hosted tip
+	// the rule was inspected against; without it, a target branch whose
+	// upstream is or may be an hn serve remote is refused before any local
+	// merge commit or merge fact exists.
+	if *remote != "" {
+		return automergeRemote(inspection, *rule, *remote, identity.Actor)
+	}
+	if upstream, err := gitText("config", "--get", "branch."+inspection.Rule.TargetBranch+".remote"); err == nil && upstream != "" && upstream != "." {
+		identified, reason := serveRemoteIdentifies(upstream)
+		if identified {
+			return fmt.Errorf("branch %s tracks hn serve remote %s, which advances only to the signed proposal head; run hn automerge %s --rule %s --execute --remote %s",
+				inspection.Rule.TargetBranch, upstream, inspection.Proposal.ID, *rule, upstream)
+		}
+		if strings.HasPrefix(reason, "cannot ") {
+			return fmt.Errorf("cannot tell whether %s, the upstream of %s, is an hn serve remote (%s); retry when it is reachable", upstream, inspection.Rule.TargetBranch, reason)
+		}
 	}
 	guard := &proposalMergeGuard{ExpectedActor: identity.Actor}
 	guard.Check = func(proposal *StoredEvent, evaluation *ProposalEvaluation, branch, current string) error {
@@ -602,4 +622,81 @@ func automergeIgnoredPathCollision(changed []string, p string) bool {
 		offset = end + 1
 	}
 	return false
+}
+
+// automergeRemote executes an automerge rule against an hn serve remote. It
+// imports the hosted facts first and inspects the rule again, so a trusted
+// change request or failing run that exists only on the server blocks the
+// rule, and it requires the checked-out target branch to equal the hosted
+// tip it then binds the advancement to. The server applies its own checks
+// to the advancement; it does not evaluate automerge rules.
+func automergeRemote(first *automergeInspection, rule, remote, actor string) error {
+	if !validReplicationRemote(remote) {
+		return fmt.Errorf("invalid remote name %q", remote)
+	}
+	if identified, reason := serveRemoteIdentifies(remote); !identified {
+		return fmt.Errorf("remote %s is not an hn serve remote (%s)", remote, reason)
+	}
+	// The import must cover every actor whose evidence can veto the rule, or
+	// a trusted change request or failure on an unselected chain stays
+	// invisible to the inspection below.
+	selection, _, err := loadReplicationSelection(remote)
+	if err != nil {
+		return err
+	}
+	if missing := automergeUnselectedActors(selection, first.Evaluation.Policy); len(missing) > 0 {
+		return fmt.Errorf("the replication selection for %s omits %d trusted actor(s), whose vetoes automerge must see; run hn replication select %s --all-trusted",
+			remote, len(missing), remote)
+	}
+	if err := cmdSync([]string{remote}); err != nil {
+		return fmt.Errorf("import hosted facts from %s: %w", remote, err)
+	}
+	inspection, err := inspectAutomerge(first.Proposal.ID, rule)
+	if err != nil {
+		return err
+	}
+	if err := inspection.eligible(); err != nil {
+		return err
+	}
+	if inspection.Branch != first.Rule.TargetBranch || inspection.Proposal.Event.Base != first.Proposal.Event.Base ||
+		inspection.Proposal.Event.Head != first.Proposal.Event.Head || inspection.Evaluation.PolicyDigest != first.Evaluation.PolicyDigest {
+		return fmt.Errorf("automerge candidate, policy or target changed while importing hosted facts")
+	}
+	if !actorListed(actor, inspection.Rule.Actors) {
+		return fmt.Errorf("identity %s is no longer an executing actor for automerge rule %q", actor, rule)
+	}
+	branchRef := "refs/heads/" + inspection.Rule.TargetBranch
+	hosted, found, err := serveAdvanceRemoteRef(remote, branchRef)
+	if err != nil {
+		return err
+	}
+	if !found || hosted != inspection.Current {
+		return fmt.Errorf("local %s is at %s but %s has %s; update the local branch to the hosted tip and rerun",
+			inspection.Rule.TargetBranch, shortOID(inspection.Current), remote, shortOID(hosted))
+	}
+	return mergeRemoteBound(inspection.Proposal.ID, remote, branchRef, serveAdvanceBinding{ExpectedActor: actor, ExpectedTip: hosted})
+}
+
+// automergeUnselectedActors lists the policy's maintainers, trusted
+// reviewers, protected-check reviewers and trusted runners that a saved
+// replication selection does not import.
+func automergeUnselectedActors(selection ReplicationSelection, policy PolicyDocument) []string {
+	if selection.All || selection.AllTrusted {
+		return nil
+	}
+	needed := append([]string{}, policy.Maintainers...)
+	needed = append(needed, policy.Proposals.TrustedReviewers...)
+	if policy.ProtectedChecks != nil {
+		needed = append(needed, policy.ProtectedChecks.TrustedReviewers...)
+	}
+	for _, pipeline := range policy.Pipelines {
+		needed = append(needed, pipeline.TrustedRunners...)
+	}
+	var missing []string
+	for _, actor := range sortedUniqueStrings(needed...) {
+		if !stringInSlice(actor, selection.Actors) {
+			missing = append(missing, actor)
+		}
+	}
+	return missing
 }
