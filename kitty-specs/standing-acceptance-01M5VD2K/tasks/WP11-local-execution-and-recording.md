@@ -4,6 +4,7 @@ title: Local execution, rule merge fact and status
 dependencies:
 - WP07
 - WP08
+- WP09
 - WP10
 requirement_refs:
 - FR-009
@@ -11,6 +12,8 @@ requirement_refs:
 - FR-011
 - FR-021
 - FR-023
+- FR-024
+- NFR-002
 planning_base_branch: feat/standing-acceptance
 merge_target_branch: feat/standing-acceptance
 branch_strategy: Planning artifacts for this mission were generated on feat/standing-acceptance. During /spec-kitty.implement this WP may branch from a dependency-specific base, but completed changes must merge back into feat/standing-acceptance unless the human explicitly redirects the landing branch.
@@ -21,6 +24,7 @@ subtasks:
 - T051
 - T052
 - T053
+- T094
 phase: Phase 4 - Local standing acceptance
 history:
 - !!omap
@@ -74,7 +78,8 @@ The rule authority replaces only the acceptance and maintainer checks of `mergeP
 - Read spec US1 (all four scenarios), FR-009 to FR-011 and FR-021, SC-002; [contracts/automerge-cli.md](../contracts/automerge-cli.md) "Local execution"; [contracts/rule-merge-fact.md](../contracts/rule-merge-fact.md) "Recording a rule merge fact" and "hn proposal status"; [research.md](../research.md) finding 6 and decision `01M5VF06S28D7WBPBE9K7BCK18`.
 - Start with `spec-kitty agent action implement WP11 --agent <name> --mission standing-acceptance-01M5VD2K`.
 - Existing code: `proposalMergeGuard`, `mergeProposal`, `appendProposalMergeEvent`, `cmdMerge` (`governance.go`; the acceptance and maintainer checks are at lines 172, 185, 241, 247, 285 and 291); `cmdAutomerge`, `advanceAutomerge` (`automerge.go`); `cmdProposalStatus` (`policy.go`); `nextEvent`, `encodeAndSign`, `eventID` (`event.go`); `appendEvent` (`store.go`); `collectEvents`.
-- From WP05: `validateRuleMergeFactWith`, `newRuleValidationMemo`. From WP07: `localRuleObjectAccess`. From WP10: `automergeInspection.RuleAcceptance`. From WP06: the harness.
+- From WP05: `validateRuleMergeFactWith`, `newRuleValidationMemo`, `admitMergeFact`, `mergeAuthority`. From WP07: `localRuleObjectAccess`, `maintainerMergeCheck`, `validateMergeEventWith`. From WP10: `automergeInspection.RuleAcceptance`. From WP06: the harness and the boundary fixtures B2 and B3.
+- WP09 is a dependency only because both WPs edit `policy.go` (WP09 the rule path of `validateMergeEventWith`, this WP `cmdProposalStatus`); it orders the edits.
 
 ## Branch Strategy
 
@@ -90,7 +95,7 @@ The rule authority replaces only the acceptance and maintainer checks of `mergeP
 |----|----|
 | `governance.go` | CHANGE. Rule authority in `proposalMergeGuard`, the four reachable checks in `mergeProposal`, `appendRuleMergeEvent`, the recording branch. `cmdMerge` and `cmdDecide` unchanged. |
 | `automerge.go` | CHANGE. `cmdAutomerge` builds the rule authority. Do not touch `inspectAutomerge` beyond what WP10 did, and do not touch `automergeRemote` (WP15). |
-| `policy.go` | CHANGE. `cmdProposalStatus` rule line only. |
+| `policy.go` | CHANGE. `cmdProposalStatus` status lines only. |
 | `standing_automerge_test.go` | CHANGE. Add `TestStandingAutomergeExecute...`. |
 | `docs/governance-v0.md` | CHANGE. Execution text and the `standing-execute` example. |
 
@@ -135,7 +140,7 @@ The rule authority replaces only the acceptance and maintainer checks of `mergeP
 
 1. Signature: `func appendRuleMergeEvent(identity *Identity, proposal *StoredEvent, evaluation *ProposalEvaluation, acceptance *ruleAcceptance, resultCommit string) (*StoredEvent, error)`.
 2. Build with `nextEvent(identity, "proposal.merged")`: `Subject` = candidate ID, `Policy` = `evaluation.PolicyDigest`, `Head` = candidate head, `Commit` = `resultCommit`, `Evidence` = `acceptance.Evidence`, `Rule` = `acceptance.Rule.Name`.
-3. Self-check before writing: `encodeAndSign(event, identity)`, `id := eventID(payload)`, `fact := StoredEvent{ID: id, Event: event, Payload: payload}`; `collectEvents()` and an index `byID` plus `fact`; `validateProposalMergeBinding(fact, *proposal)` and `validateRuleMergeFactWith(newRuleValidationMemo(localRuleObjectAccess()), fact, *proposal, byID)`. On failure return `refusing to sign a rule merge fact that verifiers would reject: <message>` and write nothing.
+3. Self-check before writing: `encodeAndSign(event, identity)`, `id := eventID(payload)`, `fact := StoredEvent{ID: id, Event: event, Payload: payload}`; `collectEvents()` and an index `byID` plus `fact`; `validateProposalMergeBinding(fact, *proposal)` and `validateMergeEventWith(newRuleValidationMemo(localRuleObjectAccess()), fact, *proposal, byID)`, which runs the same `admitMergeFact` order as every verifier. Unless it returns `mergeByRule` with no error, return `refusing to sign a rule merge fact that verifiers would reject: <message>` and write nothing. Requiring `mergeByRule` keeps a standing-rule merge from being recorded as anything but a rule merge.
 4. Then `appendEvent(event, identity)`. ed25519 signatures are deterministic and the event value is identical, so the stored ID equals `id`; assert it and return an internal error if it differs.
 5. The caller already merged the code when this runs. On refusal, `mergeProposal` returns `code merged at <commit> but recording failed: ...` as it does today; WP12's repair path records the fact once the cause is resolved.
 
@@ -148,15 +153,21 @@ The rule authority replaces only the acceptance and maintainer checks of `mergeP
 3. Acceptance mode `maintainers`: no authority; behavior unchanged, including US5-4, where the inspection's rule threshold (WP10) is part of eligibility and the recorded fact is an acceptance merge fact.
 4. A maintainer listed in a standing rule's `actors` also gets the authority and records a rule merge fact (FR-011, spec edge case).
 
-### Subtask T051: `hn proposal status` rule line
+### Subtask T051: `hn proposal status` lines for rule claims
 
-**Steps**: in `cmdProposalStatus`, after `Status:   ...`, for each merge event in `evaluation.MergeEvents` with a non-empty `Rule`, sorted by event ID, print:
+**Steps**: in `cmdProposalStatus`, after `Status:   ...`, for each merge event in `evaluation.MergeEvents` with a non-empty `Rule`, sorted by event ID, classify it with `maintainerMergeCheck` (projection already admitted it, so a failing maintainer check means it was admitted through path (b)) and print:
 
 ```text
 Merged by rule ordinary, signed by <full executor fingerprint> in fact sha256:<full fact ID>
 ```
 
-Pass the rule name through `safeText`. Acceptance merge facts print no new line. No other line changes.
+for a rule merge, or, for a maintainer merge that carries a rule claim (FR-021, US3-6):
+
+```text
+Merged by maintainers in fact sha256:<full fact ID>; its rule annotation "ordinary" is not verified
+```
+
+Pass the rule name through `safeText`. Merge facts without a rule claim print no new line. No other line changes.
 
 ### Subtask T052: Black-box execution tests for US1-1, US1-2 and US1-3
 
@@ -170,6 +181,7 @@ Pass the rule name through `safeText`. Acceptance merge facts print no new line.
 6. **Two rules**: the candidate satisfies `ordinary` and a second standing rule `docsonly` that also lists E; E executes `--rule docsonly`; the fact names `docsonly`.
 7. **Self-check**: an in-process test (`t.Chdir` into E's clone) calls `appendRuleMergeEvent` with an acceptance whose evidence omits the approval: returns the "refusing to sign" error and E's actor ref is unchanged.
 8. **Status of acceptance merges unchanged**: a candidate merged with `hn decide` and `hn merge` prints no `Merged by rule` line.
+9. **Status of a maintainer merge with a rule claim**: with boundary fixture B3 in the store, `hn proposal status` prints `Status:   merged` and the `Merged by maintainers ... is not verified` line, and no `Merged by rule` line.
 
 ### Subtask T053: Governance guide execution section and `standing-execute` example
 
@@ -180,16 +192,29 @@ Pass the rule name through `safeText`. Acceptance merge facts print no new line.
 3. Add `TestStandingAutomergeDocumentedExecute` containing the exact marker string; it replays the flow on the harness and compares each documented output line after substitution.
 4. Style: plain direct sentences, no em dashes.
 
+### Subtask T094: Preview and local execution agree on rule satisfaction (NFR-002)
+
+**Purpose**: decision `01M5VSEHFH0B1BSJ1NA923FKAA`. The preview and local execution share every input (same clone, branch tip, base and target policy, candidate code and fact set), so they must reach the same rule-satisfaction outcome; executor authorization is tested separately.
+
+**Steps** (`TestStandingAutomergeAgreementPreviewExecute` in `standing_automerge_test.go`):
+
+1. Fixtures, each in its own harness or a reset copy, with E's clone clean and `main` at the signed base: satisfied; a trusted change request (counted reviewer, and uncounted reviewer S); a trusted failure; a maintainer rejection; too few counted approvals (only S approved); too few passing results; author outside the rule; a path outside the rule; a `.hn/policy.json` change; a protected-check change; a rule with acceptance mode `maintainers` named with `--rule`; a rule that does not exist; a target policy that differs from the base policy.
+2. For each fixture: run the keyless preview and record `eligible` (no blocker) and the blocker lines; then run `hn automerge <c> --rule NAME --execute` as E. Assert execution merges exactly when the preview was eligible, and when it refuses, its `automerge blocked:` text names the same blockers as the preview, in the same order.
+3. Log a table of fixture, preview outcome and execution outcome; agreement must be 100%.
+4. Authorization is not part of this comparison: one extra case runs the satisfied fixture as X, whose preview is eligible and whose execution is refused with `identity <X> is not an executing actor for automerge rule "ordinary"`; record it in the log as an authorization refusal, not an agreement failure. WP12 T057 covers the rest of the containment set.
+
 ## Test Strategy
 
 Black-box tests through the harness, one in-process self-check test, and the unchanged `automerge_test.go`, `governance_revision_test.go` and `policy_test.go`. Run `go test -race -run 'TestStandingAutomerge|TestAutomerge|TestMerge' ./...`, then the full gate.
 
 ## Definition of Done
 
-- [ ] T048 to T053 complete; full gate passes.
+- [ ] T048 to T053 and T094 complete; full gate passes.
+- [ ] **NFR-002 (preview and execution)**: 100% rule-satisfaction agreement over the T094 fixtures; authorization logged separately.
+- [ ] **FR-024 (pre-sign)**: the self-check uses `validateMergeEventWith` and requires a rule merge.
 - [ ] **FR-009**: a non-maintainer executing actor merges a standing-rule candidate locally with no maintainer decision; all other blockers still apply.
 - [ ] **FR-010 / FR-011**: the recorded fact has `rule`, base `policy` and exactly the qualifying evidence; its signer is an executing actor; a maintainer executing a standing rule also records a rule merge fact.
-- [ ] **FR-021**: status names the rule, the full signer fingerprint and the full fact ID.
+- [ ] **FR-021**: status names the rule, the full signer fingerprint and the full fact ID for a rule merge, and marks a rule claim on a maintainer merge as not verified.
 - [ ] Pre-sign self-check proven by test.
 - [ ] `hn merge` and maintainers-mode automerge unchanged; every pre-existing test passes with no assertion change; `standing-execute` executed.
 
@@ -206,3 +231,4 @@ Black-box tests through the harness, one in-process self-check test, and the unc
 ## Activity Log
 
 - 2026-10-26T06:54:14Z – system – Prompt generated via /spec-kitty.tasks
+- 2026-10-26T09:45:00Z – llxprt – Prompt revised after analysis (C1, I4; decisions 01M5VSEHEVA82N9T64ZH1P1Q2A and 01M5VSEHFH0B1BSJ1NA923FKAA): self-check through validateMergeEventWith, status lines by authority, T094 preview-to-execution agreement, WP09 added as a dependency to order policy.go edits

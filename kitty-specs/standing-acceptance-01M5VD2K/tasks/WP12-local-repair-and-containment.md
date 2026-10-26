@@ -79,7 +79,7 @@ Two things that make delegation to a rule safe in a local clone:
 
 | File | Change |
 |----|----|
-| `automerge.go` | CHANGE. Repair state in `inspectAutomerge`, repair branch in `cmdAutomerge`, rerun hints in `advanceAutomerge` messages under acceptance mode `rule`. `automergeRemote` belongs to WP15. |
+| `automerge.go` | CHANGE. Repair state in `inspectAutomerge`, repair branch in `cmdAutomerge`, rerun hints in `advanceAutomerge` messages under acceptance mode `rule`. `automergeRemote` belongs to WP15 and WP19, and so does the publication-only rerun of `cmdAutomerge` (WP19). The local already-merged refusal stays. |
 | `standing_automerge_test.go` | CHANGE. Add `TestStandingAutomergeRepair...` and `TestStandingAutomergeContainment...`. |
 | `docs/governance-v0.md` | CHANGE. Limits and repair text for standing rules. |
 

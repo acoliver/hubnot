@@ -7,6 +7,7 @@ dependencies:
 requirement_refs:
 - FR-016
 - FR-023
+- FR-025
 planning_base_branch: feat/standing-acceptance
 merge_target_branch: feat/standing-acceptance
 branch_strategy: Planning artifacts for this mission were generated on feat/standing-acceptance. During /spec-kitty.implement this WP may branch from a dependency-specific base, but completed changes must merge back into feat/standing-acceptance unless the human explicitly redirects the landing branch.
@@ -16,6 +17,7 @@ subtasks:
 - T061
 - T062
 - T063
+- T093
 phase: Phase 5 - hn serve rule advancement
 history:
 - !!omap
@@ -60,7 +62,7 @@ Add the wire vocabulary of rule advancement ([contracts/serve-rule-advancement.m
 - a third push option, `hn-rule=NAME`, valid only together with `hn-advance`, at most once, with the rule-name grammar; at most three options in total;
 - three reason codes, `advance-not-rule-executor`, `protected-rule-not-satisfied` and `protected-rule-veto`, in a second catalogue `serveRuleReasonCatalogue` that every lookup consults, documented in a second table.
 
-This WP changes no verdict. WP14 uses `options.Rule` in the protected verdict, and WP15 sends the option from the client. Until WP14 lands, a push with `hn-rule` parses and the verdict ignores it, so the existing maintainer checks still apply; do not ship a client that sends it before WP14 (no client sends it in this WP).
+This WP adds no rule evaluation. WP14 uses `options.Rule` in the protected verdict, and WP15 sends the option from the client. Until WP14 lands, the hook must fail closed (FR-025, decision `01M5VSEHF5B1FM9TB52KWKQGWZ`): after a push's options parse, `evaluateServePush` refuses every update of a push whose options carry `hn-rule` with `unsupported-command` and the sentence `this server does not evaluate hn-rule advancement yet.`, before any protected check runs. A build in this state therefore behaves like a server built before the mission, which refuses `hn-rule` at parse time, and it never applies the maintainer path to a request that names a rule. WP14 removes the interim refusal in the same change that adds the rule steps. No client sends `hn-rule` in this WP.
 
 ## Context
 
@@ -84,9 +86,9 @@ This WP changes no verdict. WP14 uses `options.Rule` in the protected verdict, a
 |----|----|
 | `serve_wire.go` | CHANGE. `servePushOptionRule = "hn-rule"`. |
 | `serve_hooks.go` | CHANGE. Limit, sentence, parser. |
-| `serve_verdict.go` | CHANGE. `Rule string` on `servePushOptions` only. |
+| `serve_verdict.go` | CHANGE. `Rule string` on `servePushOptions`, and the interim `hn-rule` refusal at the top of `evaluateServePush` (T093). WP14 removes the refusal. |
 | `serve_reasons.go` | CHANGE. Three constants, `serveRuleReasonCatalogue`, lookup. `serveReasonCatalogue` stays byte-identical. |
-| `standing_serve_test.go` | NEW. `TestStandingServeWire...`. WP14 and WP15 add tests later. |
+| `standing_serve_test.go` | NEW. `TestStandingServeWire...`. WP14, WP15 and WP19 add tests later. |
 | `docs/protocol-v0.md` | CHANGE. "Push options" and a new "Reason codes for rule advancement" subsection. |
 
 ## Subtasks
@@ -150,15 +152,35 @@ This WP changes no verdict. WP14 uses `options.Rule` in the protected verdict, a
 2. After the existing "Reason codes" table and its surrounding text, add the subsection `### Reason codes for rule advancement` with one sentence of introduction and a table with the header line `| Code | Meaning | Typical next action |` and the three rows of T061 (commands in backticks). Keep it after the first table so `TestServeReasonsDocsTableMatchesCatalogue` still reads only the first table. Make sure a non-table line (a blank line and the heading) separates the two tables.
 3. Style: plain direct sentences, no em dashes.
 
+### Subtask T093: Interim `hn-rule` refusal and boundary fixture B5
+
+**Steps**:
+
+1. In `evaluateServePush` (`serve_verdict.go`), right after the existing `hn-advance` shape check, add:
+
+   ```go
+   // Until the protected verdict evaluates rules (WP14), a request that
+   // names a rule is refused like an older server refuses it, so no build
+   // applies the maintainer path to it (FR-025).
+   if options.Rule != "" {
+       return rejectServeEveryUpdate(ctx, updates, serveReasonUnsupportedCommand,
+           "this server does not evaluate hn-rule advancement yet.")
+   }
+   ```
+
+2. `TestStandingServeWireRuleRefusedBeforeVerdict` (boundary fixture B5 of the contract): with the existing governed fixture helpers of `serve_protected_test.go` (`newServeGovernedFixture` and its methods; read them, do not edit them), build a candidate that M has accepted and that would advance, and push it as M with `hn-advance`, `hn-expected-tip` and `hn-rule=nosuch`. Assert the push is refused, the rejection code is not an acceptance, and `ServerRefs()` is byte-identical before and after. Then push the same request without `hn-rule` and assert it advances, which proves the refusal comes from `hn-rule` alone.
+3. Write the assertion of step 2 so it stays true after WP14: assert refusal and unchanged refs, and assert the code only as a member of `{unsupported-command, protected-rule-not-satisfied}`. WP14 asserts its exact code in its own test.
+
 ## Test Strategy
 
 Unit tests for the parser and catalogues, a docs drift test, and the unchanged serve suites. Run `go test -race -run 'TestStandingServeWire|TestServeReasons|TestServePush' ./...`, then the full gate.
 
 ## Definition of Done
 
-- [ ] T059 to T063 complete; full gate passes.
+- [ ] T059 to T063 and T093 complete; full gate passes.
 - [ ] **FR-016 (wire)**: `hn-rule` parsed with every refusal of the contract table; limit 3; sentence names all three options.
 - [ ] The three codes are known to every lookup; `serveReasonCatalogue` and its documented table are unchanged; the second table equals `serveRuleReasonCatalogue`.
+- [ ] **FR-025**: every push carrying `hn-rule` is refused before any protected check, with hosted refs unchanged; the B5 test passes and is written to stay true after WP14.
 - [ ] Every frozen serve test passes with no assertion change.
 
 ## Risks
@@ -173,3 +195,4 @@ Unit tests for the parser and catalogues, a docs drift test, and the unchanged s
 ## Activity Log
 
 - 2026-10-26T06:54:14Z – system – Prompt generated via /spec-kitty.tasks
+- 2026-10-26T09:45:00Z – llxprt – Prompt revised after analysis (C1; decision 01M5VSEHF5B1FM9TB52KWKQGWZ): T093 adds the interim hn-rule refusal and boundary fixture B5 instead of letting the verdict ignore hn-rule

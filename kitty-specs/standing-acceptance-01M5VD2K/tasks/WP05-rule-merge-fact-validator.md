@@ -9,6 +9,8 @@ requirement_refs:
 - FR-011
 - FR-012
 - FR-015
+- FR-024
+- FR-025
 - NFR-002
 - NFR-005
 planning_base_branch: feat/standing-acceptance
@@ -20,6 +22,7 @@ subtasks:
 - T022
 - T023
 - T024
+- T090
 phase: Phase 2 - Shared derivation and test harness
 history:
 - !!omap
@@ -60,12 +63,14 @@ Add the second entry point of the rule derivation, `validateRuleMergeFact`, to `
 
 Also add the per-pass memo and object-access type that callers use, so one validation pass computes changed paths at most once per `(base, head)` and pipeline digests at most once per `(head, pipeline)` (NFR-005, tasks decision 5).
 
+Finally add `admitMergeFact`, the one union combinator every admission surface calls (FR-024, decisions `01M5VSEHEVA82N9T64ZH1P1Q2A` and `01M5VSEHF5B1FM9TB52KWKQGWZ`). It runs the surface's existing maintainer check first and unchanged, and reaches `validateRuleMergeFact` only when that check fails and the fact carries a canonical rule claim. `validateRuleMergeFact` is path (b) of the spec invariant: it is never asked whether a fact is a valid maintainer merge. No surface calls `validateRuleMergeFact` directly for admission, so no surface can implement its own variant of the union. This WP wires no surface; with it landed, every surface still runs only its maintainer check and refuses every fact only path (b) admits (FR-025).
+
 ## Context
 
 - Read [contracts/rule-merge-fact.md](../contracts/rule-merge-fact.md) in full (check table, rendered message, "Inputs and object access per surface", "Memoization", fixture matrix F01 to F18); [data-model.md](../data-model.md) "Qualifying evidence" and "Rule fact verdict"; spec FR-010 to FR-012 and FR-015; decision `01M5VEZXQ7GD8JJ4XNDZD6B2XD`.
 - Start with `spec-kitty agent action implement WP05 --agent <name> --mission standing-acceptance-01M5VD2K`.
 - From WP04: `ruleInputs`, `ruleByName`, `ruleApprovalCounts`, `ruleRequestQualifies`, `ruleResultQualifies`, `ruleAuthorAllowed`, `ruleManualPathChanges`, `ruleDisallowedPaths`, `evaluateRuleAcceptance`, the test world builder in `rule_acceptance_test.go`.
-- From WP03: `Event.Rule`.
+- From WP03: `Event.Rule`, set by `verifyEvent` only for a canonical rule claim on `proposal.merged`.
 - Callers already run `validateProposalMergeBinding` (`store.go`), which requires `merge.head` to equal the candidate head, before the merge validator. This validator does not repeat it.
 
 ## Branch Strategy
@@ -173,6 +178,32 @@ Validity never depends on events outside the evidence (FR-015): do not read `byI
 4. `func validateRuleMergeFactWith(memo *ruleValidationMemo, merge, proposal StoredEvent, byID map[string]StoredEvent) error`: `inputsForFact` then `validateRuleMergeFact`.
 5. Add a counter field (for example `changedPathCalls int`) that tests read to prove one computation per `(base, head)` per pass.
 
+### Subtask T090: `admitMergeFact`, the union combinator
+
+**Steps**:
+
+1. Types and function in `rule_acceptance.go`:
+
+   ```go
+   type mergeAuthority string
+
+   const (
+       mergeByMaintainers mergeAuthority = "maintainers"
+       mergeByRule        mergeAuthority = "rule"
+   )
+
+   // admitMergeFact applies the union validity of proposal.merged facts
+   // (decision 01M5VSEHEVA82N9T64ZH1P1Q2A). maintainerPath is the caller's
+   // existing acceptance merge fact check, unchanged. rulePath reports any
+   // missing path (b) input in the caller's own dependency style and then
+   // calls validateRuleMergeFact. Every fact-admission surface calls this;
+   // none orders the two paths itself.
+   func admitMergeFact(merge StoredEvent, maintainerPath, rulePath func() error) (mergeAuthority, error)
+   ```
+
+2. Behavior: call `maintainerPath`; on nil return `mergeByMaintainers`. Otherwise, when `merge.Event.Rule == ""`, return the maintainer-path error unchanged, so every existing message stays byte-identical. Otherwise call `rulePath`; on nil return `mergeByRule`; otherwise return its error unchanged (a `*ruleFactError`, or the caller's dependency or shallow-gap error, which the caller unwraps with `errors.As`).
+3. Unit tests `TestRuleAcceptanceAdmit...` with counting closures: (a) path (a) passes: maintainers, `rulePath` not called, also when `Rule` is set; (b) path (a) fails and `Rule` is empty: the maintainer error is returned unchanged and `rulePath` is not called; (c) path (a) fails, `Rule` set, path (b) passes: rule; (d) both fail: the path (b) error is returned. Also one test with the real `validateRuleMergeFact` from the US1 world for (c) and (d).
+
 ### Subtask T024: Validator unit tests and the live-to-fact property test
 
 **Steps** (tests `TestRuleAcceptanceFact...` in `rule_acceptance_test.go`, using WP04's world builder):
@@ -180,7 +211,7 @@ Validity never depends on events outside the evidence (FR-015): do not read `byI
 1. **Valid fact**: build the US1 world, call `evaluateRuleAcceptance`, then a fact with `Rule`, `Policy` = digest, `Actor` = executing actor and `Evidence` = the result's evidence. `validateRuleMergeFact` returns nil.
 2. **Defects F01 to F18**: one subtest each, built from the valid fact with exactly one change, asserting the `Check` name of the contract table (F01 `rule-exists`, F02 `rule-acceptance`, F03 `rule-signer`, F04 `policy-digest`, F05 to F11 `evidence-item`, F12 `evidence-duplicate`, F13 `approval-threshold`, F14 `pipeline-threshold`, F15 `rule-author`, F16 `changed-paths`, F17 and F18 `manual-path`), and that `Error()` contains the full fact ID and the check name.
 3. **Immutability (FR-015)**: add a later withdrawal (a newer `request-changes` by the same reviewer) and a later maintainer rejection to `byID`; the fact still validates.
-4. **Property test**: for at least 50 generated worlds (fixed seed) that vary reviewer sets, rule reviewers, `allowAuthorApproval`, runner counts, requesters and result order, whenever `evaluateRuleAcceptance(...).Satisfied()` holds, the fact built from its evidence validates; whenever an unmet condition of kind `approvals` or `pipeline` exists, the fact built from its evidence fails with the matching threshold check.
+4. **Property test** (`TestRuleAcceptanceFactProperty`): for at least 50 generated worlds (fixed seed) that vary reviewer sets, rule reviewers, `allowAuthorApproval`, runner counts, requesters and result order, whenever `evaluateRuleAcceptance(...).Satisfied()` holds, the fact built from its evidence validates; whenever an unmet condition of kind `approvals` or `pipeline` exists, the fact built from its evidence fails with the matching threshold check.
 5. **Memo**: a fake `ruleObjectAccess` counts calls; validating three facts for the same candidate in one memo calls `ChangedPaths` once and `PipelineDigest` once per pipeline; a returned error is not retried.
 
 ## Test Strategy
@@ -189,7 +220,8 @@ Pure unit tests. Run `go test -race -run 'TestRuleAcceptance' ./...`, then the f
 
 ## Definition of Done
 
-- [ ] T020 to T024 complete; full gate passes.
+- [ ] T020 to T024 and T090 complete; full gate passes.
+- [ ] **FR-024**: `admitMergeFact` runs path (a) first, reaches path (b) only for a canonical claim, and returns path (a) errors unchanged when there is no claim.
 - [ ] **FR-010 / FR-011 / FR-012**: all eleven checks in contract order with stable names; signer must be an executing actor of a standing rule.
 - [ ] **FR-015**: validation reads only listed evidence and the requests their results answer.
 - [ ] **NFR-005**: the memo proves one changed-path computation per `(base, head)` per pass.
@@ -202,8 +234,10 @@ Pure unit tests. Run `go test -race -run 'TestRuleAcceptance' ./...`, then the f
 ## Reviewer Guidance
 
 - Check the order of checks against the contract table, row by row.
-- Confirm a `proposal.decision` in evidence fails check 8, never silently ignored as today's acceptance-fact check does.
+- Confirm a `proposal.decision` in evidence fails check 8 of path (b), never silently ignored as today's acceptance-fact check does. A fact whose decisions satisfy path (a) never reaches check 8, because `admitMergeFact` accepts it first.
+- Confirm no production code outside `admitMergeFact` and the pre-sign self-check decides between the two paths.
 
 ## Activity Log
 
 - 2026-10-26T06:54:14Z – system – Prompt generated via /spec-kitty.tasks
+- 2026-10-26T09:45:00Z – llxprt – Prompt revised after analysis (C1, C2, I1; decisions 01M5VSEHEVA82N9T64ZH1P1Q2A and 01M5VSEHF5B1FM9TB52KWKQGWZ): T090 adds the shared union combinator admitMergeFact

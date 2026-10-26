@@ -3,10 +3,13 @@ work_package_id: WP16
 title: Four-surface fixture matrix and verdict agreement
 dependencies:
 - WP09
-- WP15
+- WP19
 requirement_refs:
+- C-004
 - FR-012
 - FR-015
+- FR-024
+- FR-025
 - NFR-001
 - NFR-002
 - NFR-005
@@ -55,9 +58,11 @@ If no profile is specified, run `spec-kitty agent profile list` and select the b
 
 Produce the security evidence the spec measures across all four fact-admission surfaces of FR-012: local projection, replication import, shallow verification and the `hn serve` actor-chain check.
 
-- **NFR-001**: every defect fixture F01 to F22 (at least 14 signed facts, each with exactly one defect) is refused by each surface 100% of the time, with zero promoted facts and zero changed hosted refs.
+- **NFR-001**: every defect fixture F01 to F22 (at least 14 signed facts, each with exactly one defect) is refused by each surface 100% of the time, with zero promoted facts and zero changed hosted refs. Semantic rows F01 to F20 must reach rule derivation (or, for F19 and F20, the maintainer-path refusal) on every surface, including shallow, with a matched valid control; F21 and F22 form a separate missing-dependency table (decision `01M5VSEHFV2K03JJY0NN6DFNAT`).
+- **C-004 / US3-6 / US3-7**: every legacy fixture L01 to L06 and the maintainer merges with a rule claim (B2, B3) get their expected verdict on all four surfaces.
+- **FR-025, final state**: the boundary table of `TestStandingFactBoundary` marks all three test surfaces as implementing path (b), and B1 to B4 agree on all four surfaces.
 - **US3-2**: a mapped actor pushing the signer's chain to an `hn serve` hosted repository is rejected with `actor-chain-invalid` naming the fact, and every hosted ref is unchanged.
-- **NFR-002**: all four surfaces reach the same accept or reject outcome for every valid and invalid fixture.
+- **NFR-002 (fact agreement)**: all four surfaces reach the same accept or reject outcome for every valid, invalid, legacy and boundary fixture. Rule-satisfaction agreement between preview, execution and the server verdict is WP11 and WP15's part (decision `01M5VSEHFH0B1BSJ1NA923FKAA`).
 - **NFR-005**: a candidate whose changed-path output exceeds the existing 8 MiB bound is refused on every surface and in execution, never truncated.
 - **Property**: every fact the real client records in the valid scenarios is admitted by all four surfaces (plan risk table, first row).
 
@@ -67,7 +72,7 @@ This WP adds tests only. If a surface disagrees, fix the cause in the owning pro
 
 - Read [contracts/rule-merge-fact.md](../contracts/rule-merge-fact.md) "Fixture matrix (NFR-001)" and "Agreement (NFR-002)"; spec US3 (all), NFR-001, NFR-002 and NFR-005, SC-003 and SC-004.
 - Start with `spec-kitty agent action implement WP16 --agent <name> --mission standing-acceptance-01M5VD2K`.
-- From WP06: `standingHarnessDefects`, `SignFact`, `SignRawFact`, `Verifier`. From WP07 to WP09: the local, import and shallow helpers in `standing_fact_test.go`. From WP14 and WP15: `newStandingServeFixture`, `RulePush`, the client advancement helpers in `standing_serve_test.go`. From existing serve tests: how `serve_facts_test.go` pushes an actor ref with the actor's key and reads `actor-chain-invalid` rejections (`f.reject`, `requireServeIDs`).
+- From WP06: `standingHarnessDefects`, `standingHarnessLegacyFixtures`, `standingHarnessBoundaryFixtures`, `SignFact`, `SignRaw`, `Verifier`. From WP07 to WP09: the local, import and shallow helpers in `standing_fact_test.go`. From WP14, WP15 and WP19: `newStandingServeFixture`, `RulePush`, the client advancement and recovery helpers in `standing_serve_test.go`. WP19 is the dependency so that every client path the property test drives has landed. From existing serve tests: how `serve_facts_test.go` pushes an actor ref with the actor's key and reads `actor-chain-invalid` rejections (`f.reject`, `requireServeIDs`).
 
 ## Branch Strategy
 
@@ -100,9 +105,9 @@ This WP adds tests only. If a surface disagrees, fix the cause in the owning pro
    }
    ```
 
-   with four implementations: `local` (fact in the signer's own clone; run `hn proposal status`), `import` (raw-push the actor ref to the bare remote; a fresh verifier runs `hn sync origin`), `shallow` (a shallow verifier selecting the signer's chain runs `hn sync` and `hn proposal status`), `serve` (the signer pushes its actor ref to the hosted repository with its own key).
-2. For each defect F01 to F22 and each surface: build the defect fresh, judge it, assert refusal, assert the refusal text names the full fact ID and the expected check (or the parse message, or the missing-dependency message where the contract says so), and assert zero promoted facts (import, shallow) or unchanged refs (serve: `ServerRefs` before and after; local: `Refs`).
-3. Shallow surface nuance: a shallow clone may refuse earlier with a shallow dependency gap (WP09). That counts as refusal; record the observed reason per defect in the report.
+   with four implementations: `local` (fact in the signer's own clone; run `hn proposal status`), `import` (raw-push the actor ref to the bare remote; a fresh verifier runs `hn sync origin`), `shallow` (a shallow verifier selecting the signer's chain and holding the complete closure of WP09 runs `hn sync` and `hn proposal status`), `serve` (the signer pushes its actor ref to the hosted repository with its own key).
+2. For each semantic defect F01 to F20 and each surface: build the defect fresh, judge it, assert refusal, assert the refusal text names the full fact ID and the expected check for F01 to F18, or the maintainer-path refusal for F19 and F20, and assert zero promoted facts (import, shallow) or unchanged refs (serve: `ServerRefs` before and after; local: `Refs`).
+3. Shallow surface: hydrate the code, policy blob, pipeline definitions and every evidence chain of each semantic row with the same arrangement as its matched valid control, and require the control to be accepted before the row runs. A shallow dependency gap on a semantic row fails the test (decision `01M5VSEHFV2K03JJY0NN6DFNAT`). F21 and F22 run in a separate missing-dependency table, where each surface must report a missing dependency or shallow gap naming the absent ID or commit.
 4. Print a matrix with `t.Logf`: rows F01 to F22, columns the four surfaces, cells the observed outcome and check. Keep the report stable (sorted) so reviewers can diff runs.
 5. Budget: the full matrix may take minutes. Share one serve harness and one bare-remote harness per test, build defects from one valid base scenario where possible, and skip the matrix under `-short` with a visible reason. The full gate runs without `-short`.
 
@@ -110,17 +115,19 @@ This WP adds tests only. If a surface disagrees, fix the cause in the owning pro
 
 **Steps**:
 
-1. For every defect, the signer pushes `refs/hn/actors/<signer>` to the hosted repository with its own key. Expect one `hn-serve/1 reject` line with `code=actor-chain-invalid` (parse defects F19 and F20 also give `actor-chain-invalid`; F21 and F22 give `dependency-missing` naming the absent ID or commit, as the contract's hn serve row states).
+1. For every defect, the signer pushes `refs/hn/actors/<signer>` to the hosted repository with its own key. Expect one `hn-serve/1 reject` line with `code=actor-chain-invalid` (F19 and F20, which carry no rule claim, also give `actor-chain-invalid` through the maintainer path; F21 and F22 give `dependency-missing` naming the absent ID or commit, as the contract's hn serve row states).
 2. Assert the rejection's IDs name the fact's full ID (use `extractServeRejections`), and every hosted ref is byte-identical before and after.
-3. A valid rule merge fact pushed the same way is accepted.
+3. A valid rule merge fact pushed the same way is accepted, and so are the legacy fixtures L01 to L05 and the boundary fixtures B2 and B3, each pushed by its signer.
 
 ### Subtask T078: Verdict agreement over the valid and invalid sets (NFR-002)
 
 **Steps**:
 
 1. Valid set: at least the US1 fact (local merge commit), the US4 fact (fast-forward, `commit` = head), a fact under rule reviewers (US5-1 after gpt approves), a fact whose result answers a listed requester's run (D1), a fact signed by a maintainer listed as executing actor (FR-011), and a fact with two pipelines.
-2. For every valid and invalid fixture, collect the four verdicts and require them to be equal (all accept or all reject). Fail with the full matrix row when they differ.
-3. Log the agreement rate; it must be 100%.
+2. Legacy and boundary sets: L01 to L06 and B1 to B4 from WP06. Expected verdicts come from the contract tables; B1 is now accepted everywhere.
+3. `TestStandingFactMatrixAgreement`: for every valid, invalid, legacy and boundary fixture, collect the four verdicts and require them to be equal (all accept or all reject) and equal to the expected verdict. Fail with the full matrix row when they differ.
+4. Log the agreement rate; it must be 100%.
+5. Confirm `standingFactRulePathSurfaces` marks `local`, `import` and `shallow` as true, and run `TestStandingFactBoundary` as part of this test.
 
 ### Subtask T079: Changed-path bound fixture (NFR-005)
 
@@ -133,7 +140,7 @@ This WP adds tests only. If a surface disagrees, fix the cause in the owning pro
 
 ### Subtask T080: Execution-to-admission property over valid fixtures
 
-**Steps**:
+**Steps** (`TestStandingFactMatrixExecutionAdmitted`):
 
 1. Run each valid scenario of T078 through the real client (`hn automerge --execute`, locally or with `--remote`), not through the fact builder.
 2. Publish the recorded fact and judge it on all four surfaces: all accept.
@@ -148,7 +155,9 @@ Long black-box matrix through real remotes, shallow clones and the forced-comman
 - [ ] T076 to T080 complete; full gate passes.
 - [ ] **NFR-001**: F01 to F22 refused on all four surfaces, zero promoted facts, zero changed hosted refs.
 - [ ] **US3-2**: `actor-chain-invalid` (or `dependency-missing` for F21 and F22) naming the fact; hosted refs unchanged.
-- [ ] **NFR-002**: 100% agreement across surfaces for valid and invalid sets.
+- [ ] **NFR-002 (fact agreement)**: 100% agreement across surfaces for valid, invalid, legacy and boundary sets.
+- [ ] **C-004**: L01 to L06 and B2, B3 give their expected verdicts on all four surfaces.
+- [ ] **U2**: shallow semantic rows run with a complete closure and matched controls; missing-dependency rows are separate.
 - [ ] **NFR-005**: the 8 MiB bound refuses everywhere.
 - [ ] **FR-015**: no surface reads events outside the evidence (covered by the immutability defect cases).
 - [ ] Matrix report logged.
@@ -159,8 +168,9 @@ Long black-box matrix through real remotes, shallow clones and the forced-comman
 
 ## Reviewer Guidance
 
-- Read the logged matrix and check every cell is a refusal with the expected reason.
+- Read the logged matrix and check every defect cell is a refusal with the expected reason, every shallow semantic cell names a derivation check or the maintainer-path refusal, and every legacy cell matches the contract.
 
 ## Activity Log
 
 - 2026-10-26T06:54:14Z – system – Prompt generated via /spec-kitty.tasks
+- 2026-10-26T09:45:00Z – llxprt – Prompt revised after analysis (C1, C2, U2; decisions 01M5VSEHEVA82N9T64ZH1P1Q2A, 01M5VSEHF5B1FM9TB52KWKQGWZ, 01M5VSEHFV2K03JJY0NN6DFNAT and 01M5VSEHFH0B1BSJ1NA923FKAA): union verdicts for F19 and F20, legacy and boundary sets, hydrated shallow semantic rows, fact-agreement scope; depends on WP19

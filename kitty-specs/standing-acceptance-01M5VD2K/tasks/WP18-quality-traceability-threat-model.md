@@ -3,9 +3,9 @@ work_package_id: WP18
 title: Import timing, traceability, threat model and regression gate
 dependencies:
 - WP12
-- WP15
 - WP16
 - WP17
+- WP19
 requirement_refs:
 - C-001
 - C-003
@@ -75,7 +75,7 @@ Close the mission with measured and checked evidence:
 - Read spec "Success Criteria", NFR-006, NFR-007, C-001, C-003, C-006, C-010, C-011 and OQ-8, OQ-11; plan "Risks" (the modified-client row) and "Cross-cutting: documentation"; [research.md](../research.md) "Adversarial evidence" (rows A2 and A7) and decision `01M5VF0W7NWESJH5RAD46NSYMN`; [contracts/rule-merge-fact.md](../contracts/rule-merge-fact.md) "Tested example".
 - Start with `spec-kitty agent action implement WP18 --agent <name> --mission standing-acceptance-01M5VD2K`.
 - Existing helpers to reuse without editing: `serveQualityPercentile95` and the measurement pattern of `TestServeQualityPushVerdictTimeNFR001`; the traceability parser pattern of `serveQualityTraceRows`, `serveQualityTestName` and `serveQualityDeclaration` (`serve_quality_test.go`). `TestServeQualityTraceabilityTestsExist` refuses non-`hn serve` IDs in `docs/serve-v0.md`, which is why this mission's traceability lives in `docs/governance-v0.md`.
-- From earlier WPs: the harness (WP06), the execution flow (WP11), the serve flows (WP14, WP15), the matrix (WP16), compatibility (WP17).
+- From earlier WPs: the harness (WP06), the execution flow (WP11), the serve flows (WP14, WP15), the remote recovery flows (WP19), the matrix (WP16), compatibility (WP17).
 
 ## Branch Strategy
 
@@ -120,9 +120,9 @@ Close the mission with measured and checked evidence:
 **Steps**:
 
 1. Add `## Standing acceptance traceability` at the end of `docs/governance-v0.md` with tables:
-   - requirements: one row per FR-001 to FR-023 and NFR-001 to NFR-007, with the backticked names of the tests that prove it;
+   - requirements: one row per FR-001 to FR-025 and NFR-001 to NFR-007, with the backticked names of the tests that prove it;
    - success criteria: SC-001 to SC-006;
-   - user-story scenarios: US1-1 to US7-3 (every numbered acceptance scenario of the spec).
+   - user-story scenarios: US1-1 to US7-5 (every numbered acceptance scenario of the spec, including US3-6, US3-7, US4-8, US7-4 and US7-5 added after analysis).
    The first cell of each data row is the ID; tests are named with backticks.
 2. `TestStandingQualityTraceability`: parse the section (adapt the parser pattern of `serveQualityTraceRows` into a local `standingQualityTraceRows`); require every ID of the spec to appear exactly once; refuse unknown IDs; require every named test to be declared in some `*_test.go` file (`^func TestName(`); require at least one test per row.
 3. Read the spec's requirement and scenario IDs from `kitty-specs/standing-acceptance-01M5VD2K/spec.md` at test time so the check cannot drift from the spec; skip with a reason if the file is absent (for example in a source archive without `kitty-specs/`).
@@ -134,7 +134,8 @@ Close the mission with measured and checked evidence:
 1. "Optional protected checks and native automerge": the paragraph that says automerge permits only executing maintainers after acceptance requirements hold must describe both acceptance modes. Add plain statements: under acceptance mode `rule`, acceptance authority moves from per-proposal maintainer decisions to the maintainer-accepted policy amendment that adopted the rule; the executing actor gains authority over exactly that rule; policy amendments and protected-check changes stay manual; a standing rule cannot cover `.hn` or protected-check paths; at least one independent approval is required and the author's own approval never counts; every verifier re-derives the rule from the base policy, the candidate's code and the listed evidence.
 2. Residual risk (accepted by the maintainer with the plan): a modified executing-actor client on an ordinary remote can omit a current change request or failure from its view and record a rule merge fact that verifies, because facts are judged by their own evidence (OQ-8), as acceptance merge facts are and as a malicious maintainer could today. `hn serve` enforces vetoes at advancement time; recommend `hn serve` with protected branches for repositories that adopt standing rules. Also state A7: case-variant directories such as `.HN/` are ordinary content because Git paths are case-sensitive and Hubnot reads only `.hn/...`.
 3. "Governance of protected branches" (under "hn serve trust boundary"): the server now evaluates a named standing rule for an advancement request, including the vetoes it holds, requires the requester to be one of the rule's executing actors, and refuses when the destination policy differs from the base policy; direct pushes still need maintainer acceptance; the server still signs nothing.
-4. Style: plain direct sentences, descriptive headings, no em dashes, and no rhetorical contrasts.
+4. Merge-fact validity: a merge fact is valid through the unchanged maintainer check or, failing that, through the rule check; a rule name on a maintainer merge is an unverified annotation and grants nothing; no event that verified before the mission stops verifying; each landing state of the mission refused rule-only facts on every surface not yet extended (decisions `01M5VSEHEVA82N9T64ZH1P1Q2A` and `01M5VSEHF5B1FM9TB52KWKQGWZ`).
+5. Style: plain direct sentences, descriptive headings, no em dashes, and no rhetorical contrasts.
 
 ### Subtask T089: Documentation consistency pass, pre-existing test audit and full gate
 
@@ -142,8 +143,8 @@ Close the mission with measured and checked evidence:
 
 1. Read the four changed documents end to end and fix contradictions left by earlier WPs (for example a sentence that still says automerge needs maintainer acceptance in every mode). Keep each fix minimal and inside the owning section.
 2. `TestStandingQualityDocsStyle`: the lines added by this mission to `docs/governance-v0.md`, `docs/protocol-v0.md`, `docs/serve-v0.md` and `docs/threat-model.md` contain no em dash (U+2014). Compute "added lines" as the lines of the standing sections and examples you can locate by heading and marker; if that is impractical, check the whole of the new sections only.
-3. Pre-existing test audit (C-003, NFR-004): `git diff 7a47e6952a427ad7e3a3766c221fd334d9331950 -- $(git ls-tree --name-only 7a47e69 -- '*_test.go')` must be empty. Record the command and its empty output in the Activity Log.
-4. C-001: `git diff 7a47e69 -- go.mod go.sum` is empty; every new file is `package main` in the repository root.
+3. Pre-existing test audit (C-003, NFR-004; decision `01M5VSEHF9P9VRVTY68PD8DZ7D`): the snapshot is `d881d9bcd0ade4fa1bce91061954a8582e8d9318`, the merge that brought in the reviewed sync speedup. `git diff --name-status d881d9b HEAD -- '*_test.go'` must list only added files (`A`), and `git diff d881d9b HEAD -- $(git ls-tree -r --name-only d881d9b -- '*_test.go')` must be empty. Run WP17's `TestStandingCompatPreExistingTestsFrozen`. Record the commands and their output in the Activity Log. `7a47e69` is the older-client reference only and is not an audit base: the reviewed merge changed `replication_borrow_test.go` after it.
+4. C-001: `git diff d881d9b HEAD -- go.mod go.sum` is empty; every new file is `package main` in the repository root.
 5. C-010: no code or doc introduces model-family metadata, issue requirement classes, review-round caps, releases or GitHub publishing (search the mission diff and record the result).
 6. C-011: nothing was pushed; the work stays on `feat/standing-acceptance`.
 7. Full gate on the integrated candidate: `gofmt -l .` prints nothing; `go vet ./...`; `go build ./...`; `go test -race ./...` (without `-short`); `git diff --check`. Record durations and the Go and Git versions.
@@ -159,7 +160,7 @@ Timing, example, traceability and style tests, then the full gate. Run `go test 
 - [ ] **FR-023**: every `standing-*` example in the four documents is executed by a test that contains its marker; `TestServeQualityDocumentedExamplesAreExecuted` passes.
 - [ ] **SC-006**: the traceability section covers every ID of the spec and names only existing tests.
 - [ ] **C-006**: threat model updated, including the accepted residual risk.
-- [ ] **NFR-004 / C-003**: the pre-existing test audit is empty.
+- [ ] **NFR-004 / C-003**: the mission diff from `d881d9b` modifies no test file that exists there.
 - [ ] **NFR-007**: gate green.
 
 ## Risks
@@ -174,3 +175,4 @@ Timing, example, traceability and style tests, then the full gate. Run `go test 
 ## Activity Log
 
 - 2026-10-26T06:54:14Z – system – Prompt generated via /spec-kitty.tasks
+- 2026-10-26T09:45:00Z – llxprt – Prompt revised after analysis (I2, I3; decisions 01M5VSEHF9P9VRVTY68PD8DZ7D and 01M5VSEHFCZGQHQ14CKJ3MAMP7): audit against d881d9b, traceability covers FR-024, FR-025 and the new scenarios, depends on WP19

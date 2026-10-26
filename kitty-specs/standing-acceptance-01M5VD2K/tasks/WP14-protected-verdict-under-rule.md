@@ -11,6 +11,7 @@ requirement_refs:
 - FR-017
 - FR-018
 - FR-023
+- FR-025
 planning_base_branch: feat/standing-acceptance
 merge_target_branch: feat/standing-acceptance
 branch_strategy: Planning artifacts for this mission were generated on feat/standing-acceptance. During /spec-kitty.implement this WP may branch from a dependency-specific base, but completed changes must merge back into feat/standing-acceptance unless the human explicitly redirects the landing branch.
@@ -34,6 +35,7 @@ create_intent:
 execution_mode: code_change
 owned_files:
 - serve_protected.go
+- serve_verdict.go
 - standing_serve_test.go
 - docs/serve-v0.md
 role: implementer
@@ -71,6 +73,8 @@ Let `hn serve` advance a protected branch for an executing actor that names a st
 
 Without `hn-rule` nothing changes: a direct push and an `hn-advance` push without `hn-rule` still need maintainer acceptance under both policies (FR-018). The server still signs nothing and never creates a commit (C-008).
 
+This WP also removes WP13's interim refusal of every `hn-rule` push from `evaluateServePush` (`serve_verdict.go`), in the same change that adds the rule steps, so no build ever both accepts `hn-rule` and skips its evaluation (FR-025, decision `01M5VSEHF5B1FM9TB52KWKQGWZ`). Boundary fixture B5 (WP13's `TestStandingServeWireRuleRefusedBeforeVerdict`) must still pass.
+
 ## Context
 
 - Read the contract in full; spec US4-3 to US4-6 and FR-016 to FR-018; [research.md](../research.md) findings 13 and 14 and adversarial row A8.
@@ -92,6 +96,7 @@ Without `hn-rule` nothing changes: a direct push and an `hn-advance` push withou
 | File | Change |
 |----|----|
 | `serve_protected.go` | CHANGE. Rule steps only, each behind `options.Rule != ""`. |
+| `serve_verdict.go` | CHANGE. Remove WP13's interim `hn-rule` refusal from `evaluateServePush` and nothing else. |
 | `standing_serve_test.go` | CHANGE. Standing serve fixture and `TestStandingServeVerdict...`. |
 | `docs/serve-v0.md` | CHANGE. Rewrite "Automerge rules" under "Advancing a protected branch" for the server's part; WP15 adds the client's part. |
 
@@ -101,6 +106,7 @@ Without `hn-rule` nothing changes: a direct push and an `hn-advance` push withou
 
 **Steps**:
 
+0. Remove the interim refusal that WP13 added at the top of `evaluateServePush` (`if options.Rule != "" { return rejectServeEveryUpdate(...) }`), and only it. Do this in the same commit as the rule steps of T064 to T066.
 1. Keep the destination digest from step 4 (`destPolicy, destDigest, err := loadReplicationPolicyAt(...)`) and store it in `serveProtectedUpdate`. Store `options` there too.
 2. In `candidate`, right after step 7 succeeds and only when `check.options.Rule != ""`: `destDigest != baseDigest` fails with code `protected-destination-policy`, `IDs` = candidate, `Missing` = `[proposal]`, `Next` = `revise <candidate> against <tip>`, and the contract sentence:
 
@@ -161,6 +167,7 @@ Without `hn-rule` nothing changes: a direct push and an `hn-advance` push withou
 8. **Rejection still blocked**: a maintainer rejection gives `protected-blocked`, step 9, before any rule step.
 9. **Race**: two executing actors (E and a second actor added to `ordinary` for this test) push rule advancements for two ready candidates with the same expected tip; exactly one is accepted, the other gets `protected-stale-tip` or `protected-not-fast-forward`.
 10. **Existing behavior**: run `go test -run 'TestServeProtected|TestServeAdvance|TestServeAutomerge'` and record that it passes unchanged.
+11. **Boundary B5 after the verdict lands**: run WP13's `TestStandingServeWireRuleRefusedBeforeVerdict` unchanged, and add an exact assertion in this WP's test that M's maintainer advancement with `hn-rule=nosuch` is now refused with `protected-rule-not-satisfied` and unchanged hosted refs.
 
 ### Subtask T069: Serve guide "Automerge rules" rewrite and `standing-serve-veto` example
 
@@ -184,6 +191,7 @@ Black-box tests through the forced-command harness. Run `go test -race -run 'Tes
 - [ ] **FR-018**: direct pushes and requests without `hn-rule` unchanged.
 - [ ] **FR-012 (server verdict)**: the same derivation as the client (`evaluateRuleAcceptance`).
 - [ ] Hosted refs unchanged after every refusal; every pre-existing serve test passes unchanged; `standing-serve-veto` executed.
+- [ ] **FR-025**: the interim `hn-rule` refusal is removed in the same change as the rule steps; boundary fixture B5 passes before and after.
 
 ## Risks
 
@@ -197,3 +205,4 @@ Black-box tests through the forced-command harness. Run `go test -race -run 'Tes
 ## Activity Log
 
 - 2026-10-26T06:54:14Z – system – Prompt generated via /spec-kitty.tasks
+- 2026-10-26T09:45:00Z – llxprt – Prompt revised after analysis (C1; decision 01M5VSEHF5B1FM9TB52KWKQGWZ): removes WP13's interim hn-rule refusal with the rule steps (serve_verdict.go added to ownership); B5 assertion

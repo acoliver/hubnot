@@ -16,6 +16,7 @@ subtasks:
 - T028
 - T029
 - T030
+- T091
 phase: Phase 2 - Shared derivation and test harness
 history:
 - !!omap
@@ -158,8 +159,8 @@ Each helper runs in the role's clone, syncs before acting and publishes after ac
 **Steps**:
 
 1. `h.SignFact(role string, mutate func(*Event)) string`: `t.Chdir` into the role's clone, `loadIdentity()`, `nextEvent(identity, "proposal.merged")`, fill a valid rule merge fact for a given candidate (`Subject`, `Head`, `Commit`, `Policy` = base policy digest, `Evidence`, `Rule` = `ordinary`), apply `mutate`, and `appendEvent` (which validates content only, never relationships). Returns the fact ID. Restore the working directory afterwards (`t.Chdir` does this at test end; call it in a subtest or save and restore explicitly when signing several facts in one test).
-2. `h.SignRawFact(role string, payload []byte) string`: for parse defects (F19, F20) that `validateEventContent` would refuse. Sign the exact bytes with the identity's private key, then write a chain commit the way `appendEventWithAttachments` does (`event.json` and `signature` blobs, `mktree`, `commit-tree` with the previous chain head as parent, `update-ref` of the actor ref with the old value). Read `appendEventWithAttachments` in `store.go` for the exact tree layout and signature encoding (`base64.RawStdEncoding`).
-3. `standingHarnessDefects(h, candidate operationalEvent) map[string]standingHarnessDefect`: one entry per fixture F01 to F22 of the contract, each with the signer role, a builder function and the expected check name or "parse" or "missing dependency". The candidate-shape defects (F15 author outside, F16 path outside, F17 policy change, F18 protected change, F22 absent commits) need their own candidates; give each defect a `Prepare` function that creates its candidate first.
+2. `h.SignRaw(role string, payload []byte) string`: for payloads Hubnot's own signer never writes, of any kind: the non-canonical rule shapes of F19 and F20 and the legacy history fixtures of T091. Sign the exact bytes with the identity's private key, then write a chain commit the way `appendEventWithAttachments` does (`event.json` and `signature` blobs, `mktree`, `commit-tree` with the previous chain head as parent, `update-ref` of the actor ref with the old value). Read `appendEventWithAttachments` in `store.go` for the exact tree layout and signature encoding (`base64.RawStdEncoding`).
+3. `standingHarnessDefects(h, candidate operationalEvent) map[string]standingHarnessDefect`: one entry per fixture F01 to F22 of the contract, each with the signer role, a builder function and the expected outcome: a check name, `maintainer-path` for F19 and F20 (no rule claim, so the refusal is the existing `merge <id> is not authorized by ...`), or `missing dependency`. Every defect is signed by a non-maintainer (E, or X for F03) and cites approvals and run results, so path (a) fails for all of them. The candidate-shape defects (F15 author outside, F16 path outside, F17 policy change, F18 protected change, F22 absent commits) need their own candidates; give each defect a `Prepare` function that creates its candidate first.
 4. Keep the builder independent of WP05's Go types: it may refer to check names only as strings, so this WP compiles before the validator exists.
 
 ### Subtask T030: Harness self-test
@@ -169,9 +170,20 @@ Each helper runs in the role's clone, syncs before acting and publishes after ac
 1. `newStandingHarness` with the default policy: every role has a distinct fingerprint, `hn policy show` in M's clone prints rule `ordinary`, and `main` equals `h.base` in every clone.
 2. `ReadyCandidate`: the candidate exists in E's clone after `hn sync origin`, with one approval and one passing result, and zero `proposal.decision` events.
 3. `AdoptThroughAmendment`: `main` advances by a merge commit, M's chain gains one acceptance decision and one acceptance merge fact, and `hn policy show` lists the adopted rule.
-4. `SignFact` with no mutation writes one `proposal.merged` with `rule` `ordinary` to E's chain, and `MergeFacts` reads its `rule` and `evidence`. Do not run any command that projects events in E's clone after signing in this self-test: until WP07 lands, projection rejects rule facts.
-5. `SignRawFact` writes a chain commit whose `event.json` bytes equal the given payload.
+4. `SignFact` with no mutation writes one `proposal.merged` with `rule` `ordinary` to E's chain, and `MergeFacts` reads its `rule` and `evidence`. Do not run any command that projects events in E's clone after signing in this self-test: until WP07 lands, projection runs only the maintainer check and refuses this fact (FR-025).
+5. `SignRaw` writes a chain commit whose `event.json` bytes equal the given payload.
 6. Mark the slow tests with `if testing.Short() { t.Skip(...) }` only if they exceed a few seconds each; record timings in the Activity Log.
+7. `standingHarnessLegacyFixtures` and `standingHarnessBoundaryFixtures` (T091) each build every fixture once in a fresh harness without error, and every raw payload verifies with `verifyEvent` in-process.
+
+### Subtask T091: Legacy history and activation boundary fixture builders
+
+**Purpose**: decision `01M5VSEHEVA82N9T64ZH1P1Q2A` requires signed legacy fixtures on every admission surface and against the older client, and decision `01M5VSEHF5B1FM9TB52KWKQGWZ` requires boundary fixtures at every landing state. WP07, WP08, WP09, WP16 and WP17 consume both sets.
+
+**Steps**:
+
+1. `standingHarnessLegacyFixtures(h) []standingHarnessFixture`, one entry per contract row L01 to L06, each with a stable ID, the signer role, a builder and the expected verdict (`valid`, `valid maintainer merge`, `valid maintainer merge with unverified annotation`, or `refused as before` for L06). Build L01 and L02 with `SignRaw` from the JSON that `encodeAndSign` would produce for the same event plus the extra key. Build L03 to L05 the same way from a maintainer merge of a candidate that M accepted with `h.Accept`, adding the `rule` key variants. Use a policy with maintainers-mode rules only (for example rule `maint` with actors `[M]`), so the older client of WP17 can read it; give L04 `rule` set to `maint`.
+2. `standingHarnessBoundaryFixtures(h) []standingHarnessFixture` for contract rows B1 to B4: B1 is `SignFact("E", nil)` for a ready candidate; B2 and B3 are M-signed `proposal.merged` facts built with `SignFact("M", ...)` whose evidence is M's accept decision (plus the approval for B3) and whose `Rule` is `nosuch` (B2) or `ordinary` (B3); B4 is F01. Each entry records whether it needs path (b) (`B1` only) and its expected verdict on a surface that implements path (b) and on one that does not. B5 is a push, not a fact; WP13 builds it.
+3. Keep these builders independent of WP05's Go types, as for the defect table.
 
 ## Test Strategy
 
@@ -179,10 +191,11 @@ Only the self-test runs in this WP. Run `go test -race -run 'TestStandingHarness
 
 ## Definition of Done
 
-- [ ] T025 to T030 complete; full gate passes.
+- [ ] T025 to T030 and T091 complete; full gate passes.
 - [ ] **C-002**: every helper drives the public `hn` and `git` CLIs, except the two fact signers, which only write signed facts that the CLI then judges.
 - [ ] Adoption uses `hn decide` and `hn merge`, never `hn automerge`.
-- [ ] The defect table covers F01 to F22 with expected outcomes.
+- [ ] The defect table covers F01 to F22 with expected outcomes; F19 and F20 expect the maintainer-path refusal.
+- [ ] The legacy (L01 to L06) and boundary (B1 to B4) fixture builders exist and self-test.
 - [ ] No pre-existing test file is edited.
 
 ## Risks
@@ -198,3 +211,4 @@ Only the self-test runs in this WP. Run `go test -race -run 'TestStandingHarness
 ## Activity Log
 
 - 2026-10-26T06:54:14Z – system – Prompt generated via /spec-kitty.tasks
+- 2026-10-26T09:45:00Z – llxprt – Prompt revised after analysis (C1, C2; decisions 01M5VSEHEVA82N9T64ZH1P1Q2A and 01M5VSEHF5B1FM9TB52KWKQGWZ): SignRaw for any kind, F19 and F20 expect the maintainer-path refusal, T091 adds legacy and boundary fixtures
