@@ -793,7 +793,12 @@ func automergeIgnoredPathCollision(changed []string, p string) bool {
 // change request or failing run that exists only on the server blocks the
 // rule, and it requires the checked-out target branch to equal the hosted
 // tip it then binds the advancement to. The server applies its own checks
-// to the advancement; it does not evaluate automerge rules.
+// to the advancement. Under acceptance mode rule the advancement is also
+// bound to the rule: the client sends hn-rule, the server evaluates the
+// rule itself in place of maintainer acceptance, and the client records a
+// rule merge fact with commit equal to the head. Under acceptance mode
+// maintainers no rule is sent, and the server requires maintainer
+// acceptance as for hn merge --remote.
 func automergeRemote(first *automergeInspection, rule, remote, actor string) error {
 	if !validReplicationRemote(remote) {
 		return fmt.Errorf("invalid remote name %q", remote)
@@ -838,7 +843,11 @@ func automergeRemote(first *automergeInspection, rule, remote, actor string) err
 		return fmt.Errorf("local %s is at %s but %s has %s; update the local branch to the hosted tip and rerun",
 			inspection.Rule.TargetBranch, shortOID(inspection.Current), remote, shortOID(hosted))
 	}
-	return mergeRemoteBound(inspection.Proposal.ID, remote, branchRef, serveAdvanceBinding{ExpectedActor: actor, ExpectedTip: hosted})
+	binding := serveAdvanceBinding{ExpectedActor: actor, ExpectedTip: hosted}
+	if inspection.Rule.Acceptance.Standing() {
+		binding.Rule = rule
+	}
+	return mergeRemoteBound(inspection.Proposal.ID, remote, branchRef, binding)
 }
 
 // automergeUnselectedActors lists the policy's maintainers, trusted

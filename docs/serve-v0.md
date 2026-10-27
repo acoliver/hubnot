@@ -1440,7 +1440,61 @@ the policy; `--all` and `--all-trusted` do. The import also publishes your
 local facts, as `hn sync` always does, even when the rule is then refused. The checked-out branch must equal the hosted tip; otherwise the command
 asks you to update it and rerun. Finally it runs the advancement of
 `hn merge PROPOSAL --remote REMOTE`, bound to that tip with `hn-expected-tip`
-and to the rule's executing actor, and the server applies every check above.
+and to the rule's executing actor.
+
+The rule's acceptance mode decides what the advancement asks of the server:
+
+- Under acceptance mode `maintainers`, the client sends the same request as
+  `hn merge PROPOSAL --remote REMOTE`. The candidate needs maintainer
+  acceptance, and the server applies every check above.
+- Under acceptance mode `rule`, the standing rule stands in for maintainer
+  acceptance. In step 1 the client evaluates the rule on its imported facts
+  and the candidate's base policy. The rule must be satisfied and your
+  identity must be one of its executing actors; the acceptance and maintainer
+  checks of `hn merge` do not apply. Step 6 adds
+  `--push-option=hn-rule=NAME`, and the server evaluates the rule itself, as
+  [How the server judges a rule](#how-the-server-judges-a-rule) describes.
+  Once the branch is at the head, step 8 evaluates the rule again and your
+  client signs a rule merge fact with `commit` equal to the head, `rule` set
+  to `NAME`, and the rule's counted approvals and passing results as
+  `evidence`. Step 9 publishes it in your actor chain. The server judges the
+  fact like any other fact it receives and signs nothing itself.
+
+A rule advancement prints the preview and the output of `hn sync`, followed
+by these two lines:
+
+<!-- example: standing-serve-advance -->
+```sh
+hn automerge sha256:1c2d3e4f... --rule ordinary --execute --remote origin
+```
+
+```text
+Advanced origin refs/heads/main to 9b2e4c6a8d0f for proposal 1c2d3e4f5a6b
+Recorded rule merge event 7d8e9f0a1b2c under rule ordinary with 2 evidence item(s)
+```
+
+When the server refuses a rule advancement, the command prints each
+`hn-serve/1` line and its sentence without Git's `remote: ` prefix, as
+`hn merge --remote` does. It then exits 1 with the branch unchanged and no
+merge fact recorded. The three codes the server adds for rules are listed in
+[Reason codes for rule advancement](protocol-v0.md#reason-codes-for-rule-advancement).
+`protected-rule-veto` names a trusted change request or failure that reached
+the server after your import; resolve those events and rerun the command.
+`protected-rule-not-satisfied` means the server's evaluation of the rule
+found an unmet condition; run the preview, `hn automerge PROPOSAL --rule NAME`,
+after `hn sync` to see it. `advance-not-rule-executor` means the rule in the
+candidate's base policy does not list your identity in its `actors`. When the
+server accepted the push but the branch is not at the head afterwards, the
+command names `hn automerge PROPOSAL --rule NAME --execute --remote REMOTE` as
+the command to rerun.
+
+Rule advancement needs an `hn serve` that includes standing acceptance. A
+server that supports `hn merge --remote` but predates standing acceptance
+rejects the `hn-rule` push option with `unsupported-command`. The client then
+prints the server's lines and exits 1 with
+`REMOTE does not support rule advancement (hn-rule); upgrade hn on the server`,
+and the branch does not move. Upgrade `hn` on the server and rerun the
+command.
 
 Without `--remote`, `hn automerge --execute` refuses a target branch that
 tracks an `hn serve` remote, or a remote it cannot reach to tell, before it

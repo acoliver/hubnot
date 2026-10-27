@@ -832,3 +832,842 @@ func TestStandingServeDocumentedVeto(t *testing.T) {
 	want := []string{replace.Replace(documented[0]), replace.Replace(documented[1])}
 	requireServeRelayedLines(t, lines, want)
 }
+
+// Client rule advancement (WP15): hn automerge PROPOSAL --rule NAME
+// --execute --remote origin under a standing rule, through the
+// forced-command harness.
+
+// standingServeAutomerge runs hn automerge candidate --rule rule --execute
+// --remote origin in who's clone with extra environment entries.
+func standingServeAutomerge(g *serveGovernedFixture, who, candidate, rule string, env ...string) (string, int) {
+	g.t.Helper()
+	output, status, err := g.advanceExec(who, env, g.h.Binary, "automerge", candidate, "--rule", rule, "--execute", "--remote", "origin")
+	if err != nil {
+		g.t.Fatalf("hn automerge %s --rule %s --execute --remote origin: %v\n%s", candidate, rule, err, output)
+	}
+	return output, status
+}
+
+// standingServePreview runs the keyless preview hn automerge candidate
+// --rule rule in who's clone.
+func standingServePreview(g *serveGovernedFixture, who, candidate, rule string) (string, int) {
+	g.t.Helper()
+	output, status, err := g.advanceExec(who, nil, g.h.Binary, "automerge", candidate, "--rule", rule)
+	if err != nil {
+		g.t.Fatalf("hn automerge %s --rule %s: %v\n%s", candidate, rule, err, output)
+	}
+	return output, status
+}
+
+// standingServeSelectAllTrusted saves the all-trusted selection for origin
+// in each named clone, as an executing actor must before hn automerge
+// --remote.
+func standingServeSelectAllTrusted(g *serveGovernedFixture, names ...string) {
+	g.t.Helper()
+	for _, who := range names {
+		g.hn(who, "replication", "select", "origin", "--all-trusted")
+	}
+}
+
+// standingServeAdvanceArrange is the US4-1 starting point: the default
+// policy, E with the all-trusted selection and main checked out at the
+// hosted tip, and a ready candidate under src/ that E has imported.
+func standingServeAdvanceArrange(t *testing.T) (*serveGovernedFixture, serveGovernedProposal) {
+	t.Helper()
+	g := newStandingServeFixture(t, standingServeDefaultPolicy)
+	standingServeSelectAllTrusted(g, "E")
+	p := g.StandingReady(map[string]string{"src/advance.txt": "advanced under rule ordinary\n"})
+	standingServeImport(g, "E")
+	return g, p
+}
+
+// standingServeAdvanceLines are the last two output lines of a rule
+// advancement under rule ordinary.
+func standingServeAdvanceLines(head, candidate, fact string, evidence int) string {
+	return fmt.Sprintf("Advanced origin refs/heads/main to %s for proposal %s\nRecorded rule merge event %s under rule ordinary with %d evidence item(s)\n",
+		shortOID(head), shortID(candidate), shortID(fact), evidence)
+}
+
+// standingServeChainFacts decodes the proposal.merged facts for candidate on
+// who's own actor chain, which is empty when who has never signed.
+func standingServeChainFacts(g *serveGovernedFixture, who, candidate string) []standingHarnessFact {
+	g.t.Helper()
+	ref := g.actorRef(who)
+	if g.git(who, "for-each-ref", "--format=%(refname)", ref) == "" {
+		return nil
+	}
+	var facts []standingHarnessFact
+	for _, commit := range strings.Fields(g.git(who, "rev-list", ref)) {
+		payload := runOperationalGitBytes(g.t, g.work[who], "show", commit+":event.json")
+		fact := standingHarnessReadFact(g.t, payload)
+		if fact.Kind == "proposal.merged" && fact.Subject == candidate {
+			facts = append(facts, fact)
+		}
+	}
+	return facts
+}
+
+// standingServeRuleFact requires who's chain to hold exactly one merge fact
+// for p: a rule merge fact under rule ordinary signed by who, with commit
+// and head equal to the candidate head, the base policy, and the approval
+// and the passing result as evidence. It returns the fact.
+func standingServeRuleFact(t *testing.T, g *serveGovernedFixture, who string, p serveGovernedProposal) standingHarnessFact {
+	t.Helper()
+	facts := standingServeChainFacts(g, who, p.Candidate.ID)
+	if len(facts) != 1 {
+		t.Fatalf("%s's chain holds %d merge facts for %s, want 1: %+v", who, len(facts), p.Candidate.ID, facts)
+	}
+	_, policy, err := loadReplicationPolicyAt(g.hosted, g.hosted, p.Candidate.Base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fact := facts[0]
+	evidence := []string{p.Approval.ID, p.Result.ID}
+	slices.Sort(evidence)
+	if fact.Rule != "ordinary" || fact.Actor != g.actors[who] || fact.Head != p.Candidate.Head || fact.Commit != p.Candidate.Head ||
+		fact.Policy != policy || !slices.Equal(fact.Evidence, evidence) {
+		t.Fatalf("merge fact %+v, want rule ordinary by %s with commit = head = %s under %s citing %q",
+			fact, who, p.Candidate.Head, policy, evidence)
+	}
+	return fact
+}
+
+// standingServePushOptions lists the hn- push options a Git packet trace
+// shows the client sending, in order.
+func standingServePushOptions(t *testing.T, trace string) []string {
+	t.Helper()
+	data, err := os.ReadFile(trace)
+	if err != nil {
+		t.Fatalf("read packet trace: %v", err)
+	}
+	var options []string
+	for _, line := range strings.Split(string(data), "\n") {
+		if _, sent, found := strings.Cut(line, " push> "); found && strings.HasPrefix(sent, "hn-") {
+			options = append(options, strings.TrimSpace(sent))
+		}
+	}
+	return options
+}
+
+// standingServeAllTrustedStatus clones the hosted repository with a new
+// bound key and no Hubnot identity, saves the all-trusted selection, syncs,
+// and returns hn proposal status for candidate (US4-2).
+func standingServeAllTrustedStatus(g *serveGovernedFixture, seed, candidate string) string {
+	g.t.Helper()
+	key := serveHarnessAddKey(g.h, serveHarnessActor("standing-verifier-"+seed))
+	client := serveHarnessClient(g.t, g.h, key, nil)
+	dir := filepath.Join(g.t.TempDir(), "verifier-"+seed)
+	client.Git("", "clone", "-q", serveHarnessCloneURL("r"), dir)
+	client.Hn(dir, "replication", "select", "origin", "--all-trusted")
+	client.Hn(dir, "sync", "origin")
+	return client.Hn(dir, "proposal", "status", candidate)
+}
+
+// US4-1, US4-2 and C-008: E, an executing actor of rule ordinary and not a
+// maintainer, advances hosted main to the exact head of a candidate no
+// maintainer accepted. The client sends hn-rule, signs the rule merge fact
+// with commit equal to the head and publishes it; a fresh clone with the
+// all-trusted selection reports the candidate merged by the rule.
+func TestStandingServeAdvanceUserStory4(t *testing.T) {
+	// Arrange
+	g, p := standingServeAdvanceArrange(t)
+	candidate, head := p.Candidate.ID, p.Candidate.Head
+	commits := serveHarnessGit(t, g.hosted, "rev-list", "--count", head)
+	local := g.serveAdvanceLocalState("E")
+	trace := filepath.Join(t.TempDir(), "packets")
+
+	// Act
+	output, status := standingServeAutomerge(g, "E", candidate, "ordinary", "GIT_TRACE_PACKET="+trace)
+
+	// Assert: US4-1.
+	if status != 0 {
+		t.Fatalf("hn automerge --execute --remote origin exited %d:\n%s", status, output)
+	}
+	fact := standingServeRuleFact(t, g, "E", p)
+	if want := standingServeAdvanceLines(head, candidate, fact.ID, 2); !strings.HasSuffix(output, want) {
+		t.Fatalf("output:\n%s\nwant it to end with:\n%s", output, want)
+	}
+	if tip := g.ServerTip("main"); tip != head {
+		t.Fatalf("hosted main = %s, want the candidate head %s", tip, head)
+	}
+	if got := serveHarnessGit(t, g.hosted, "rev-list", "--count", serveGovernedMain); got != commits {
+		t.Fatalf("main reaches %s commits and the head %s; a commit was created", got, commits)
+	}
+	if after := g.serveAdvanceLocalState("E"); after != local {
+		t.Fatalf("advancement changed E's checkout:\nbefore\n%s\nafter\n%s", local, after)
+	}
+	if !g.Published("E") {
+		t.Fatal("the server does not hold E's chain with the rule merge fact")
+	}
+	want := []string{"hn-advance=" + candidate, "hn-expected-tip=" + g.Base, "hn-rule=ordinary"}
+	if options := standingServePushOptions(t, trace); !slices.Equal(options, want) {
+		t.Fatalf("the client sent push options %q, want %q", options, want)
+	}
+
+	// C-008: every hosted chain belongs to a participant, and the only merge
+	// fact for the candidate is E's.
+	participants := map[string]bool{}
+	for _, actor := range g.actors {
+		participants[serveActorRefPrefix+actor] = true
+	}
+	for _, ref := range strings.Fields(serveHarnessGit(t, g.hosted, "for-each-ref", "--format=%(refname)", serveActorRefPrefix)) {
+		if !participants[ref] {
+			t.Fatalf("hosted chain %s belongs to no participant", ref)
+		}
+	}
+	for _, who := range []string{"A", "M", "R", "S", "U", "X"} {
+		if facts := standingServeChainFacts(g, who, candidate); len(facts) != 0 {
+			t.Fatalf("%s's chain holds merge facts %+v", who, facts)
+		}
+	}
+
+	// US4-2: a fresh clone verifies the rule merge.
+	verified := standingServeAllTrustedStatus(g, "us4-2", candidate)
+	assertOperationalContains(t, verified, "Status:   merged\n", standingAutomergeRuleStatusLine("ordinary", g.actors["E"], fact.ID))
+}
+
+// T071: a refused rule advancement names the server upgrade only when the
+// server rejected the request as an unsupported command and a rule was
+// sent.
+func TestStandingServeAdvanceRuleUnsupported(t *testing.T) {
+	rejection := func(code string) serveRejection {
+		return serveRejection{Ref: serveGovernedMain, Actor: serveTestActor, Code: code, Sentence: "refused."}
+	}
+	for _, tc := range []struct {
+		name       string
+		rejections []serveRejection
+		rule       string
+		want       bool
+	}{
+		{"older server refuses hn-rule", []serveRejection{rejection(serveReasonUnsupportedCommand)}, "ordinary", true},
+		{"unsupported among other codes", []serveRejection{rejection(serveReasonProtectedStaleTip), rejection(serveReasonUnsupportedCommand)}, "ordinary", true},
+		{"no rule sent", []serveRejection{rejection(serveReasonUnsupportedCommand)}, "", false},
+		{"rule veto", []serveRejection{rejection(serveReasonProtectedRuleVeto)}, "ordinary", false},
+		{"rule not satisfied", []serveRejection{rejection(serveReasonProtectedRuleNotSatisfied)}, "ordinary", false},
+		{"not an executing actor", []serveRejection{rejection(serveReasonAdvanceNotRuleExecutor)}, "ordinary", false},
+		{"stale tip", []serveRejection{rejection(serveReasonProtectedStaleTip)}, "ordinary", false},
+		{"no rejections", nil, "ordinary", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// Act
+			got := serveAdvanceRuleUnsupported(tc.rejections, tc.rule)
+
+			// Assert
+			if got != tc.want {
+				t.Fatalf("serveAdvanceRuleUnsupported(%+v, %q) = %t, want %t", tc.rejections, tc.rule, got, tc.want)
+			}
+		})
+	}
+}
+
+// T071: the rerun command of a rule advancement is the same hn automerge
+// command; without a rule it is hn merge --remote, unchanged.
+func TestStandingServeAdvanceRerunCommand(t *testing.T) {
+	// Arrange
+	candidate := serveTestEvent
+
+	// Act and assert
+	if got, want := serveAdvanceRerun(candidate, "origin", serveGovernedMain, serveAdvanceBinding{Rule: "ordinary"}),
+		"hn automerge "+candidate+" --rule ordinary --execute --remote origin"; got != want {
+		t.Fatalf("rule rerun %q, want %q", got, want)
+	}
+	if got, want := serveAdvanceRerun(candidate, "origin", serveGovernedMain, serveAdvanceBinding{ExpectedActor: serveTestActor}),
+		"hn merge "+candidate+" --remote origin"; got != want {
+		t.Fatalf("maintainer rerun %q, want %q", got, want)
+	}
+	if got, want := serveAdvanceRerun(candidate, "hosted", "refs/heads/release", serveAdvanceBinding{}),
+		"hn merge "+candidate+" --remote hosted --branch release"; got != want {
+		t.Fatalf("maintainer rerun %q, want %q", got, want)
+	}
+}
+
+// standingServeInterrupted runs who's rule advancement with the test-only
+// interruption after step and requires the documented interruption failure.
+func standingServeInterrupted(g *serveGovernedFixture, who, candidate, step string) {
+	g.t.Helper()
+	output, status := standingServeAutomerge(g, who, candidate, "ordinary", "HN_INTERNAL_TESTING=1", serveAdvanceInterruptEnv+"="+step)
+	if status != 1 || !strings.HasSuffix(output, "hn: interrupted for testing after "+step+"\n") {
+		g.t.Fatalf("interrupted rule advancement after %s exited %d:\n%s", step, status, output)
+	}
+}
+
+// US4-3 through the client. E's command imports the hosted facts first, so
+// a change request S published after E's last sync blocks it locally. A
+// change request that reaches the server after the client's import and
+// before its push is the server's veto: the client stops after publishing
+// its facts, S publishes, and the push the client would send is refused
+// with protected-rule-veto.
+func TestStandingServeAdvanceVeto(t *testing.T) {
+	// Arrange
+	g := newStandingServeFixture(t, standingServeDefaultPolicy)
+	standingServeSelectAllTrusted(g, "E")
+	p := g.StandingReady(map[string]string{"src/veto-client.txt": "vetoed before the import\n"})
+	standingServeImport(g, "E")
+	g.act("S", "review.submit", "review", p.Candidate.ID, "--request-changes", "--body", "Changes requested after E's last sync.")
+	before := g.ServerRefs()
+
+	// Act
+	output, status := standingServeAutomerge(g, "E", p.Candidate.ID, "ordinary")
+
+	// Assert
+	if status == 0 || !strings.Contains(output, "hn: automerge blocked: proposal has a current trusted change request\n") {
+		t.Fatalf("automerge with a hosted change request exited %d:\n%s", status, output)
+	}
+	if after := g.ServerRefs(); after != before {
+		t.Fatalf("the refused command changed hosted refs:\nbefore\n%s\nafter\n%s", before, after)
+	}
+	if facts := standingServeChainFacts(g, "E", p.Candidate.ID); len(facts) != 0 {
+		t.Fatalf("the refused command recorded merge facts %+v", facts)
+	}
+
+	// Arrange: a second candidate; E's command stops between its import and
+	// its push, and S's change request arrives in that interval.
+	q := g.StandingReady(map[string]string{"src/veto-server.txt": "vetoed after the import\n"})
+	standingServeImport(g, "E")
+	standingServeInterrupted(g, "E", q.Candidate.ID, "publish")
+	change := g.act("S", "review.submit", "review", q.Candidate.ID, "--request-changes", "--body", "Changes requested before E's push.")
+
+	// Act
+	rejection, _ := standingServeRuleRefused(t, g, "E", q.Candidate.ID, q.Candidate.Head, "ordinary", serveReasonProtectedRuleVeto)
+
+	// Assert
+	requireServeIDs(t, rejection, q.Candidate.ID, change.ID)
+	if tip := g.ServerTip("main"); tip != g.Base {
+		t.Fatalf("hosted main moved to %s", tip)
+	}
+	if facts := standingServeChainFacts(g, "E", q.Candidate.ID); len(facts) != 0 {
+		t.Fatalf("a vetoed advancement recorded merge facts %+v", facts)
+	}
+}
+
+// The binding survives an interruption before the push: after the client
+// stops once its facts are published, the branch and E's chain are
+// unchanged, and a rerun of the same command runs every step and records
+// one rule merge fact. WP19 covers the other interruption points.
+func TestStandingServeAdvanceInterruptedAfterPublish(t *testing.T) {
+	// Arrange
+	g, p := standingServeAdvanceArrange(t)
+	candidate, head := p.Candidate.ID, p.Candidate.Head
+
+	// Act
+	standingServeInterrupted(g, "E", candidate, "publish")
+
+	// Assert
+	if tip := g.ServerTip("main"); tip != g.Base {
+		t.Fatalf("after the interruption hosted main = %s, want %s", tip, g.Base)
+	}
+	if facts := standingServeChainFacts(g, "E", candidate); len(facts) != 0 {
+		t.Fatalf("after the interruption E holds merge facts %+v", facts)
+	}
+
+	// Act: the full rerun.
+	output, status := standingServeAutomerge(g, "E", candidate, "ordinary")
+
+	// Assert
+	if status != 0 {
+		t.Fatalf("the rerun exited %d:\n%s", status, output)
+	}
+	fact := standingServeRuleFact(t, g, "E", p)
+	if want := standingServeAdvanceLines(head, candidate, fact.ID, 2); !strings.HasSuffix(output, want) {
+		t.Fatalf("rerun output:\n%s\nwant it to end with:\n%s", output, want)
+	}
+	if tip := g.ServerTip("main"); tip != head {
+		t.Fatalf("after the rerun hosted main = %s, want %s", tip, head)
+	}
+	if !g.Published("E") {
+		t.Fatal("after the rerun the rule merge fact is not published")
+	}
+}
+
+// standingServeChains is the local and hosted value of each named actor's
+// chain, empty when absent, for unchanged-state comparisons.
+func standingServeChains(g *serveGovernedFixture, names ...string) string {
+	g.t.Helper()
+	var state []string
+	for _, who := range names {
+		ref := g.actorRef(who)
+		state = append(state, who+" local "+g.git(who, "for-each-ref", "--format=%(objectname)", ref), who+" hosted "+g.hostedRef(ref))
+	}
+	return strings.Join(state, "\n")
+}
+
+// FR-018, FR-019 and NFR-003 remote. E, an executing actor and not a
+// maintainer, cannot use hn merge --remote or a direct push, and X cannot
+// execute rule ordinary; every attempt leaves the hosted refs and both
+// chains unchanged. M's hn merge --remote of an accepted candidate sends
+// exactly hn-advance and hn-expected-tip and records an acceptance merge
+// fact, as before this mission.
+func TestStandingServeAdvanceForbiddenCommands(t *testing.T) {
+	// Arrange
+	g := newStandingServeFixture(t, standingServeDefaultPolicy)
+	standingServeSelectAllTrusted(g, "E", "X")
+	p := g.StandingReady(map[string]string{"src/forbidden.txt": "satisfies rule ordinary\n"})
+	candidate, head := p.Candidate.ID, p.Candidate.Head
+	for _, who := range []string{"E", "X"} {
+		standingServeImport(g, who)
+	}
+	before, chains := g.ServerRefs(), standingServeChains(g, "E", "X")
+	requireUnchanged := func(label string) {
+		t.Helper()
+		if after := g.ServerRefs(); after != before {
+			t.Fatalf("%s changed hosted refs:\nbefore\n%s\nafter\n%s", label, before, after)
+		}
+		if after := standingServeChains(g, "E", "X"); after != chains {
+			t.Fatalf("%s changed a chain:\nbefore\n%s\nafter\n%s", label, chains, after)
+		}
+	}
+
+	// Act and assert: E's hn merge --remote stops at step 1 on the missing
+	// acceptance.
+	output, status := g.Advance("E", candidate)
+	if want := "hn: advancement step 1 (validate locally) failed: proposal lacks 1 required acceptance decision(s)\n"; status != 1 || output != want {
+		t.Fatalf("E's hn merge --remote exited %d with %q, want %q", status, output, want)
+	}
+	requireUnchanged("E's hn merge --remote")
+
+	// E's direct push needs maintainer acceptance.
+	direct := g.RejectMain("E", head, serveReasonProtectedNotReady)
+	requireServeIDs(t, direct, candidate)
+	requireServeMissing(t, direct, serveEvidenceAcceptance)
+	requireUnchanged("E's direct push")
+
+	// X executes rule other only.
+	output, status = standingServeAutomerge(g, "X", candidate, "ordinary")
+	if want := fmt.Sprintf("hn: identity %s is not an executing actor for automerge rule %q\n", g.actors["X"], "ordinary"); status == 0 || !strings.HasSuffix(output, want) {
+		t.Fatalf("X's hn automerge --remote exited %d, want %q:\n%s", status, want, output)
+	}
+	requireUnchanged("X's hn automerge --remote")
+
+	// Arrange: M accepts the candidate.
+	acceptance := g.Accept(candidate)
+	standingServeImport(g, "E")
+	before, chains = g.ServerRefs(), standingServeChains(g, "E", "X")
+
+	// Act and assert: E is still refused at step 1, as not a maintainer.
+	output, status = g.Advance("E", candidate)
+	if want := "hn: advancement step 1 (validate locally) failed: identity " + shortID(g.actors["E"]) + " is not a maintainer under proposal policy\n"; status != 1 || output != want {
+		t.Fatalf("E's hn merge --remote of an accepted candidate exited %d with %q, want %q", status, output, want)
+	}
+	requireUnchanged("E's hn merge --remote of an accepted candidate")
+
+	// M's maintainer advancement is unchanged and never sends hn-rule.
+	trace := filepath.Join(t.TempDir(), "packets")
+	output, status = g.Advance("M", candidate, "GIT_TRACE_PACKET="+trace)
+	if status != 0 {
+		t.Fatalf("M's hn merge --remote exited %d:\n%s", status, output)
+	}
+	fact := g.requireFastForwardFact("M", candidate, head, acceptance.ID)
+	if want := serveAdvanceSuccessLines("origin", head, candidate, fact.ID, 1); output != want {
+		t.Fatalf("output:\n%s\nwant:\n%s", output, want)
+	}
+	want := []string{"hn-advance=" + candidate, "hn-expected-tip=" + g.Base}
+	if options := standingServePushOptions(t, trace); !slices.Equal(options, want) {
+		t.Fatalf("hn merge --remote sent push options %q, want %q", options, want)
+	}
+	if facts := standingServeChainFacts(g, "M", candidate); len(facts) != 1 || facts[0].Rule != "" {
+		t.Fatalf("M's merge facts %+v, want one acceptance merge fact without a rule", facts)
+	}
+}
+
+// T075: the guide's standing-serve-advance example is the real US4-1 run.
+// The documented command runs in E's clone after its placeholder is
+// replaced, and the documented output lines are the last lines it prints.
+func TestStandingServeDocumentedAdvance(t *testing.T) {
+	// Arrange
+	contents, err := os.ReadFile(filepath.Join("docs", "serve-v0.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	const marker = "<!-- example: standing-serve-advance -->\n"
+	guide := string(contents)
+	if strings.Count(guide, marker) != 1 {
+		t.Fatalf("the serve guide must contain exactly one %q", strings.TrimSpace(marker))
+	}
+	_, after, _ := strings.Cut(guide, marker)
+	block := func(fence string) string {
+		t.Helper()
+		_, rest, found := strings.Cut(after, fence)
+		if !found {
+			t.Fatalf("no %q block after the example marker", strings.TrimSpace(fence))
+		}
+		text, rest, found := strings.Cut(rest, "```\n")
+		if !found {
+			t.Fatal("unterminated example block")
+		}
+		after = rest
+		return strings.TrimSuffix(text, "\n")
+	}
+	command := strings.Fields(block("```sh\n"))
+	documented := strings.Split(block("```text\n"), "\n")
+	if len(command) < 2 || command[0] != "hn" || len(documented) != 2 {
+		t.Fatalf("example has command %q and %d output lines, want an hn command and two lines", command, len(documented))
+	}
+	g, p := standingServeAdvanceArrange(t)
+	args := slices.Clone(command[1:])
+	for index, arg := range args {
+		if arg == "sha256:1c2d3e4f..." {
+			args[index] = p.Candidate.ID
+		}
+	}
+	if want := []string{"automerge", p.Candidate.ID, "--rule", "ordinary", "--execute", "--remote", "origin"}; !slices.Equal(args, want) {
+		t.Fatalf("documented command runs %q, want %q", args, want)
+	}
+
+	// Act
+	output, status, err := g.advanceExec("E", nil, g.h.Binary, args...)
+
+	// Assert
+	if err != nil || status != 0 {
+		t.Fatalf("documented command exited %d (%v):\n%s", status, err, output)
+	}
+	fact := standingServeRuleFact(t, g, "E", p)
+	replace := strings.NewReplacer(
+		"9b2e4c6a8d0f", shortOID(p.Candidate.Head),
+		"1c2d3e4f5a6b", shortID(p.Candidate.ID),
+		"7d8e9f0a1b2c", shortID(fact.ID),
+	)
+	want := replace.Replace(strings.Join(documented, "\n")) + "\n"
+	if !strings.HasSuffix(output, want) {
+		t.Fatalf("output:\n%s\nwant it to end with the documented lines:\n%s", output, want)
+	}
+}
+
+// standingServeAgreement is one fixture of the preview-to-server
+// comparison (NFR-002): the candidate, the rule named, the declared target
+// tip, a blocker the preview must list and the code the server must answer
+// ("" for the satisfied fixture).
+type standingServeAgreement struct {
+	Name      string
+	Candidate operationalEvent
+	Rule      string
+	Tip       string
+	Want      string
+	Code      string
+}
+
+// standingServeAgreementCodes are the server steps a rule-satisfaction
+// refusal may come from: 7a, 8, 9 and 10.
+var standingServeAgreementCodes = []string{
+	serveReasonProtectedDestinationPolicy, serveReasonProposalRefMismatch, serveReasonProtectedBlocked,
+	serveReasonProtectedRuleVeto, serveReasonProtectedRuleNotSatisfied,
+}
+
+// standingServeMatchedInputs asserts the four matched inputs of the
+// agreement contract for f in E's clone and on the server. The caller has
+// just run hn sync origin in E's clone.
+func standingServeMatchedInputs(t *testing.T, g *serveGovernedFixture, f standingServeAgreement) {
+	t.Helper()
+	// Target branch and tip.
+	branch, local, hosted := g.git("E", "symbolic-ref", "HEAD"), g.git("E", "rev-parse", "refs/heads/main"), g.ServerTip("main")
+	if branch != serveGovernedMain || local != hosted || hosted != f.Tip {
+		t.Fatalf("%s: local main equals hosted main, and both equal the fixture's declared tip: E has %s at %s, hosted main is %s, declared tip %s",
+			f.Name, branch, local, hosted, f.Tip)
+	}
+	// Base and target policy: the same commits, so the same digests.
+	gitDir := filepath.Join(g.work["E"], ".git")
+	for _, commit := range []string{f.Candidate.Base, f.Tip} {
+		_, localDigest, localErr := loadReplicationPolicyAt(gitDir, gitDir, commit)
+		_, hostedDigest, hostedErr := loadReplicationPolicyAt(g.hosted, g.hosted, commit)
+		if localErr != nil || hostedErr != nil || localDigest != hostedDigest {
+			t.Fatalf("%s: the policy at %s differs between E's clone (%s, %v) and the server (%s, %v)",
+				f.Name, commit, localDigest, localErr, hostedDigest, hostedErr)
+		}
+	}
+	// Candidate code: the head and the proposal code ref on both surfaces.
+	// E's clone holds the code ref it imported from origin.
+	imported := acceptedProposalRef("origin", f.Candidate.ID)
+	if got := g.git("E", "rev-parse", "--verify", "--quiet", imported); got != f.Candidate.Head {
+		t.Fatalf("%s: E's %s = %q, want the head %s", f.Name, imported, got, f.Candidate.Head)
+	}
+	if ref, got := proposalRef(f.Candidate.ID), g.hostedRef(proposalRef(f.Candidate.ID)); got != f.Candidate.Head {
+		t.Fatalf("%s: hosted %s = %q, want the head %s", f.Name, ref, got, f.Candidate.Head)
+	}
+	// Fact set: E imports with the all-trusted selection.
+	assertOperationalContains(t, g.hn("E", "replication", "show", "origin"), "all-trusted: true\n")
+}
+
+// standingServeOpenApproved opens a candidate for files on base and records
+// approver's approval, with no run request.
+func standingServeOpenApproved(g *serveGovernedFixture, base, approver string, files map[string]string) operationalEvent {
+	g.t.Helper()
+	candidate := g.OpenProposal(base, g.Commit(base, files))
+	g.act(approver, "review.submit", "review", candidate.ID, "--approve", "--body", "Approved by the agreement fixture.")
+	return candidate
+}
+
+// standingServeTested adds M's run request and U's passing result.
+func standingServeTested(g *serveGovernedFixture, candidate string) {
+	g.t.Helper()
+	g.RunCI(g.RequestCI(candidate).ID)
+}
+
+// T095 (NFR-002): under matched inputs, E's keyless preview is eligible
+// exactly when the server accepts E's rule push, and every server refusal
+// comes from steps 7a, 8, 9 or 10. Authorization and transport are tested
+// on their own in TestStandingServeAdvanceAuthorizationAndTransport.
+func TestStandingServeAdvanceAgreementPreviewServer(t *testing.T) {
+	// Arrange
+	g := newStandingServeFixture(t, standingServeDefaultPolicy)
+	standingServeSelectAllTrusted(g, "E")
+	var table []string
+	compare := func(f standingServeAgreement) {
+		t.Helper()
+		standingServeImport(g, "E")
+		standingServeMatchedInputs(t, g, f)
+		hosted := g.ServerRefs()
+		refs := g.git("E", "for-each-ref", "--format=%(objectname) %(refname)")
+
+		// Act: the preview, then the push the client would send.
+		preview, status := standingServePreview(g, "E", f.Candidate.ID, f.Rule)
+		if after := g.git("E", "for-each-ref", "--format=%(objectname) %(refname)"); after != refs {
+			t.Fatalf("%s: the preview changed E's refs", f.Name)
+		}
+		if after := g.ServerRefs(); after != hosted {
+			t.Fatalf("%s: a fact was published between the preview and the push", f.Name)
+		}
+		output, rejections, accepted := g.RulePush("E", f.Candidate.ID, f.Candidate.Head, f.Rule)
+
+		// Assert
+		eligible := status == 0 && len(standingAutomergeBlockers(preview)) == 0
+		if f.Want == "" {
+			requireStandingAutomergeEligible(t, preview, status)
+		} else {
+			requireStandingAutomergeBlockedBy(t, preview, status, f.Want)
+		}
+		if eligible != accepted {
+			t.Fatalf("%s: preview eligible %t but server accepted %t\npreview:\n%s\npush:\n%s", f.Name, eligible, accepted, preview, output)
+		}
+		verdict := "accepted"
+		if accepted {
+			if tip := g.ServerTip("main"); tip != f.Candidate.Head {
+				t.Fatalf("%s: hosted main = %s after an accepted push, want %s", f.Name, tip, f.Candidate.Head)
+			}
+		} else {
+			if len(rejections) != 1 || !slices.Contains(standingServeAgreementCodes, rejections[0].Code) || rejections[0].Code != f.Code {
+				t.Fatalf("%s: server rejections %+v, want one %s from steps 7a to 10:\n%s", f.Name, rejections, f.Code, output)
+			}
+			if after := g.ServerRefs(); after != hosted {
+				t.Fatalf("%s: the refused push changed hosted refs", f.Name)
+			}
+			verdict = rejections[0].Code
+		}
+		previewOutcome := map[bool]string{true: "eligible", false: "blocked"}[eligible]
+		table = append(table, fmt.Sprintf("%-38s preview %-8s server %-28s agree", f.Name, previewOutcome, verdict))
+	}
+	base := g.Base
+	fixture := func(name string, candidate operationalEvent, rule, want, code string) standingServeAgreement {
+		return standingServeAgreement{Name: name, Candidate: candidate, Rule: rule, Tip: candidate.Base, Want: want, Code: code}
+	}
+
+	// Act and assert: every refusal on the signed base first, so the target
+	// tip stays at the base. One ready candidate serves the three rules
+	// that cannot apply to it, and then S's change request.
+	c := g.StandingReady(map[string]string{"src/ready.txt": "ready under rule ordinary\n"}).Candidate
+	compare(fixture("rule that does not exist", c, "nosuch", `automerge rule "nosuch" does not exist in the signed base policy`, serveReasonProtectedRuleNotSatisfied))
+	compare(fixture("rule with acceptance maintainers", c, "maint", standingAutomergeNotAccepted, serveReasonProtectedRuleNotSatisfied))
+	compare(fixture("rule for another target branch", c, "release", `checked-out branch does not match rule target "release"`, serveReasonProtectedRuleNotSatisfied))
+	g.act("S", "review.submit", "review", c.ID, "--request-changes", "--body", "Changes requested by the agreement fixture.")
+	compare(fixture("trusted change request", c, "ordinary", standingAutomergeChangeRequest, serveReasonProtectedRuleVeto))
+
+	failing := g.StandingReady(map[string]string{"src/failure.txt": "trusted failure\n"})
+	writeServeTestFile(t, g.CIFailFlag, "fail\n", 0o644)
+	g.RunCI(failing.Request.ID, "--rerun")
+	if err := os.Remove(g.CIFailFlag); err != nil {
+		t.Fatal(err)
+	}
+	compare(fixture("trusted failure", failing.Candidate, "ordinary", `pipeline "test" has a current trusted failure`, serveReasonProtectedRuleVeto))
+
+	c = g.StandingReady(map[string]string{"src/rejected.txt": "maintainer rejection\n"}).Candidate
+	g.Reject(c.ID)
+	compare(fixture("maintainer rejection", c, "ordinary", "proposal has a current maintainer rejection", serveReasonProtectedBlocked))
+
+	g.Author = "S"
+	c = g.StandingReady(map[string]string{"src/by-s.txt": "authored by S\n"}).Candidate
+	g.Author = "A"
+	compare(fixture("author outside the rule", c, "ordinary", "proposal author is not allowed by the rule", serveReasonProtectedRuleNotSatisfied))
+
+	c = g.StandingReady(map[string]string{"other/x": "outside every rule path\n"}).Candidate
+	compare(fixture("path outside the rule", c, "ordinary", `changed path "other/x" is outside the rule allowlist`, serveReasonProtectedRuleNotSatisfied))
+
+	c = g.StandingReady(map[string]string{
+		serveGovernedPolicyPath: standingServeDefaultPolicy(g.actors) + "\n", "src/policy-change.txt": "allowlisted change\n",
+	}).Candidate
+	compare(fixture("policy change", c, "ordinary", "policy amendments require manual merge", serveReasonProtectedRuleNotSatisfied))
+
+	c = standingServeOpenApproved(g, base, "S", map[string]string{"src/uncounted.txt": "approved by an uncounted reviewer\n"})
+	standingServeTested(g, c.ID)
+	compare(fixture("too few counted approvals", c, "ordinary", standingAutomergeThreshold0of1, serveReasonProtectedRuleNotSatisfied))
+
+	c = standingServeOpenApproved(g, base, "R", map[string]string{"src/untested.txt": "no passing result\n"})
+	compare(fixture("too few passing results", c, "ordinary", standingAutomergeNoPass, serveReasonProtectedRuleNotSatisfied))
+
+	// The destination policy differs (WP14 T068 step 6): M lands policy
+	// amendment H1, and A builds the head on H1 but signs the older base.
+	// E's main and hosted main are both at H1, so the target differs from
+	// the signed base and the server reaches step 7a.
+	amended := standingServePolicyDocument()
+	amended.Rules[1].Paths = []string{"src/", "tests/", "docs/", "other/"}
+	h1 := g.Commit(base, map[string]string{serveGovernedPolicyPath: amended.JSON(g.actors)})
+	g.ReadyProposal(base, h1)
+	g.AcceptMain("M", h1)
+	g.git("E", "fetch", "-q", "origin")
+	g.git("E", "checkout", "-q", "-B", "main", h1)
+	moved := g.OpenProposal(base, g.Commit(h1, map[string]string{"src/after-amendment.txt": "built on the amendment\n"}))
+	g.Approve(moved.ID)
+	standingServeTested(g, moved.ID)
+	destination := fixture("destination policy differs from base", moved, "ordinary",
+		"current target policy differs from the signed base policy", serveReasonProtectedDestinationPolicy)
+	destination.Tip = h1
+	compare(destination)
+
+	// The satisfied candidate is based on H1 and compared last, because
+	// the server accepts it and main moves.
+	satisfied := g.OpenProposal(h1, g.Commit(h1, map[string]string{"src/satisfied.txt": "satisfies rule ordinary\n"}))
+	g.Approve(satisfied.ID)
+	standingServeTested(g, satisfied.ID)
+	compare(fixture("satisfied", satisfied, "ordinary", "", ""))
+
+	t.Logf("preview and hn serve agreement on rule satisfaction, %d fixtures, 100%% agreement:\n%s", len(table), strings.Join(table, "\n"))
+}
+
+// T095 (NFR-002): the checks agreement excludes, tested on their own.
+// Authorization: X's preview of a satisfied candidate is eligible, but
+// X's rule push and X's command are refused. Transport and binding: a
+// stale hn-expected-tip, a selection that omits a trusted actor, a remote
+// that is not an hn serve remote, and a local main behind the hosted tip
+// are each refused, with the hosted refs unchanged.
+func TestStandingServeAdvanceAuthorizationAndTransport(t *testing.T) {
+	// Arrange
+	g := newStandingServeFixture(t, standingServeDefaultPolicy)
+	standingServeSelectAllTrusted(g, "E", "X")
+	p := g.StandingReady(map[string]string{"src/authorized.txt": "satisfies rule ordinary\n"})
+	candidate, head := p.Candidate.ID, p.Candidate.Head
+	for _, who := range []string{"E", "X"} {
+		standingServeImport(g, who)
+	}
+	var table []string
+	refused := func(label, who, output string, status int, want string, before string) {
+		t.Helper()
+		if status == 0 || !strings.Contains(output, want) {
+			t.Fatalf("%s exited %d, want %q:\n%s", label, status, want, output)
+		}
+		if after := g.ServerRefs(); after != before {
+			t.Fatalf("%s changed hosted refs:\nbefore\n%s\nafter\n%s", label, before, after)
+		}
+		if facts := standingServeChainFacts(g, who, candidate); len(facts) != 0 {
+			t.Fatalf("%s recorded merge facts %+v", label, facts)
+		}
+		table = append(table, fmt.Sprintf("%-44s refused (%s)", label, want))
+	}
+
+	// Act and assert: authorization. X's preview is eligible.
+	preview, status := standingServePreview(g, "X", candidate, "ordinary")
+	requireStandingAutomergeEligible(t, preview, status)
+	table = append(table, fmt.Sprintf("%-44s eligible (preview judges rule satisfaction only)", "X's preview"))
+
+	executor, _ := standingServeRuleRefused(t, g, "X", candidate, head, "ordinary", serveReasonAdvanceNotRuleExecutor)
+	requireServeIDs(t, executor, candidate)
+	table = append(table, fmt.Sprintf("%-44s refused (%s)", "X's rule push", executor.Code))
+
+	before, logged := g.ServerRefs(), len(g.pushLog())
+	output, status := standingServeAutomerge(g, "X", candidate, "ordinary")
+	refused("X's hn automerge --remote", "X", output, status,
+		fmt.Sprintf("identity %s is not an executing actor for automerge rule %q", g.actors["X"], "ordinary"), before)
+	if entries := g.pushLog(); len(entries) != logged {
+		t.Fatalf("X's locally refused command pushed: %+v", entries[logged:])
+	}
+
+	// Transport: a stale hn-expected-tip.
+	stale := g.Commit(g.Base, nil)
+	tip := g.RejectMain("E", head, serveReasonProtectedStaleTip, "hn-advance="+candidate, "hn-expected-tip="+stale, "hn-rule=ordinary")
+	requireServeIDs(t, tip, stale, g.Base)
+	table = append(table, fmt.Sprintf("%-44s refused (%s)", "E's rule push with a stale expected tip", tip.Code))
+
+	// A selection that omits trusted actors is refused before the import:
+	// S's new fact on the server does not reach E's clone.
+	g.hn("E", "replication", "select", "origin", "--actor", g.actors["E"], "--proposal", candidate)
+	g.hn("S", "issue", "open", "Published after E's last import")
+	g.hn("S", "sync", "origin")
+	refs, before := g.git("E", "for-each-ref", "--format=%(objectname) %(refname)"), g.ServerRefs()
+	output, status = standingServeAutomerge(g, "E", candidate, "ordinary")
+	refused("E's command with a narrow selection", "E", output, status, "run hn replication select origin --all-trusted", before)
+	if after := g.git("E", "for-each-ref", "--format=%(objectname) %(refname)"); after != refs {
+		t.Fatalf("the refused command imported facts:\nbefore\n%s\nafter\n%s", refs, after)
+	}
+	standingServeSelectAllTrusted(g, "E")
+
+	// A remote that is not an hn serve remote.
+	plain := filepath.Join(t.TempDir(), "plain.git")
+	runOperationalGit(t, "", "init", "-q", "--bare", plain)
+	g.git("E", "remote", "add", "plain", plain)
+	g.git("E", "push", "-q", "plain", "main")
+	plainRefs, before := serveHarnessGit(t, plain, "for-each-ref", "--format=%(objectname) %(refname)"), g.ServerRefs()
+	output, status, err := g.advanceExec("E", nil, g.h.Binary, "automerge", candidate, "--rule", "ordinary", "--execute", "--remote", "plain")
+	if err != nil {
+		t.Fatal(err)
+	}
+	refused("E's command against an ordinary remote", "E", output, status, "remote plain is not an hn serve remote", before)
+	if got := serveHarnessGit(t, plain, "for-each-ref", "--format=%(objectname) %(refname)"); got != plainRefs {
+		t.Fatalf("the ordinary remote changed:\nbefore\n%s\nafter\n%s", plainRefs, got)
+	}
+
+	// E's main behind the hosted tip.
+	ahead := g.Commit(g.Base, map[string]string{"docs/ahead.txt": "hosted main moved\n"})
+	g.SetMainForTest(ahead)
+	before = g.ServerRefs()
+	output, status = standingServeAutomerge(g, "E", candidate, "ordinary")
+	refused("E's command with main behind the hosted tip", "E", output, status,
+		fmt.Sprintf("local main is at %s but origin has %s", shortOID(g.Base), shortOID(ahead)), before)
+
+	t.Logf("authorization and transport refusals, tested apart from agreement:\n%s", strings.Join(table, "\n"))
+}
+
+// T070: step 1 in process. Without a rule binding the checks of hn merge
+// apply unchanged; with one, the named rule must be satisfied for the
+// advanced branch and the identity must be one of its executing actors.
+func TestStandingServeAdvanceValidateRuleBinding(t *testing.T) {
+	// Arrange
+	h := newStandingHarness(t, standingHarnessDefaultPolicy())
+	candidate := h.ReadyCandidate(standingAutomergeFiles)
+	for _, role := range []string{"E", "X"} {
+		h.hn(role, "sync", "origin")
+	}
+	ordinary := serveAdvanceBinding{Rule: "ordinary"}
+
+	h.inClone("E", func(*Identity) {
+		// Act
+		_, _, _, acceptance, err := serveAdvanceValidate(candidate.ID, serveGovernedMain, ordinary)
+
+		// Assert
+		if err != nil || acceptance == nil || acceptance.Rule == nil || acceptance.Rule.Name != "ordinary" || !acceptance.Satisfied() {
+			t.Fatalf("step 1 under rule ordinary returned %+v, %v; want the satisfied rule", acceptance, err)
+		}
+		for _, tc := range []struct {
+			name, branch string
+			binding      serveAdvanceBinding
+			want         string
+		}{
+			{"no rule binding", serveGovernedMain, serveAdvanceBinding{}, "proposal lacks 1 required acceptance decision(s)"},
+			{"another branch", "refs/heads/release", ordinary,
+				`automerge rule "ordinary" is not satisfied by the current evidence; run 'hn automerge ` + candidate.ID + ` --rule ordinary' for its blockers`},
+			{"paths outside the rule", serveGovernedMain, serveAdvanceBinding{Rule: "other"}, `automerge rule "other" is not satisfied by the current evidence`},
+			{"rule that does not exist", serveGovernedMain, serveAdvanceBinding{Rule: "nosuch"}, `automerge rule "nosuch" is not satisfied by the current evidence`},
+		} {
+			_, _, _, refused, err := serveAdvanceValidate(candidate.ID, tc.branch, tc.binding)
+			if err == nil || !strings.Contains(err.Error(), tc.want) || refused != nil {
+				t.Fatalf("%s: step 1 returned %+v, %v; want %q", tc.name, refused, err, tc.want)
+			}
+		}
+	})
+
+	h.inClone("X", func(*Identity) {
+		// Act
+		_, _, _, acceptance, err := serveAdvanceValidate(candidate.ID, serveGovernedMain, ordinary)
+
+		// Assert
+		want := fmt.Sprintf("identity %s is not an executing actor for automerge rule %q", h.Actor("X"), "ordinary")
+		if err == nil || err.Error() != want || acceptance != nil {
+			t.Fatalf("X's step 1 returned %+v, %v; want %q", acceptance, err, want)
+		}
+	})
+}
