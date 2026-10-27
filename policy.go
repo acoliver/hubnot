@@ -706,7 +706,36 @@ func cmdProposalStatus(query string) error {
 	}
 	fmt.Printf("Decision: %d/%d accepts; %d rejects\n", len(evaluation.AcceptDecisions), evaluation.Policy.Proposals.RequiredAccepts, len(evaluation.RejectDecisions))
 	fmt.Printf("Status:   %s\n", proposalStatus(evaluation))
+	printRuleMergeClaims(proposal, evaluation, events)
 	return nil
+}
+
+// printRuleMergeClaims prints one line per merge fact that carries a rule
+// claim, sorted by fact ID (FR-021). Projection already admitted every merge
+// fact, so one that fails the maintainer check was admitted as a rule merge;
+// one that passes it is a maintainer merge whose rule claim is unverified.
+func printRuleMergeClaims(proposal *StoredEvent, evaluation *ProposalEvaluation, events []StoredEvent) {
+	var claims []StoredEvent
+	for _, merge := range evaluation.MergeEvents {
+		if merge.Event.Rule != "" {
+			claims = append(claims, merge)
+		}
+	}
+	if len(claims) == 0 {
+		return
+	}
+	sortEventsByID(claims)
+	byID := make(map[string]StoredEvent, len(events))
+	for _, stored := range events {
+		byID[stored.ID] = stored
+	}
+	for _, merge := range claims {
+		if maintainerMergeCheck(merge, *proposal, byID) == nil {
+			fmt.Printf("Merged by maintainers in fact %s; its rule annotation \"%s\" is not verified\n", merge.ID, safeText(merge.Event.Rule))
+		} else {
+			fmt.Printf("Merged by rule %s, signed by %s in fact %s\n", safeText(merge.Event.Rule), merge.Event.Actor, merge.ID)
+		}
+	}
 }
 
 func sortedDecisionIDs(decisions []StoredEvent) []string {

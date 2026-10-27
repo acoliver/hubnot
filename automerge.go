@@ -91,6 +91,12 @@ func cmdAutomerge(args []string) error {
 		}
 	}
 	guard := &proposalMergeGuard{ExpectedActor: identity.Actor}
+	// Under acceptance mode rule the standing rule stands in for the
+	// per-proposal acceptance and maintainer checks (FR-009); a maintainer
+	// listed in the rule's actors gets the same authority (FR-011).
+	if inspection.Rule.Acceptance.Standing() {
+		guard.Rule = &ruleMergeAuthority{Name: *rule, Latest: inspection.RuleAcceptance}
+	}
 	guard.Check = func(proposal *StoredEvent, evaluation *ProposalEvaluation, branch, current string) error {
 		next, err := inspectAutomerge(proposal.ID, *rule)
 		if err != nil {
@@ -105,7 +111,14 @@ func cmdAutomerge(args []string) error {
 		if !actorListed(identity.Actor, next.Rule.Actors) {
 			return fmt.Errorf("identity %s is no longer an executing actor for automerge rule %q", identity.Actor, *rule)
 		}
-		// The common merge path signs this exact latest acceptance snapshot.
+		if guard.Rule != nil {
+			if !next.RuleAcceptance.Satisfied() {
+				return fmt.Errorf("automerge candidate, policy or target changed before merge")
+			}
+			guard.Rule.Latest = next.RuleAcceptance
+		}
+		// The common merge path signs this exact latest acceptance snapshot,
+		// and under a rule authority the rule evidence in guard.Rule.Latest.
 		*evaluation = *next.Evaluation
 		return nil
 	}

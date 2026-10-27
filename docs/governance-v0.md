@@ -442,8 +442,12 @@ Changed paths:
 Eligible: explicit --execute is required to merge locally.
 ```
 
-Execution requires current ordinary and designated approvals, required passing
-pipeline results, and the existing maintainer acceptances. It also refuses current
+Under acceptance mode `maintainers`, execution requires current ordinary and
+designated approvals, required passing pipeline results, and the existing
+maintainer acceptances. Under acceptance mode `rule` the rule's thresholds
+replace the maintainer acceptances, as
+[Executing a standing rule](#executing-a-standing-rule) describes. Execution
+in either mode also refuses current
 trusted change requests or pipeline failures, maintainer rejections, superseded
 or closed lineages, mismatched code refs, disallowed authors or changed paths,
 policy amendments, and protected-check changes. The latter two take the manual
@@ -460,6 +464,90 @@ and reconcile its configuration outside this command. Downloading some missing
 objects alone does not make a configured partial clone eligible. Selected data
 that suffices for an ordinary manual merge does not waive this full-repository
 requirement. Automerge does not fetch or invoke shallow recovery.
+
+#### Executing a standing rule
+
+An actor listed in the `actors` of a rule with acceptance mode `rule` executes
+it with the same command:
+
+```sh
+hn automerge <full-candidate-event-id> --rule ordinary --execute
+```
+
+The executing actor does not need to be a maintainer. A maintainer listed in the
+rule's `actors` follows the same path and records the same kind of merge fact.
+Any other identity is refused with `identity <actor> is not an executing actor
+for automerge rule "ordinary"`, even when the preview is eligible.
+
+Two things change compared with acceptance mode `maintainers`. No maintainer
+decision is needed: the rule's approval and pipeline thresholds and its
+executing actors take the place of the maintainer acceptances and the
+maintainer identity check. The recorded `proposal.merged` fact names the rule
+in its `rule` field, carries the base policy digest in `policy`, and lists the
+counted approvals and passing run results, sorted, as its `evidence`. Every
+other blocker of the preview still applies. Execution inspects the candidate,
+the target and the evidence again immediately before it advances the branch,
+under the same expected-old ref lease, and it signs the evidence of that last
+inspection.
+
+Before it signs, `hn` builds the fact in memory and judges it with the merge
+fact admission that every verifier applies. If verifiers would refuse the fact,
+or would admit it as anything other than a rule merge, `hn` signs nothing and
+reports `refusing to sign a rule merge fact that verifiers would reject:`
+followed by the failed check. The code is already merged at that point, so the
+whole message starts with `code merged at <commit> but recording failed:`.
+
+`hn proposal status` prints one line after `Status:   merged` for each rule
+merge fact, sorted by fact ID, with the full fingerprint of the signer and the
+full fact ID:
+
+```text
+Merged by rule ordinary, signed by <executor-actor> in fact <fact-id>
+```
+
+A maintainer merge fact that also carries a rule claim prints
+`Merged by maintainers in fact <fact-id>; its rule annotation "<name>" is not
+verified`. Its maintainer acceptances make it valid, and nothing checked its
+rule claim. Merge facts without a rule claim add no line.
+
+The example below runs User Story 1 locally under the standing rule `ordinary`.
+Pipeline `test` lists the author in `requesters`, so no maintainer signs
+anything for the candidate. The author has committed `src/feature.txt` and
+`tests/feature.txt` at `<head-commit>` on top of `main` at `<base-commit>`.
+Each `# As` line names the identity that runs the commands below it; each
+identity syncs before and after its command. `...` stands for output that
+differs between runs. The runner uses the unsafe host backend, which the
+README describes and which needs both of its flags on every invocation.
+
+<!-- example: standing-execute -->
+```text
+# As author:
+$ hn proposal open --base <base-commit> --head <head-commit> Add the standing feature
+Opened proposal <candidate-short>: Add the standing feature
+# As gpt-reviewer:
+$ hn review <candidate-id> --approve
+Recorded approve review <approval-short> on proposal <candidate-short>
+# As author:
+$ hn run request <candidate-id> test
+Requested pipeline test as run <request-short>
+# As runner:
+$ hn run execute <request-id> --backend host --allow-unsafe-host-execution
+Recorded passed result <result-short> with host backend (exit 0, ...ms)
+# As integrator:
+$ hn automerge <candidate-id> --rule ordinary
+Rule: ordinary
+Acceptance: rule (standing acceptance; no maintainer acceptance required)
+Counted approvals: 1/1 (author approvals do not count)
+Eligible: explicit --execute is required to merge locally.
+$ hn automerge <candidate-id> --rule ordinary --execute
+Merged proposal <candidate-short> into main at <merge-short>
+Recorded rule merge event <fact-short> under rule ordinary with 2 evidence item(s)
+$ hn proposal status <candidate-id>
+Status:   merged
+Merged by rule ordinary, signed by <executor-actor> in fact <fact-id>
+```
+
+`<fact-id>` is the full event ID, including its `sha256:` prefix.
 
 ### Commit path, publication and recovery
 ### Standing acceptance rule fields

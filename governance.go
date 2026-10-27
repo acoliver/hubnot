@@ -119,6 +119,36 @@ type proposalMergeGuard struct {
 	ExpectedActor string
 	Check         func(*StoredEvent, *ProposalEvaluation, string, string) error
 	Advance       func(*StoredEvent, *ProposalEvaluation, string, string, string) (string, error)
+	Rule          *ruleMergeAuthority
+}
+
+// ruleMergeAuthority lets hn automerge stand in a standing rule for the
+// per-proposal acceptance and maintainer checks of mergeProposal. Only
+// cmdAutomerge builds one; hn merge never does.
+type ruleMergeAuthority struct {
+	Name   string
+	Latest *ruleAcceptance // refreshed by the guard's Check on every re-inspection
+}
+
+// authorize is the identity check of mergeProposal. With a rule authority
+// the latest rule acceptance must be satisfied and identity must be an
+// executing actor of the rule in the signed base policy; without one it is
+// the maintainer check.
+func (g *proposalMergeGuard) authorize(identity *Identity, evaluation *ProposalEvaluation) error {
+	if g == nil || g.Rule == nil {
+		if !actorListed(identity.Actor, evaluation.Policy.Maintainers) {
+			return fmt.Errorf("identity %s is not a maintainer under proposal policy", shortID(identity.Actor))
+		}
+		return nil
+	}
+	if !g.Rule.Latest.Satisfied() || g.Rule.Latest.Rule.Name != g.Rule.Name {
+		return fmt.Errorf("automerge rule %q is not satisfied by the current evidence", g.Rule.Name)
+	}
+	rule := ruleByName(evaluation.Policy, g.Rule.Name)
+	if rule == nil || !rule.Acceptance.Standing() || !actorListed(identity.Actor, rule.Actors) {
+		return fmt.Errorf("identity %s is not an executing actor for automerge rule %q", identity.Actor, g.Rule.Name)
+	}
+	return nil
 }
 
 func cmdMerge(args []string) error {
@@ -169,8 +199,13 @@ func mergeProposal(args []string, guard *proposalMergeGuard) error {
 	if evaluation.Rejected {
 		return fmt.Errorf("proposal has a current maintainer rejection")
 	}
-	if !evaluation.Accepted {
-		return fmt.Errorf("proposal lacks %d required acceptance decision(s)", evaluation.Policy.Proposals.RequiredAccepts)
+	// A standing rule replaces per-proposal acceptance: guard.authorize
+	// checks the rule and its executing actors instead.
+	byRule := guard != nil && guard.Rule != nil
+	if !byRule {
+		if !evaluation.Accepted {
+			return fmt.Errorf("proposal lacks %d required acceptance decision(s)", evaluation.Policy.Proposals.RequiredAccepts)
+		}
 	}
 	if err := requireProposalCode(proposal); err != nil {
 		return err
@@ -182,8 +217,14 @@ func mergeProposal(args []string, guard *proposalMergeGuard) error {
 	if guard != nil && (guard.ExpectedActor == "" || identity.Actor != guard.ExpectedActor) {
 		return fmt.Errorf("selected signing identity changed or is not bound to merge authorization")
 	}
-	if !actorListed(identity.Actor, evaluation.Policy.Maintainers) {
-		return fmt.Errorf("identity %s is not a maintainer under proposal policy", shortID(identity.Actor))
+	if byRule {
+		if err := guard.authorize(identity, evaluation); err != nil {
+			return err
+		}
+	} else {
+		if !actorListed(identity.Actor, evaluation.Policy.Maintainers) {
+			return fmt.Errorf("identity %s is not a maintainer under proposal policy", shortID(identity.Actor))
+		}
 	}
 	branch, err := gitText("symbolic-ref", "--quiet", "--short", "HEAD")
 	if err != nil {
@@ -282,14 +323,26 @@ func mergeProposal(args []string, guard *proposalMergeGuard) error {
 		if err := requireLineageTerminalEligibility("merge", currentProposal.ID, evaluation.Lineage); err != nil {
 			return err
 		}
-		if evaluation.Merged || evaluation.Rejected || !evaluation.Accepted || !evaluation.Ready {
-			return fmt.Errorf("cannot merge: current approval, protected check, CI or acceptance evidence no longer satisfies proposal policy")
+		if byRule {
+			if evaluation.Merged || evaluation.Rejected || !evaluation.Ready {
+				return fmt.Errorf("cannot merge: current approval, protected check, CI or acceptance evidence no longer satisfies proposal policy")
+			}
+		} else {
+			if evaluation.Merged || evaluation.Rejected || !evaluation.Accepted || !evaluation.Ready {
+				return fmt.Errorf("cannot merge: current approval, protected check, CI or acceptance evidence no longer satisfies proposal policy")
+			}
 		}
 		if err := requireProposalCode(currentProposal); err != nil {
 			return err
 		}
-		if !actorListed(identity.Actor, evaluation.Policy.Maintainers) {
-			return fmt.Errorf("identity %s is not a maintainer under proposal policy", identity.Actor)
+		if byRule {
+			if err := guard.authorize(identity, evaluation); err != nil {
+				return err
+			}
+		} else {
+			if !actorListed(identity.Actor, evaluation.Policy.Maintainers) {
+				return fmt.Errorf("identity %s is not a maintainer under proposal policy", identity.Actor)
+			}
 		}
 		proposal = currentProposal
 	}
@@ -338,6 +391,15 @@ func mergeProposal(args []string, guard *proposalMergeGuard) error {
 			return fmt.Errorf("code merged but resulting commit could not be resolved: %w", err)
 		}
 	}
+	if byRule {
+		stored, err := appendRuleMergeEvent(identity, proposal, evaluation, guard.Rule.Latest, mergeCommit)
+		if err != nil {
+			return fmt.Errorf("code merged at %s but recording failed: %w", shortOID(mergeCommit), err)
+		}
+		fmt.Printf("Merged proposal %s into %s at %s\n", shortID(proposal.ID), branch, shortOID(mergeCommit))
+		fmt.Printf("Recorded rule merge event %s under rule %s with %d evidence item(s)\n", shortID(stored.ID), safeText(stored.Event.Rule), len(stored.Event.Evidence))
+		return nil
+	}
 	stored, err := appendProposalMergeEvent(identity, proposal, evaluation, mergeCommit)
 	if err != nil {
 		return fmt.Errorf("code merged at %s but recording failed: %w", shortOID(mergeCommit), err)
@@ -345,6 +407,70 @@ func mergeProposal(args []string, guard *proposalMergeGuard) error {
 	fmt.Printf("Merged proposal %s into %s at %s\n", shortID(proposal.ID), branch, shortOID(mergeCommit))
 	fmt.Printf("Recorded merge event %s with %d acceptance decision(s)\n", shortID(stored.ID), len(stored.Event.Evidence))
 	return nil
+}
+
+// appendRuleMergeEvent records a rule merge fact for proposal at
+// resultCommit, citing acceptance's evidence under the signed base policy.
+// Before writing, it signs the fact in memory and judges it exactly as
+// every verifier would, through validateProposalMergeBinding and the union
+// admission of validateMergeEventWith over the current fact set plus the
+// new fact. Unless that admits it as a rule merge, nothing is written
+// (FR-024).
+func appendRuleMergeEvent(identity *Identity, proposal *StoredEvent, evaluation *ProposalEvaluation, acceptance *ruleAcceptance, resultCommit string) (*StoredEvent, error) {
+	if acceptance == nil || acceptance.Rule == nil {
+		return nil, fmt.Errorf("refusing to sign a rule merge fact that verifiers would reject: no rule acceptance")
+	}
+	event, err := nextEvent(identity, "proposal.merged")
+	if err != nil {
+		return nil, err
+	}
+	event.Subject = proposal.ID
+	event.Policy = evaluation.PolicyDigest
+	event.Head = proposal.Event.Head
+	event.Commit = resultCommit
+	event.Evidence = append([]string(nil), acceptance.Evidence...)
+	event.Rule = acceptance.Rule.Name
+
+	payload, signature, err := encodeAndSign(event, identity)
+	if err != nil {
+		return nil, err
+	}
+	// Judge the fact as verifiers read it back, so a rule claim that would
+	// not parse canonically is caught here too.
+	verified, id, err := verifyEvent(payload, signature)
+	if err != nil {
+		return nil, fmt.Errorf("refusing to sign a rule merge fact that verifiers would reject: %w", err)
+	}
+	fact := StoredEvent{ID: id, Event: verified, Payload: payload, Signature: signature}
+	events, err := collectEvents()
+	if err != nil {
+		return nil, err
+	}
+	byID := make(map[string]StoredEvent, len(events)+1)
+	for _, stored := range events {
+		byID[stored.ID] = stored
+	}
+	byID[fact.ID] = fact
+	if err := validateProposalMergeBinding(fact, *proposal); err != nil {
+		return nil, fmt.Errorf("refusing to sign a rule merge fact that verifiers would reject: %w", err)
+	}
+	authority, err := validateMergeEventWith(newRuleValidationMemo(localRuleObjectAccess()), fact, *proposal, byID)
+	if err != nil {
+		return nil, fmt.Errorf("refusing to sign a rule merge fact that verifiers would reject: %w", err)
+	}
+	if authority != mergeByRule {
+		return nil, fmt.Errorf("refusing to sign a rule merge fact that verifiers would reject: verifiers would admit it as a %s merge, not a rule merge", authority)
+	}
+	stored, err := appendEvent(event, identity)
+	if err != nil {
+		return nil, err
+	}
+	// ed25519 signatures are deterministic, so the stored fact is the one
+	// judged above; anything else is an internal error.
+	if stored.ID != id {
+		return nil, fmt.Errorf("internal error: recorded rule merge fact %s differs from the self-checked fact %s", stored.ID, id)
+	}
+	return stored, nil
 }
 
 func appendProposalMergeEvent(identity *Identity, proposal *StoredEvent, evaluation *ProposalEvaluation, mergeCommit string) (*StoredEvent, error) {

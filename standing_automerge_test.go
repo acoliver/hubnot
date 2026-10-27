@@ -1,7 +1,9 @@
 package main
 
 import (
+	"fmt"
 	"regexp"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -349,5 +351,548 @@ func TestStandingAutomergeDocumentedPreview(t *testing.T) {
 			t.Fatalf("preview omits documented line %q in the documented order:\n%s", want, output)
 		}
 		next++
+	}
+}
+
+// Local execution under a standing rule (WP11). Unlike the preview, an
+// execution may change refs and append events, so these tests check exactly
+// which ones change.
+
+// standingAutomergeExecution is what one hn automerge --execute did in a
+// role's clone.
+type standingAutomergeExecution struct {
+	Output string
+	Status int
+	Before string // main before the command
+	After  string // main after the command
+	// Appended is every event the command appended to the role's chain.
+	Appended []operationalEvent
+}
+
+// standingAutomergeExecute checks out role's main at target with a clean
+// worktree and runs hn automerge candidate --rule rule --execute. It neither
+// syncs nor publishes, so it can follow a preview in the same clone with
+// nothing in between.
+func standingAutomergeExecute(h *standingHarness, role, target, candidate, rule string) standingAutomergeExecution {
+	h.t.Helper()
+	if main := h.git(role, "rev-parse", "main"); main != target {
+		h.Checkout(role, "main", target)
+	}
+	before := len(h.Events(role))
+	output, status := h.Run(role, "automerge", candidate, "--rule", rule, "--execute")
+	events := h.Events(role)
+	return standingAutomergeExecution{
+		Output: output, Status: status, Before: target,
+		After: h.git(role, "rev-parse", "main"), Appended: events[before:],
+	}
+}
+
+// requireStandingRuleMerge requires an execution that advanced main to a
+// native two-parent merge of the candidate with the head's tree and
+// appended exactly one rule merge fact under rule for it, citing exactly
+// evidence. It returns the fact.
+func requireStandingRuleMerge(h *standingHarness, role string, run standingAutomergeExecution, candidate operationalEvent, rule string, evidence ...string) standingHarnessFact {
+	h.t.Helper()
+	t := h.t
+	if run.Status != 0 {
+		t.Fatalf("%s's execution of %s exited %d:\n%s", role, candidate.ID, run.Status, run.Output)
+	}
+	parents := strings.Fields(h.git(role, "rev-list", "--parents", "-n", "1", run.After))
+	if len(parents) != 3 || parents[1] != run.Before || parents[2] != candidate.Head {
+		t.Fatalf("main advanced to %v, want a merge commit with parents %s and %s", parents, run.Before, candidate.Head)
+	}
+	if tree, want := h.git(role, "rev-parse", run.After+"^{tree}"), h.git(role, "rev-parse", candidate.Head+"^{tree}"); tree != want {
+		t.Fatalf("merge commit tree %s, want the head's tree %s", tree, want)
+	}
+	if len(run.Appended) != 1 || run.Appended[0].Kind != "proposal.merged" {
+		t.Fatalf("%s's chain gained %#v, want exactly one proposal.merged", role, run.Appended)
+	}
+	fact := h.fact(role, run.Appended[0].ID)
+	sorted := append([]string(nil), evidence...)
+	sort.Strings(sorted)
+	if fact.Rule != rule || fact.Subject != candidate.ID || fact.Head != candidate.Head || fact.Commit != run.After ||
+		fact.Policy != h.PolicyDigest(candidate.Base) || fact.Actor != h.Actor(role) ||
+		strings.Join(fact.Evidence, ",") != strings.Join(sorted, ",") {
+		t.Fatalf("merge fact %+v, want rule %q by %s at %s under the base policy citing %v", fact, rule, role, run.After, sorted)
+	}
+	assertOperationalContains(t, run.Output,
+		fmt.Sprintf("Merged proposal %s into main at %s\n", operationalShortID(candidate.ID), shortOID(run.After)),
+		fmt.Sprintf("Recorded rule merge event %s under rule %s with %d evidence item(s)\n", operationalShortID(fact.ID), rule, len(sorted)))
+	return fact
+}
+
+// standingAutomergeRuleStatusLine is the hn proposal status line of a rule
+// merge.
+func standingAutomergeRuleStatusLine(rule, signer, fact string) string {
+	return fmt.Sprintf("Merged by rule %s, signed by %s in fact %s\n", rule, signer, fact)
+}
+
+// US1-1, US1-2 and US1-3 on the User Story 1 candidate, with the pre-sign
+// self-check proven in-process before E executes.
+func TestStandingAutomergeExecuteUserStory1(t *testing.T) {
+	h := newStandingHarness(t, standingHarnessDefaultPolicy())
+	candidate := h.ReadyCandidate(standingAutomergeFiles)
+	c := h.Case(candidate.ID)
+
+	// US1-3: the same evidence under a rule without acceptance, executed
+	// by M, still needs the maintainer acceptance; nothing changes.
+	variant := h.PolicyCommit(h.Base(), standingAutomergeMaintainersVariant())
+	maintainers := h.readyCase("A", variant, standingAutomergeFiles)
+	h.hn("M", "sync", "origin")
+	h.Checkout("M", "main", variant)
+	refs, remote := h.Refs("M"), h.RemoteRefs()
+	chains := len(h.AllEvents("M"))
+	refused := standingAutomergeExecute(h, "M", variant, maintainers.Candidate.ID, "ordinary")
+	if refused.Status == 0 || !strings.Contains(refused.Output, "automerge blocked:") || !strings.Contains(refused.Output, standingAutomergeNotAccepted) {
+		t.Fatalf("maintainers-mode execution exited %d, want automerge blocked: %s:\n%s", refused.Status, standingAutomergeNotAccepted, refused.Output)
+	}
+	if after := h.Refs("M"); after != refs {
+		t.Fatalf("refused execution changed M's refs:\nbefore:\n%s\nafter:\n%s", refs, after)
+	}
+	if after := h.RemoteRefs(); after != remote {
+		t.Fatalf("refused execution changed the remote:\nbefore:\n%s\nafter:\n%s", remote, after)
+	}
+	if after := len(h.AllEvents("M")); after != chains {
+		t.Fatalf("refused execution changed the chains in M's clone: %d events, want %d", after, chains)
+	}
+
+	// The pre-sign self-check: an acceptance whose evidence omits the
+	// approval is refused before anything is written.
+	h.hn("E", "sync", "origin")
+	ref := operationalActorRef(h.Actor("E"))
+	head := h.git("E", "for-each-ref", "--format=%(objectname)", ref)
+	h.inClone("E", func(identity *Identity) {
+		events, err := collectEvents()
+		if err != nil {
+			t.Fatal(err)
+		}
+		proposal, err := resolveFullEvent(events, candidate.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		evaluation, err := evaluateProposal(proposal, events)
+		if err != nil {
+			t.Fatal(err)
+		}
+		changed, err := changedPathsAt("", proposal.Event.Base, proposal.Event.Head)
+		if err != nil {
+			t.Fatal(err)
+		}
+		acceptance := evaluateRuleAcceptance(automergeRuleInputs(proposal, evaluation, "ordinary", changed, events))
+		if !acceptance.Satisfied() {
+			t.Fatalf("rule ordinary is not satisfied for %s: %+v", candidate.ID, acceptance.Unmet)
+		}
+		omitted := *acceptance
+		omitted.Evidence = []string{c.Result.ID}
+		stored, err := appendRuleMergeEvent(identity, proposal, evaluation, &omitted, candidate.Head)
+		if err == nil || !strings.HasPrefix(err.Error(), "refusing to sign a rule merge fact that verifiers would reject: ") ||
+			!strings.Contains(err.Error(), ruleCheckApprovals) {
+			t.Fatalf("appendRuleMergeEvent without the approval returned %+v, %v; want the approval-threshold refusal", stored, err)
+		}
+	})
+	if after := h.git("E", "for-each-ref", "--format=%(objectname)", ref); after != head {
+		t.Fatalf("refused self-check moved E's actor ref from %q to %q", head, after)
+	}
+
+	// US1-1: E executes with no maintainer decision.
+	preview, status := standingAutomergePreview(h, "E", h.Base(), candidate.ID, "ordinary")
+	requireStandingAutomergeEligible(t, preview, status)
+	run := standingAutomergeExecute(h, "E", h.Base(), candidate.ID, "ordinary")
+	fact := requireStandingRuleMerge(h, "E", run, candidate, "ordinary", c.Approval.ID, c.Result.ID)
+
+	// US1-2: E publishes; a verifier without an identity reports the rule
+	// merge and its signer.
+	h.git("E", "push", "-q", "origin", "main")
+	h.Publish("E")
+	if main := runOperationalGit(t, h.Remote(), "rev-parse", "main"); main != run.After {
+		t.Fatalf("remote main is %s, want %s", main, run.After)
+	}
+	verifier := h.Verifier()
+	h.hnIn(verifier, "sync", "origin")
+	status2, code := h.RunIn(verifier, "proposal", "status", candidate.ID)
+	if code != 0 {
+		t.Fatalf("verifier status exited %d:\n%s", code, status2)
+	}
+	assertOperationalContains(t, status2, "Status:   merged\n"+standingAutomergeRuleStatusLine("ordinary", h.Actor("E"), fact.ID))
+	if strings.Contains(status2, "Merged by maintainers") {
+		t.Fatalf("verifier reports a maintainer merge:\n%s", status2)
+	}
+	h.hn("E", "sync", "origin")
+	for _, event := range h.AllEvents("E") {
+		if event.Kind == "proposal.decision" && event.Subject == candidate.ID {
+			t.Fatalf("decision %s exists for %s", event.ID, candidate.ID)
+		}
+	}
+}
+
+// SC-002: after a maintainer adopts the standing rule, a candidate goes from
+// open to merged with no event about it signed by M.
+func TestStandingAutomergeExecuteWithoutMaintainer(t *testing.T) {
+	h := newStandingHarness(t, standingHarnessSeedPolicy())
+	adopted := standingHarnessDefaultPolicy()
+	adopted.Requesters = []string{"A"}
+	h.AdoptThroughAmendment(adopted)
+	before := len(h.Events("M"))
+
+	c := h.openCase("A", h.Base(), standingAutomergeFiles)
+	c.Approval = h.Approve("R", c.Candidate.ID)
+	c.Request = h.RequestCI("A", c.Candidate.ID)
+	c.Result = h.RunCI(c.Request.ID)
+	preview, status := standingAutomergePreview(h, "E", h.Base(), c.Candidate.ID, "ordinary")
+	requireStandingAutomergeEligible(t, preview, status)
+	run := standingAutomergeExecute(h, "E", h.Base(), c.Candidate.ID, "ordinary")
+	requireStandingRuleMerge(h, "E", run, c.Candidate, "ordinary", c.Approval.ID, c.Result.ID)
+
+	h.Publish("E")
+	h.hn("M", "sync", "origin")
+	if after := h.Events("M"); len(after) != before {
+		t.Fatalf("M signed %d event(s) after the adoption: %#v", len(after)-before, after[before:])
+	}
+	for _, role := range []string{"E", "M"} {
+		h.hn(role, "sync", "origin")
+		for _, event := range h.AllEvents(role) {
+			if event.Subject == c.Candidate.ID && event.Actor == h.Actor("M") {
+				t.Fatalf("%s's clone holds %s %s about %s signed by M", role, event.Kind, event.ID, c.Candidate.ID)
+			}
+		}
+	}
+}
+
+// FR-011: a maintainer listed in a standing rule's actors records a rule
+// merge fact. Two rules: a candidate that satisfies two standing rules is
+// recorded under the rule the executing actor names.
+func TestStandingAutomergeExecuteMaintainerAndSecondRule(t *testing.T) {
+	policy := standingHarnessDefaultPolicy()
+	policy.Rules[0].Actors = []string{"E", "M"}
+	policy.Rules = append(policy.Rules, standingHarnessRule{
+		Name: "docsonly", TargetBranch: "main", Acceptance: standingHarnessString(automergeAcceptanceRule),
+		Actors: []string{"E"}, Authors: []string{"A"}, Paths: []string{"docs/"},
+	})
+	h := newStandingHarness(t, policy)
+	byMaintainer := h.readyCase("A", h.Base(), map[string]string{"src/fr011.txt": "merged by a maintainer executing the rule\n"})
+	docs := h.readyCase("A", h.Base(), map[string]string{"docs/guide.md": "documentation change\n"})
+
+	// M executes; the fact is a rule merge, which status reports.
+	h.hn("M", "sync", "origin")
+	run := standingAutomergeExecute(h, "M", h.Base(), byMaintainer.Candidate.ID, "ordinary")
+	fact := requireStandingRuleMerge(h, "M", run, byMaintainer.Candidate, "ordinary", byMaintainer.Evidence()...)
+	assertOperationalContains(t, h.hn("M", "proposal", "status", byMaintainer.Candidate.ID),
+		"Status:   merged\n"+standingAutomergeRuleStatusLine("ordinary", h.Actor("M"), fact.ID))
+
+	// E previews both rules, then executes the second one.
+	for _, rule := range []string{"ordinary", "docsonly"} {
+		output, status := standingAutomergePreview(h, "E", h.Base(), docs.Candidate.ID, rule)
+		requireStandingAutomergeEligible(t, output, status)
+	}
+	run = standingAutomergeExecute(h, "E", h.Base(), docs.Candidate.ID, "docsonly")
+	fact = requireStandingRuleMerge(h, "E", run, docs.Candidate, "docsonly", docs.Evidence()...)
+	assertOperationalContains(t, h.hn("E", "proposal", "status", docs.Candidate.ID),
+		standingAutomergeRuleStatusLine("docsonly", h.Actor("E"), fact.ID))
+}
+
+// FR-021: status of acceptance merges is unchanged, and a maintainer merge
+// that carries a rule claim is reported with its claim unverified.
+func TestStandingAutomergeExecuteStatusOfMaintainerMerges(t *testing.T) {
+	h := newStandingHarness(t, standingHarnessDefaultPolicy())
+
+	// B2 and B3: M's acceptance merge facts with a rule claim.
+	fixtures := standingHarnessBoundaryFixtures(h)
+	for _, fixture := range fixtures {
+		if fixture.ID != "B2" && fixture.ID != "B3" {
+			continue
+		}
+		signed := fixture.Build()
+		if len(signed) != 1 {
+			t.Fatalf("%s signed %d facts, want one", fixture.ID, len(signed))
+		}
+		claim := map[string]string{"B2": "nosuch", "B3": "ordinary"}[fixture.ID]
+		status := h.hn("M", "proposal", "status", signed[0].Candidate)
+		assertOperationalContains(t, status, fmt.Sprintf("Status:   merged\nMerged by maintainers in fact %s; its rule annotation %q is not verified\n", signed[0].ID, claim))
+		if strings.Contains(status, "Merged by rule") {
+			t.Fatalf("%s is reported as a rule merge:\n%s", fixture.ID, status)
+		}
+	}
+
+	// An acceptance merge without a rule claim prints no new line.
+	c := h.readyCase("A", h.Base(), nil)
+	h.Accept("M", c.Candidate.ID)
+	h.Checkout("M", "main", h.Base())
+	h.hn("M", "merge", c.Candidate.ID)
+	status := h.hn("M", "proposal", "status", c.Candidate.ID)
+	assertOperationalContains(t, status, "Status:   merged\n")
+	if strings.Contains(status, "Merged by") {
+		t.Fatalf("acceptance merge status gained a merge line:\n%s", status)
+	}
+}
+
+// standingAutomergeAgreement is one fixture of the preview-to-execution
+// comparison (NFR-002): the candidate, the rule named, the declared tip of
+// E's main and a blocker the preview must list ("" for the eligible one).
+type standingAutomergeAgreement struct {
+	Name, Candidate, Rule, Tip, Want string
+}
+
+// T094: in E's clone, with nothing synced between the two, the keyless
+// preview is eligible exactly when execution merges, and a refused
+// execution names the preview's blockers in the preview's order.
+func TestStandingAutomergeAgreementPreviewExecute(t *testing.T) {
+	h := newStandingHarness(t, standingHarnessDefaultPolicy())
+	var table []string
+	compare := func(f standingAutomergeAgreement) {
+		t.Helper()
+		h.hn("E", "sync", "origin")
+		h.Checkout("E", "main", f.Tip)
+		if main := h.git("E", "rev-parse", "main"); main != f.Tip {
+			t.Fatalf("%s: E's main is %s, want the declared tip %s", f.Name, main, f.Tip)
+		}
+		refs := h.Refs("E")
+		preview, status := h.Run("E", "automerge", f.Candidate, "--rule", f.Rule)
+		if after := h.Refs("E"); after != refs {
+			t.Fatalf("%s: preview changed E's refs", f.Name)
+		}
+		blockers := standingAutomergeBlockers(preview)
+		eligible := status == 0 && len(blockers) == 0
+		if f.Want == "" {
+			requireStandingAutomergeEligible(t, preview, status)
+		} else {
+			requireStandingAutomergeBlockedBy(t, preview, status, f.Want)
+		}
+		run := standingAutomergeExecute(h, "E", f.Tip, f.Candidate, f.Rule)
+		outcome := "refused"
+		if eligible {
+			outcome = "merged"
+			if run.Status != 0 || run.After == f.Tip || len(run.Appended) != 1 || run.Appended[0].Kind != "proposal.merged" {
+				t.Fatalf("%s: preview eligible but execution exited %d, moved main %s to %s and appended %#v:\n%s",
+					f.Name, run.Status, f.Tip, run.After, run.Appended, run.Output)
+			}
+		} else {
+			want := "hn: automerge blocked: " + strings.Join(blockers, "; ") + "\n"
+			if run.Status == 0 || !strings.Contains(run.Output, want) ||
+				strings.Join(standingAutomergeBlockers(run.Output), "\n") != strings.Join(blockers, "\n") {
+				t.Fatalf("%s: preview blockers\n%s\nexecution exited %d with:\n%s", f.Name, strings.Join(blockers, "\n"), run.Status, run.Output)
+			}
+			if after := h.Refs("E"); after != refs || len(run.Appended) != 0 {
+				t.Fatalf("%s: refused execution changed E's refs or chain", f.Name)
+			}
+		}
+		previewOutcome := map[bool]string{true: "eligible", false: "blocked"}[eligible]
+		table = append(table, fmt.Sprintf("%-38s preview %-8s execution %-8s agree", f.Name, previewOutcome, outcome))
+	}
+
+	base := h.Base()
+	fixture := func(name string, c standingHarnessCase, rule, want string) standingAutomergeAgreement {
+		return standingAutomergeAgreement{Name: name, Candidate: c.Candidate.ID, Rule: rule, Tip: c.Base, Want: want}
+	}
+
+	c := h.readyCase("A", base, nil)
+	h.RequestChanges("R", c.Candidate.ID)
+	compare(fixture("change request by counted reviewer", c, "ordinary", standingAutomergeChangeRequest))
+
+	c = h.readyCase("A", base, nil)
+	h.RequestChanges("S", c.Candidate.ID)
+	compare(fixture("change request by uncounted reviewer", c, "ordinary", standingAutomergeChangeRequest))
+
+	c = h.readyCase("A", base, nil)
+	h.FailCI()
+	h.act("T", "run.result", true, "run", "execute", c.Request.ID, "--backend", "host", "--allow-unsafe-host-execution", "--rerun")
+	h.PassCI()
+	compare(fixture("trusted failure", c, "ordinary", `pipeline "test" has a current trusted failure`))
+
+	c = h.readyCase("A", base, nil)
+	h.Reject("M", c.Candidate.ID, "Rejected by the agreement test.")
+	compare(fixture("maintainer rejection", c, "ordinary", "proposal has a current maintainer rejection"))
+
+	c = h.openCase("A", base, nil)
+	c.Approval = h.Approve("S", c.Candidate.ID)
+	h.completeCase(&c)
+	compare(fixture("too few counted approvals", c, "ordinary", standingAutomergeThreshold0of1))
+
+	c = h.openCase("A", base, nil)
+	h.Approve("R", c.Candidate.ID)
+	compare(fixture("too few passing results", c, "ordinary", standingAutomergeNoPass))
+
+	compare(fixture("author outside the rule", h.readyCase("M", base, nil), "ordinary", "proposal author is not allowed by the rule"))
+	compare(fixture("path outside the rule", h.readyCase("A", base, map[string]string{"other/x": "outside the rule\n"}), "ordinary",
+		`changed path "other/x" is outside the rule allowlist`))
+
+	policy := string(runOperationalGitBytes(t, h.Remote(), "show", base+":"+serveGovernedPolicyPath))
+	compare(fixture("policy change", h.readyCase("A", base, map[string]string{
+		serveGovernedPolicyPath: policy + "\n", "src/agreement.txt": "allowlisted change\n",
+	}), "ordinary", "policy amendments require manual merge"))
+
+	protected := standingHarnessDefaultPolicy()
+	protected.ProtectedPaths = []string{"ci/"}
+	compare(fixture("protected-check change", h.readyCase("A", h.PolicyCommit(base, protected), map[string]string{
+		"src/agreement.txt": "allowlisted change\n", "ci/check.sh": "#!/bin/sh\nexit 0\n",
+	}), "ordinary", "protected check changes require manual merge"))
+
+	withMaintainersRule := standingHarnessDefaultPolicy()
+	withMaintainersRule.Rules = append(withMaintainersRule.Rules, standingHarnessRule{
+		Name: "maint", TargetBranch: "main", Acceptance: standingHarnessString(automergeAcceptanceMaintainers),
+		Actors: []string{"M"}, Authors: []string{"A"}, Paths: []string{"src/", "tests/", "docs/"},
+	})
+	compare(fixture("rule with acceptance maintainers", h.readyCase("A", h.PolicyCommit(base, withMaintainersRule), nil), "maint",
+		standingAutomergeNotAccepted))
+
+	compare(fixture("rule that does not exist", h.readyCase("A", base, nil), "nosuch",
+		`automerge rule "nosuch" does not exist in the signed base policy`))
+
+	// The target policy differs: M lands H1, which keeps rule ordinary, and
+	// A opens a candidate whose head builds on H1 but whose base is the
+	// older commit. E's main is at H1.
+	moved := standingHarnessDefaultPolicy()
+	moved.Rules[0].Paths = []string{"src/", "tests/", "docs/", "lib/"}
+	h.AdoptThroughAmendment(moved)
+	h1 := h.Base()
+	target := standingHarnessCase{Base: base, Author: "A"}
+	target.Candidate = h.Open("A", base, h.Commit("A", h1, map[string]string{"src/target.txt": "built on the amendment\n"}))
+	h.completeCase(&target)
+	targetFixture := fixture("target policy differs from base policy", target, "ordinary", "current target policy differs from the signed base policy")
+	targetFixture.Tip = h1
+	compare(targetFixture)
+
+	// Authorization is an execution-only check: X's preview is eligible
+	// and X's execution is refused.
+	satisfied := h.readyCase("A", h1, standingAutomergeFiles)
+	h.hn("X", "sync", "origin")
+	h.Checkout("X", "main", h1)
+	preview, status := h.Run("X", "automerge", satisfied.Candidate.ID, "--rule", "ordinary")
+	requireStandingAutomergeEligible(t, preview, status)
+	refsX := h.Refs("X")
+	refused := standingAutomergeExecute(h, "X", h1, satisfied.Candidate.ID, "ordinary")
+	wantRefusal := fmt.Sprintf("identity %s is not an executing actor for automerge rule %q", h.Actor("X"), "ordinary")
+	if refused.Status == 0 || !strings.Contains(refused.Output, wantRefusal) || h.Refs("X") != refsX || len(refused.Appended) != 0 {
+		t.Fatalf("X's execution exited %d, want %q with nothing changed:\n%s", refused.Status, wantRefusal, refused.Output)
+	}
+	table = append(table, fmt.Sprintf("%-38s preview %-8s execution %-8s authorization refusal (not an agreement case)", "satisfied, executed by X", "eligible", "refused"))
+
+	compare(fixture("satisfied", satisfied, "ordinary", ""))
+
+	t.Logf("preview and execution agreement, %d fixtures, 100%% agreement:\n%s", len(table)-1, strings.Join(table, "\n"))
+}
+
+// standingAutomergeDocumentedLine matches one documented output line, where
+// "..." stands for text that varies between runs.
+func standingAutomergeDocumentedLine(documented string) *regexp.Regexp {
+	parts := strings.Split(documented, "...")
+	for index, part := range parts {
+		parts[index] = regexp.QuoteMeta(part)
+	}
+	return regexp.MustCompile("^" + strings.Join(parts, ".*") + "$")
+}
+
+// The guide's standing-execute example replays the local User Story 1 flow
+// on the harness: every command runs in the clone of the role its comment
+// names, and every documented output line appears in that command's output
+// in the documented order.
+func TestStandingAutomergeDocumentedExecute(t *testing.T) {
+	const marker = "<!-- example: standing-execute -->"
+	blocks := standingPolicyGuideBlocks(t, marker)
+	if len(blocks) != 1 {
+		t.Fatalf("%s is followed by %d blocks, want one", marker, len(blocks))
+	}
+	policy := standingHarnessDefaultPolicy()
+	policy.Requesters = []string{"A"}
+	h := newStandingHarness(t, policy)
+	head := h.Commit("A", h.Base(), standingAutomergeFiles)
+	roles := map[string]string{}
+	for role, name := range standingHarnessRoleNames {
+		roles[name] = role
+	}
+	values := map[string]string{
+		"<base-commit>":    h.Base(),
+		"<head-commit>":    head,
+		"<executor-actor>": h.Actor("E"),
+	}
+	substitute := func(text string) string {
+		for placeholder, value := range values {
+			text = strings.ReplaceAll(text, placeholder, value)
+		}
+		return text
+	}
+	learn := func(role string, appended []operationalEvent) {
+		for _, event := range appended {
+			short := operationalShortID(event.ID)
+			switch event.Kind {
+			case "proposal.open":
+				values["<candidate-id>"], values["<candidate-short>"] = event.ID, short
+			case "review.submit":
+				values["<approval-short>"] = short
+			case "run.request":
+				values["<request-id>"], values["<request-short>"] = event.ID, short
+			case "run.result":
+				values["<result-short>"] = short
+			case "proposal.merged":
+				values["<fact-id>"], values["<fact-short>"] = event.ID, short
+				values["<merge-short>"] = shortOID(h.fact(role, event.ID).Commit)
+			}
+		}
+	}
+
+	type step struct {
+		role, command string
+		expected      []string
+	}
+	var steps []step
+	role := ""
+	for _, line := range strings.Split(strings.TrimSuffix(blocks[0], "\n"), "\n") {
+		switch {
+		case strings.HasPrefix(line, "# As ") && strings.HasSuffix(line, ":"):
+			name := strings.TrimSuffix(strings.TrimPrefix(line, "# As "), ":")
+			if roles[name] == "" {
+				t.Fatalf("documented flow names unknown identity %q", name)
+			}
+			role = roles[name]
+		case strings.HasPrefix(line, "$ hn "):
+			if role == "" {
+				t.Fatalf("documented command %q has no identity", line)
+			}
+			steps = append(steps, step{role: role, command: strings.TrimPrefix(line, "$ hn ")})
+		case len(steps) > 0:
+			steps[len(steps)-1].expected = append(steps[len(steps)-1].expected, line)
+		default:
+			t.Fatalf("documented flow starts with %q, not an identity and a command", line)
+		}
+	}
+	commands := []string{}
+	for _, s := range steps {
+		commands = append(commands, strings.Fields(s.command)[0])
+	}
+	if got := strings.Join(commands, " "); got != "proposal review run run automerge automerge proposal" {
+		t.Fatalf("documented flow runs %q, want open, review, run request, runner, preview, execute and status", got)
+	}
+
+	for _, s := range steps {
+		command := substitute(s.command)
+		if leftover := standingAutomergeLeftoverPlaceholder.FindString(command); leftover != "" {
+			t.Fatalf("documented command %q uses unknown placeholder %s", s.command, leftover)
+		}
+		h.hn(s.role, "sync", "origin")
+		before := len(h.Events(s.role))
+		output := h.hn(s.role, strings.Fields(command)...)
+		learn(s.role, h.Events(s.role)[before:])
+		h.Publish(s.role)
+		lines := strings.Split(output, "\n")
+		next := 0
+		for _, documented := range s.expected {
+			want := substitute(documented)
+			if leftover := standingAutomergeLeftoverPlaceholder.FindString(want); leftover != "" {
+				t.Fatalf("documented line %q uses unknown placeholder %s", documented, leftover)
+			}
+			pattern := standingAutomergeDocumentedLine(want)
+			for next < len(lines) && !pattern.MatchString(lines[next]) {
+				next++
+			}
+			if next == len(lines) {
+				t.Fatalf("hn %s omits documented line %q in the documented order:\n%s", command, want, output)
+			}
+			next++
+		}
+	}
+	if values["<fact-id>"] == "" {
+		t.Fatal("documented flow recorded no merge fact")
+	}
+	if fact := h.fact("E", values["<fact-id>"]); fact.Rule != "ordinary" || fact.Actor != h.Actor("E") {
+		t.Fatalf("documented flow recorded %+v, want a rule merge fact of rule ordinary by E", fact)
 	}
 }
