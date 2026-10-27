@@ -1410,6 +1410,63 @@ origin refs/heads/main already contains 9b2e4c6a8d0f for proposal 1c2d3e4f5a6b
 Recorded missing merge event 7d8e9f0a1b2c with 1 acceptance decision(s)
 ```
 
+#### Rerunning a rule advancement
+
+A rule advancement under acceptance mode `rule`, described in
+[Automerge rules](#automerge-rules), is also recovered by rerunning the same
+command, `hn automerge PROPOSAL --rule NAME --execute --remote REMOTE`. Each
+row ends with one rule merge fact for the candidate and one advancement of the
+branch:
+
+| Interrupted after | Server branch | Rule merge fact in the clone | What a rerun does |
+|----|----|----|----|
+| Step 3 | unchanged | absent | runs every step |
+| Step 6, before the server applied the update | unchanged | absent | runs every step |
+| Step 6, after the server applied the update | `H` | absent | takes the remote repair path and records the rule merge fact once |
+| Step 8 | `H` | present, unpublished | takes the publication-only path: publishes the fact and confirms the branch |
+| Step 9 | `H` | present, published | takes the publication-only path: confirms the branch |
+| A completed run | `H` | present, published | takes the publication-only path again and prints the same output; nothing changes |
+
+The remote repair path applies when the server branch is at the head or
+descends from it, the clone holds no merge fact for the candidate, and the
+checked-out branch is still at the candidate's base. The command then skips
+the check that the checked-out branch equals the hosted tip, evaluates the
+rule again on the imported facts, and records the missing fact with `commit`
+equal to the head:
+
+```text
+origin refs/heads/main already contains 9b2e4c6a8d0f for proposal 1c2d3e4f5a6b
+Recorded missing rule merge event 7d8e9f0a1b2c under rule ordinary with 2 evidence item(s)
+```
+
+The publication-only path is for the executing actor that signed the rule
+merge fact. It applies when your identity is listed in the `actors` of rule
+`NAME` in the candidate's base policy, your clone holds a rule merge fact for
+the candidate under `NAME` that your identity signed under that policy, and
+`REMOTE` is an `hn serve` remote. The command prints the preview, skips the
+`proposal is already recorded as merged` refusal and the check that the
+checked-out branch equals the hosted tip, publishes your actor chain as
+`hn sync` does, and requires the server branch to equal or descend from the
+fact's `commit`. It signs nothing, records no fact and sends no branch update:
+
+```text
+Publication-only rerun: rule merge event 7d8e9f0a1b2c is already recorded
+origin refs/heads/main contains 9b2e4c6a8d0f for proposal 1c2d3e4f5a6b
+Rule merge event 7d8e9f0a1b2c under rule ordinary is published on origin
+```
+
+When the server branch does not contain the fact's commit, the command still
+publishes the fact and then exits 1 with
+`rule merge event ID is recorded but REMOTE refs/heads/BRANCH does not contain COMMIT; a publication-only rerun never advances the branch`.
+
+Every other rerun of an already merged candidate is refused with
+`automerge blocked: proposal is already recorded as merged`, as before. That
+covers a rerun without `--remote`, a rerun by an identity that is not an
+executing actor of the rule or that signed no rule merge fact for the
+candidate, a candidate merged only by a maintainer's merge fact, and a rule
+whose acceptance mode is `maintainers`. The repair of an interrupted
+`hn merge` remains for maintainers only.
+
 ### A second maintainer runs the command
 
 A second maintainer who runs the command after the first one finished also

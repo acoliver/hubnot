@@ -69,6 +69,15 @@ func cmdAutomerge(args []string) error {
 		return err
 	}
 	printAutomergeInspection(inspection)
+	// A remote rerun after the rule merge fact was recorded takes the
+	// publication-only path (FR-020) before the already-merged blocker.
+	// Every other rerun keeps the refusals below unchanged.
+	if *execute && *remote != "" {
+		if fact := automergePublicationOnlyFact(inspection, *rule, *remote); fact != nil {
+			fmt.Printf("Publication-only rerun: rule merge event %s is already recorded\n", shortID(fact.ID))
+			return serveAdvancePublishOnly(*remote, "refs/heads/"+inspection.Rule.TargetBranch, fact, inspection.Proposal)
+		}
+	}
 	if err := inspection.eligible(); err != nil {
 		return err
 	}
@@ -185,6 +194,71 @@ func recordMissingRuleMerge(identity *Identity, first *automergeInspection, rule
 	}
 	fmt.Printf("Recorded missing rule merge event %s under rule %s with %d evidence item(s)\n", shortID(stored.ID), safeText(stored.Event.Rule), len(stored.Event.Evidence))
 	return nil
+}
+
+// automergePublicationOnlyFact decides whether hn automerge PROPOSAL --rule
+// NAME --execute --remote REMOTE is a publication-only rerun (FR-020,
+// decision 01M5VSEHFCZGQHQ14CKJ3MAMP7) and returns the identity's own rule
+// merge fact when it is. All of these must hold: the candidate is recorded
+// as merged under a standing rule NAME of its base policy, the identity
+// loads and is one of the rule's executing actors, the local store holds a
+// rule merge fact for the candidate under NAME signed by that identity, and
+// REMOTE is an hn serve remote. Any other case, including every failure to
+// tell, returns nil, so the caller's existing refusals apply unchanged; the
+// candidate is merged, so that refusal always includes the already-merged
+// blocker.
+func automergePublicationOnlyFact(inspection *automergeInspection, rule, remote string) *StoredEvent {
+	if remote == "" || inspection.Rule == nil || !inspection.Rule.Acceptance.Standing() || !inspection.Evaluation.Merged {
+		return nil
+	}
+	identity, err := loadIdentity()
+	if err != nil || !actorListed(identity.Actor, inspection.Rule.Actors) {
+		return nil
+	}
+	events, err := collectEvents()
+	if err != nil {
+		return nil
+	}
+	fact, err := automergeOwnRuleMergeFact(events, *inspection.Proposal, rule, identity.Actor, inspection.Evaluation.PolicyDigest)
+	if err != nil || fact == nil {
+		return nil
+	}
+	if !validReplicationRemote(remote) {
+		return nil
+	}
+	if identified, _ := serveRemoteIdentifies(remote); !identified {
+		return nil
+	}
+	return fact
+}
+
+// automergeOwnRuleMergeFact returns actor's rule merge fact for proposal
+// under rule and the base policy digest, the lowest event ID first, or nil
+// when there is none. Only facts that projection admitted through the rule
+// path (b) count: a fact that passes maintainerMergeCheck is an acceptance
+// merge fact even when it names a rule. Projection has already validated
+// every fact in events, so path (b) is not run again.
+func automergeOwnRuleMergeFact(events []StoredEvent, proposal StoredEvent, rule, actor, policyDigest string) (*StoredEvent, error) {
+	if rule == "" || actor == "" || policyDigest == "" {
+		return nil, fmt.Errorf("own rule merge fact lookup needs a rule, an actor and a policy digest")
+	}
+	byID := make(map[string]StoredEvent, len(events))
+	var facts []StoredEvent
+	for _, stored := range events {
+		byID[stored.ID] = stored
+		event := stored.Event
+		if event.Kind == "proposal.merged" && event.Subject == proposal.ID && event.Rule == rule && event.Actor == actor && event.Policy == policyDigest {
+			facts = append(facts, stored)
+		}
+	}
+	sort.Slice(facts, func(i, j int) bool { return facts[i].ID < facts[j].ID })
+	for index := range facts {
+		if maintainerMergeCheck(facts[index], proposal, byID) != nil {
+			fact := facts[index]
+			return &fact, nil
+		}
+	}
+	return nil, nil
 }
 
 // Avoid promisor lazy fetch and recovery-ledger writes in preview without
@@ -839,6 +913,11 @@ func automergeRemote(first *automergeInspection, rule, remote, actor string) err
 	if err != nil {
 		return err
 	}
+	if found && hosted != inspection.Current {
+		if repaired, ok := automergeRemoteRepairTip(inspection, remote, branchRef); ok {
+			return mergeRemoteBound(inspection.Proposal.ID, remote, branchRef, serveAdvanceBinding{ExpectedActor: actor, ExpectedTip: repaired, Rule: rule})
+		}
+	}
 	if !found || hosted != inspection.Current {
 		return fmt.Errorf("local %s is at %s but %s has %s; update the local branch to the hosted tip and rerun",
 			inspection.Rule.TargetBranch, shortOID(inspection.Current), remote, shortOID(hosted))
@@ -848,6 +927,32 @@ func automergeRemote(first *automergeInspection, rule, remote, actor string) err
 		binding.Rule = rule
 	}
 	return mergeRemoteBound(inspection.Proposal.ID, remote, branchRef, binding)
+}
+
+// automergeRemoteRepairTip recognizes the remote repair of FR-020 under a
+// standing rule: the server applied the advancement but the rule merge fact
+// was not recorded. It holds when the candidate has no merge fact, the
+// local target still equals the signed base, and the hosted tip equals or
+// descends from the head. It returns that hosted tip, which binds
+// mergeRemoteBound, whose step 5 then records the missing fact once with
+// commit equal to the head. Under acceptance mode maintainers it never
+// holds, so the local-equals-hosted refusal is unchanged.
+func automergeRemoteRepairTip(inspection *automergeInspection, remote, branchRef string) (string, bool) {
+	if !inspection.Rule.Acceptance.Standing() || inspection.Evaluation.Merged || inspection.Current != inspection.Proposal.Event.Base {
+		return "", false
+	}
+	// The hosted tip may descend from the head through commits this clone
+	// has not fetched; step 4 reads and fetches it the same way. A tip that
+	// cannot be read is not a repair state, and the caller refuses.
+	tip, err := serveAdvanceReadTip(remote, branchRef)
+	if err != nil {
+		return "", false
+	}
+	head := inspection.Proposal.Event.Head
+	if tip != head && !serveAdvanceIsAncestor(head, tip) {
+		return "", false
+	}
+	return tip, true
 }
 
 // automergeUnselectedActors lists the policy's maintainers, trusted

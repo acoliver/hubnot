@@ -21,6 +21,8 @@ import (
 // standing rule runs the same steps with a rule binding: the rule replaces
 // the acceptance and maintainer checks of step 1, step 6 adds hn-rule, and
 // step 8 records a rule merge fact signed by the executing actor (C-008).
+// A rerun after that fact was recorded runs serveAdvancePublishOnly, which
+// only publishes and confirms (FR-020).
 
 const (
 	serveAdvanceUsage         = "usage: hn merge PROPOSAL [--remote REMOTE [--branch BRANCH]]"
@@ -507,6 +509,39 @@ func serveAdvanceRecordRule(identity *Identity, proposal *StoredEvent, evaluatio
 		return nil, fmt.Errorf("identity %s is no longer an executing actor for automerge rule %q", identity.Actor, name)
 	}
 	return appendRuleMergeEvent(identity, proposal, evaluation, latest, head)
+}
+
+// serveAdvancePublishOnly is the publication-only rerun of a remote rule
+// merge (FR-020, decision 01M5VSEHFCZGQHQ14CKJ3MAMP7): the executing
+// actor's rule merge fact for proposal is already recorded, so it publishes
+// or republishes the local facts as step 9 does and confirms that the
+// hosted branchRef contains the fact's commit.
+//
+// It never calls appendEvent or appendRuleMergeEvent and never pushes a
+// branch: the fact and the advancement it records already exist, and a
+// second fact or a second advancement for one candidate is what FR-020
+// forbids. When the hosted branch does not contain the commit, it reports
+// that and leaves the branch alone.
+func serveAdvancePublishOnly(remote, branchRef string, fact *StoredEvent, proposal *StoredEvent) error {
+	if err := publishLocalFacts(remote, nil); err != nil {
+		fmt.Fprintf(os.Stderr, "hn: %v\n", err)
+		return fmt.Errorf("merge fact recorded locally; run hn sync %s to publish it", remote)
+	}
+	if err := serveAdvanceInterrupt("republish"); err != nil {
+		return err
+	}
+	commit := fact.Event.Commit
+	tip, err := serveAdvanceReadTip(remote, branchRef)
+	if err != nil {
+		return err
+	}
+	if tip != commit && !serveAdvanceIsAncestor(commit, tip) {
+		return fmt.Errorf("rule merge event %s is recorded but %s %s does not contain %s; a publication-only rerun never advances the branch",
+			shortID(fact.ID), remote, branchRef, shortOID(commit))
+	}
+	fmt.Printf("%s %s contains %s for proposal %s\n", remote, branchRef, shortOID(commit), shortID(proposal.ID))
+	fmt.Printf("Rule merge event %s under rule %s is published on %s\n", shortID(fact.ID), safeText(fact.Event.Rule), remote)
+	return nil
 }
 
 // serveAdvanceGit runs git with the inherited environment and returns its

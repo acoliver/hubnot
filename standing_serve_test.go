@@ -1671,3 +1671,405 @@ func TestStandingServeAdvanceValidateRuleBinding(t *testing.T) {
 		}
 	})
 }
+
+// standingServeRecoveryCounts counts the rule merge facts for candidate on
+// the actor chains of every clone of the fixture, each read in its owner's
+// clone, and on the hosted actor chains.
+func standingServeRecoveryCounts(g *serveGovernedFixture, candidate string) (local, hosted int) {
+	g.t.Helper()
+	for who := range g.work {
+		for _, fact := range standingServeChainFacts(g, who, candidate) {
+			if fact.Rule != "" {
+				local++
+			}
+		}
+	}
+	seen := map[string]bool{}
+	for _, ref := range strings.Fields(serveHarnessGit(g.t, g.hosted, "for-each-ref", "--format=%(refname)", serveActorRefPrefix)) {
+		for _, commit := range strings.Fields(serveHarnessGit(g.t, g.hosted, "rev-list", ref)) {
+			fact := standingHarnessReadFact(g.t, runOperationalGitBytes(g.t, g.hosted, "show", commit+":event.json"))
+			if fact.Kind == "proposal.merged" && fact.Subject == candidate && fact.Rule != "" && !seen[fact.ID] {
+				seen[fact.ID] = true
+				hosted++
+			}
+		}
+	}
+	return local, hosted
+}
+
+// standingServeRecoveryRequire checks the T099 step 8 values for candidate:
+// the rule merge facts on the clones' chains and on the hosted chains, and
+// hosted main. It logs them for review.
+func standingServeRecoveryRequire(t *testing.T, g *serveGovernedFixture, label, candidate string, wantLocal, wantHosted int, wantMain string) {
+	t.Helper()
+	local, hosted := standingServeRecoveryCounts(g, candidate)
+	tip := g.ServerTip("main")
+	t.Logf("%s: %d local and %d hosted rule merge fact(s) for %s; hosted main %s", label, local, hosted, shortID(candidate), shortOID(tip))
+	if local != wantLocal || hosted != wantHosted || tip != wantMain {
+		t.Fatalf("%s: %d local and %d hosted rule merge fact(s), hosted main %s; want %d, %d and %s",
+			label, local, hosted, tip, wantLocal, wantHosted, wantMain)
+	}
+}
+
+// standingServeLocalChain is the head of who's own actor chain in who's
+// clone, empty before who signs anything.
+func standingServeLocalChain(g *serveGovernedFixture, who string) string {
+	g.t.Helper()
+	return g.git(who, "for-each-ref", "--format=%(objectname)", g.actorRef(who))
+}
+
+// standingServeRecoveryMainPushes lists the push log entries after the
+// first logged that update hosted main, which only an advancement does.
+func standingServeRecoveryMainPushes(g *serveGovernedFixture, logged int) []servePushLogEntry {
+	g.t.Helper()
+	var advanced []servePushLogEntry
+	for _, entry := range g.pushLog()[logged:] {
+		for _, update := range entry.Updates {
+			if update.Ref == serveGovernedMain {
+				advanced = append(advanced, entry)
+				break
+			}
+		}
+	}
+	return advanced
+}
+
+// standingServePublicationOnlyLines is the output a publication-only rerun
+// under rule ordinary ends with.
+func standingServePublicationOnlyLines(head, candidate, fact string) string {
+	return fmt.Sprintf("Publication-only rerun: rule merge event %s is already recorded\norigin refs/heads/main contains %s for proposal %s\nRule merge event %s under rule ordinary is published on origin\n",
+		shortID(fact), shortOID(head), shortID(candidate), shortID(fact))
+}
+
+// standingServeRepairLines is the output a remote repair under rule
+// ordinary ends with.
+func standingServeRepairLines(head, candidate, fact string) string {
+	return fmt.Sprintf("origin refs/heads/main already contains %s for proposal %s\nRecorded missing rule merge event %s under rule ordinary with 2 evidence item(s)\n",
+		shortOID(head), shortID(candidate), shortID(fact))
+}
+
+// FR-020 remote, US4-7 and US4-8: each interruption of E's rule advancement
+// is recovered by rerunning the same command without the interruption.
+// Every row ends with one rule merge fact, signed by E with commit equal to
+// the head, published, and one advancement of hosted main to the head. A
+// push the server never applied leaves the state of the publish row, so
+// that row covers it without a separate seam.
+func TestStandingServeRecoveryInterruptions(t *testing.T) {
+	for _, tc := range []struct {
+		step string
+		// State after the interruption.
+		advanced            bool
+		recorded, published int
+		// What the rerun is.
+		rerun string
+	}{
+		{step: "publish", rerun: "full run"},
+		{step: "push", advanced: true, rerun: "remote repair"},
+		{step: "record", advanced: true, recorded: 1, rerun: "publication-only"},
+		{step: "republish", advanced: true, recorded: 1, published: 1, rerun: "publication-only"},
+	} {
+		t.Run(tc.step, func(t *testing.T) {
+			// Arrange
+			g, p := standingServeAdvanceArrange(t)
+			candidate, head := p.Candidate.ID, p.Candidate.Head
+			standingServeInterrupted(g, "E", candidate, tc.step)
+			interrupted := g.Base
+			if tc.advanced {
+				interrupted = head
+			}
+			standingServeRecoveryRequire(t, g, "after the interruption after "+tc.step, candidate, tc.recorded, tc.published, interrupted)
+			refs, chain, logged := g.ServerRefs(), standingServeLocalChain(g, "E"), len(g.pushLog())
+
+			// Act
+			output, status := standingServeAutomerge(g, "E", candidate, "ordinary")
+
+			// Assert
+			if status != 0 {
+				t.Fatalf("the rerun after %s exited %d:\n%s", tc.step, status, output)
+			}
+			fact := standingServeRuleFact(t, g, "E", p)
+			var want string
+			switch tc.rerun {
+			case "full run":
+				want = standingServeAdvanceLines(head, candidate, fact.ID, 2)
+			case "remote repair":
+				want = standingServeRepairLines(head, candidate, fact.ID)
+			default:
+				want = standingServePublicationOnlyLines(head, candidate, fact.ID)
+			}
+			if !strings.HasSuffix(output, want) {
+				t.Fatalf("%s rerun output:\n%s\nwant it to end with:\n%s", tc.rerun, output, want)
+			}
+			if !g.Published("E") {
+				t.Fatalf("after the %s rerun the server does not hold E's chain", tc.rerun)
+			}
+			standingServeRecoveryRequire(t, g, "after the "+tc.rerun+" rerun", candidate, 1, 1, head)
+			if tc.advanced {
+				if advanced := standingServeRecoveryMainPushes(g, logged); len(advanced) != 0 {
+					t.Fatalf("the %s rerun advanced hosted main again: %+v", tc.rerun, advanced)
+				}
+			}
+			if tc.recorded == 1 {
+				if after := standingServeLocalChain(g, "E"); after != chain {
+					t.Fatalf("the %s rerun changed E's chain from %s to %s", tc.rerun, chain, after)
+				}
+			}
+			if tc.published == 1 {
+				if after := g.ServerRefs(); after != refs {
+					t.Fatalf("the %s rerun after publication changed hosted refs:\nbefore\n%s\nafter\n%s", tc.rerun, refs, after)
+				}
+			}
+		})
+	}
+}
+
+// FR-020: a rerun after a completed rule advancement takes the
+// publication-only path and changes nothing; a third run prints the same
+// output again.
+func TestStandingServeRecoveryCompletedRun(t *testing.T) {
+	// Arrange
+	g, p := standingServeAdvanceArrange(t)
+	candidate, head := p.Candidate.ID, p.Candidate.Head
+	if output, status := standingServeAutomerge(g, "E", candidate, "ordinary"); status != 0 {
+		t.Fatalf("the first run exited %d:\n%s", status, output)
+	}
+	fact := standingServeRuleFact(t, g, "E", p)
+	refs, chains, logged := g.ServerRefs(), standingServeChains(g, "E"), len(g.pushLog())
+
+	// Act
+	second, secondStatus := standingServeAutomerge(g, "E", candidate, "ordinary")
+	third, thirdStatus := standingServeAutomerge(g, "E", candidate, "ordinary")
+
+	// Assert
+	if secondStatus != 0 || thirdStatus != 0 {
+		t.Fatalf("the reruns exited %d and %d:\n%s\n%s", secondStatus, thirdStatus, second, third)
+	}
+	if want := standingServePublicationOnlyLines(head, candidate, fact.ID); !strings.HasSuffix(second, want) {
+		t.Fatalf("second run output:\n%s\nwant it to end with:\n%s", second, want)
+	}
+	if third != second {
+		t.Fatalf("third run output differs from the second:\n%s\nsecond\n%s", third, second)
+	}
+	if after := g.ServerRefs(); after != refs {
+		t.Fatalf("the reruns changed hosted refs:\nbefore\n%s\nafter\n%s", refs, after)
+	}
+	if after := standingServeChains(g, "E"); after != chains {
+		t.Fatalf("the reruns changed E's chain:\nbefore\n%s\nafter\n%s", chains, after)
+	}
+	if advanced := standingServeRecoveryMainPushes(g, logged); len(advanced) != 0 {
+		t.Fatalf("the reruns advanced hosted main: %+v", advanced)
+	}
+	standingServeRuleFact(t, g, "E", p)
+	standingServeRecoveryRequire(t, g, "after the completed run and two reruns", candidate, 1, 1, head)
+}
+
+// standingServeAutomergeLocal runs hn automerge candidate --rule rule
+// --execute without --remote in who's clone.
+func standingServeAutomergeLocal(g *serveGovernedFixture, who, candidate, rule string) (string, int) {
+	g.t.Helper()
+	output, status, err := g.advanceExec(who, nil, g.h.Binary, "automerge", candidate, "--rule", rule, "--execute")
+	if err != nil {
+		g.t.Fatalf("hn automerge %s --rule %s --execute: %v\n%s", candidate, rule, err, output)
+	}
+	return output, status
+}
+
+// standingServeAlreadyMerged is the refusal of a rerun that may not take
+// the publication-only path.
+const standingServeAlreadyMerged = "hn: automerge blocked: proposal is already recorded as merged\n"
+
+// FR-019, FR-020 and NFR-003: only the executing actor that signed the rule
+// merge fact takes the publication-only path. Under a policy whose rule
+// ordinary lists E and M, after E's completed run: E without --remote, X
+// (not an executing actor) and M (an executing actor without a rule merge
+// fact of its own) are refused, and none of them changes a hosted ref or a
+// chain.
+func TestStandingServeRecoveryRefusals(t *testing.T) {
+	// Arrange
+	policy := standingServePolicyDocument()
+	for index := range policy.Rules {
+		if policy.Rules[index].Name == "ordinary" {
+			policy.Rules[index].Actors = []string{"E", "M"}
+		}
+	}
+	g := newStandingServeFixture(t, policy.JSON)
+	standingServeSelectAllTrusted(g, "E", "M", "X")
+	p := g.StandingReady(map[string]string{"src/refusals.txt": "merged by E under rule ordinary\n"})
+	candidate, head := p.Candidate.ID, p.Candidate.Head
+	for _, who := range []string{"E", "X"} {
+		standingServeImport(g, who)
+	}
+	if output, status := standingServeAutomerge(g, "E", candidate, "ordinary"); status != 0 {
+		t.Fatalf("E's run exited %d:\n%s", status, output)
+	}
+	standingServeImport(g, "M")
+	before, chains := g.ServerRefs(), standingServeChains(g, "E", "M", "X")
+	requireUnchanged := func(label string) {
+		t.Helper()
+		if after := g.ServerRefs(); after != before {
+			t.Fatalf("%s changed hosted refs:\nbefore\n%s\nafter\n%s", label, before, after)
+		}
+		if after := standingServeChains(g, "E", "M", "X"); after != chains {
+			t.Fatalf("%s changed a chain:\nbefore\n%s\nafter\n%s", label, chains, after)
+		}
+	}
+	refused := func(label, output string, status int, want string) {
+		t.Helper()
+		if status != 1 || !strings.HasSuffix(output, want) || strings.Contains(output, "Publication-only rerun") {
+			t.Fatalf("%s exited %d, want the refusal %q:\n%s", label, status, want, output)
+		}
+		requireUnchanged(label)
+	}
+
+	// Act and assert: without --remote the local refusal is unchanged.
+	output, status := standingServeAutomergeLocal(g, "E", candidate, "ordinary")
+	refused("E's rerun without --remote", output, status, standingServeAlreadyMerged)
+
+	// X, which has not imported E's fact, is not an executing actor.
+	output, status = standingServeAutomerge(g, "X", candidate, "ordinary")
+	refused("X's rerun", output, status, fmt.Sprintf("hn: identity %s is not an executing actor for automerge rule %q\n", g.actors["X"], "ordinary"))
+
+	// X, after importing E's fact, gets the already-merged refusal.
+	standingServeImport(g, "X")
+	before, chains = g.ServerRefs(), standingServeChains(g, "E", "M", "X")
+	output, status = standingServeAutomerge(g, "X", candidate, "ordinary")
+	refused("X's rerun after the import", output, status, standingServeAlreadyMerged)
+
+	// M executes rule ordinary but signed no rule merge fact for it.
+	output, status = standingServeAutomerge(g, "M", candidate, "ordinary")
+	refused("M's rerun", output, status, standingServeAlreadyMerged)
+
+	standingServeRecoveryRequire(t, g, "after the refused reruns", candidate, 1, 1, head)
+}
+
+// FR-020: a candidate merged only by an acceptance merge fact is refused
+// for E, an executing actor of rule ordinary, and for M under the
+// maintainers-mode rule maint, as before this mission.
+func TestStandingServeRecoveryAcceptanceMergeRefused(t *testing.T) {
+	// Arrange
+	g := newStandingServeFixture(t, standingServeDefaultPolicy)
+	standingServeSelectAllTrusted(g, "E", "M")
+	p := g.StandingReady(map[string]string{"src/accepted.txt": "merged by M with an acceptance\n"})
+	candidate, head := p.Candidate.ID, p.Candidate.Head
+	acceptance := g.Accept(candidate)
+	if output, status := g.Advance("M", candidate); status != 0 {
+		t.Fatalf("M's hn merge --remote exited %d:\n%s", status, output)
+	}
+	g.requireFastForwardFact("M", candidate, head, acceptance.ID)
+	standingServeImport(g, "E")
+	before, chains := g.ServerRefs(), standingServeChains(g, "E", "M")
+
+	for _, tc := range []struct{ who, rule string }{{"E", "ordinary"}, {"M", "maint"}} {
+		// Act
+		output, status := standingServeAutomerge(g, tc.who, candidate, tc.rule)
+
+		// Assert
+		if status != 1 || !strings.HasSuffix(output, standingServeAlreadyMerged) || strings.Contains(output, "Publication-only rerun") {
+			t.Fatalf("%s's rerun under %s exited %d, want %q:\n%s", tc.who, tc.rule, status, standingServeAlreadyMerged, output)
+		}
+		if after := g.ServerRefs(); after != before {
+			t.Fatalf("%s's rerun changed hosted refs:\nbefore\n%s\nafter\n%s", tc.who, before, after)
+		}
+		if after := standingServeChains(g, "E", "M"); after != chains {
+			t.Fatalf("%s's rerun changed a chain:\nbefore\n%s\nafter\n%s", tc.who, chains, after)
+		}
+	}
+	standingServeRecoveryRequire(t, g, "after the refused reruns", candidate, 0, 0, head)
+}
+
+// FR-020 and C-008: when E's valid rule merge fact names a commit hosted
+// main does not contain, the publication-only rerun publishes the fact,
+// then exits 1 without advancing main or signing anything. E signs the
+// fact with the WP06 builder for a ready candidate that was never
+// advanced, so its commit, the head, is not on main.
+func TestStandingServeRecoveryHostedBranchLacksCommit(t *testing.T) {
+	// Arrange
+	g, p := standingServeAdvanceArrange(t)
+	candidate := p.Candidate.ID
+	builder := &standingHarness{t: t, remote: g.hosted, work: g.work, actors: g.actors}
+	signed := builder.SignFactFor("E", standingHarnessCase{
+		Base: p.Candidate.Base, Candidate: p.Candidate, Approval: p.Approval, Request: p.Request, Result: p.Result,
+	}, nil)
+	before, chain, logged := g.ServerRefs(), standingServeLocalChain(g, "E"), len(g.pushLog())
+
+	// Act
+	output, status := standingServeAutomerge(g, "E", candidate, "ordinary")
+
+	// Assert
+	want := fmt.Sprintf("hn: rule merge event %s is recorded but origin refs/heads/main does not contain %s; a publication-only rerun never advances the branch\n",
+		shortID(signed.ID), shortOID(p.Candidate.Head))
+	if status != 1 || !strings.Contains(output, "Publication-only rerun: rule merge event "+shortID(signed.ID)+" is already recorded\n") || !strings.HasSuffix(output, want) {
+		t.Fatalf("the rerun exited %d, want the publication-only refusal %q:\n%s", status, want, output)
+	}
+	if after := standingServeLocalChain(g, "E"); after != chain {
+		t.Fatalf("the rerun changed E's chain from %s to %s", chain, after)
+	}
+	if !g.Published("E") {
+		t.Fatal("the rerun did not publish E's rule merge fact")
+	}
+	if after := g.ServerRefs(); after == before {
+		t.Fatal("the rerun published nothing")
+	}
+	if advanced := standingServeRecoveryMainPushes(g, logged); len(advanced) != 0 {
+		t.Fatalf("the rerun advanced hosted main: %+v", advanced)
+	}
+	standingServeRecoveryRequire(t, g, "after the refused publication-only rerun", candidate, 1, 1, g.Base)
+}
+
+// T096 in process: the publication-only selector finds only the caller's
+// own rule merge fact under the named rule and the base policy digest.
+func TestStandingServeRecoveryOwnRuleMergeFact(t *testing.T) {
+	// Arrange
+	policy := standingHarnessDefaultPolicy()
+	for index := range policy.Rules {
+		if policy.Rules[index].Name == "ordinary" {
+			policy.Rules[index].Actors = []string{"E", "X"}
+		}
+	}
+	h := newStandingHarness(t, policy)
+	candidate := h.ReadyCandidate(nil)
+	h.hn("E", "sync", "origin")
+	h.hn("X", "sync", "origin")
+	byE := h.SignFact("E", nil)
+	byX := h.SignFact("X", nil)
+	xRef := actorRef(h.Actor("X"))
+	h.git("E", "fetch", "-q", h.Work("X"), xRef+":"+xRef)
+	digest := h.PolicyDigest(h.Base())
+
+	h.inClone("E", func(*Identity) {
+		events, err := collectEvents()
+		if err != nil {
+			t.Fatal(err)
+		}
+		var proposal StoredEvent
+		for _, stored := range events {
+			if stored.ID == candidate.ID {
+				proposal = stored
+			}
+		}
+		for _, tc := range []struct {
+			name, rule, actor, digest, want string
+		}{
+			{"E's own fact", "ordinary", h.Actor("E"), digest, byE},
+			{"X's own fact", "ordinary", h.Actor("X"), digest, byX},
+			{"an actor without a fact", "ordinary", h.Actor("M"), digest, ""},
+			{"another rule", "other", h.Actor("E"), digest, ""},
+			{"another policy", "ordinary", h.Actor("E"), "sha256:" + strings.Repeat("0", 64), ""},
+		} {
+			// Act
+			fact, err := automergeOwnRuleMergeFact(events, proposal, tc.rule, tc.actor, tc.digest)
+
+			// Assert
+			got := ""
+			if fact != nil {
+				got = fact.ID
+			}
+			if err != nil || got != tc.want {
+				t.Fatalf("%s: automergeOwnRuleMergeFact = %q, %v; want %q", tc.name, got, err, tc.want)
+			}
+		}
+		if _, err := automergeOwnRuleMergeFact(events, proposal, "", h.Actor("E"), digest); err == nil {
+			t.Fatal("a lookup without a rule was not refused")
+		}
+	})
+}
