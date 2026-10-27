@@ -26,7 +26,7 @@ import (
 // it follows "import" and is exercised end to end in WP16.
 var standingFactRulePathSurfaces = map[string]bool{
 	"local":   true,
-	"import":  false,
+	"import":  true,
 	"shallow": false,
 }
 
@@ -548,6 +548,468 @@ func TestStandingFactBoundary(t *testing.T) {
 				runOperationalGit(t, h.Remote(), "update-ref", ref, remoteBefore)
 			}
 			standingFactSetChain(h, fact.Role, clean)
+		}
+	}
+}
+
+// Replication import tests (WP08, FR-012 to FR-014, FR-024, C-004, C-005).
+//
+// A defective fact reaches the remote with raw Git: the signer's own
+// hn sync projects first and would refuse it (WP07). The signer's actor
+// ref is pushed with git push, and reset afterwards with git update-ref and
+// a forced push, so each defect is the only one on the chain. The signer
+// never runs hn sync while a defect is installed.
+
+// standingFactRemoteChain is the value of role's actor ref on the remote,
+// empty when the remote has none.
+func standingFactRemoteChain(h *standingHarness, role string) string {
+	h.t.Helper()
+	return runOperationalGit(h.t, h.Remote(), "for-each-ref", "--format=%(objectname)", actorRef(h.Actor(role)))
+}
+
+// standingFactRawPublish makes the remote's actor ref of role equal role's
+// local chain with Git alone, deleting it when the local chain is empty.
+func standingFactRawPublish(h *standingHarness, role string) {
+	h.t.Helper()
+	ref := actorRef(h.Actor(role))
+	if standingFactChainHead(h, role) == "" {
+		if standingFactRemoteChain(h, role) != "" {
+			h.git(role, "push", "-q", "origin", "--delete", ref)
+		}
+		return
+	}
+	h.git(role, "push", "-q", "-f", "origin", ref+":"+ref)
+}
+
+// standingFactAcceptedChain is the value of role's accepted actor ref in a
+// verifier clone, empty when nothing of role's chain was promoted.
+func standingFactAcceptedChain(h *standingHarness, verifier, role string) string {
+	h.t.Helper()
+	return runOperationalGit(h.t, verifier, "for-each-ref", "--format=%(objectname)", acceptedActorRef("origin", h.Actor(role)))
+}
+
+// standingFactAssertImportedExcept requires the verifier to hold every
+// remote actor chain as accepted, except the refused roles' chains, of
+// which nothing is promoted (C-005).
+func standingFactAssertImportedExcept(t *testing.T, h *standingHarness, verifier, output string, refused ...string) {
+	t.Helper()
+	for _, role := range standingHarnessRoles {
+		remote, accepted := standingFactRemoteChain(h, role), standingFactAcceptedChain(h, verifier, role)
+		if standingFactListed(role, refused) {
+			if accepted != "" {
+				t.Fatalf("the verifier promoted %s's refused chain to %s:\n%s", role, accepted, output)
+			}
+			continue
+		}
+		if accepted != remote {
+			t.Fatalf("the verifier holds %s's chain at %q, want the remote's %q:\n%s", role, accepted, remote, output)
+		}
+	}
+}
+
+// standingFactListed reports whether role is one of roles.
+func standingFactListed(role string, roles []string) bool {
+	for _, listed := range roles {
+		if listed == role {
+			return true
+		}
+	}
+	return false
+}
+
+// standingFactAssertNotMerged requires hn proposal status in the verifier
+// to succeed without reporting candidate merged.
+func standingFactAssertNotMerged(t *testing.T, h *standingHarness, verifier, candidate string) {
+	t.Helper()
+	status, code := h.RunIn(verifier, "proposal", "status", candidate)
+	if code != 0 || strings.Contains(status, "Status:   merged") {
+		t.Fatalf("hn proposal status %s in the verifier exited %d, want a projection that is not merged:\n%s", candidate, code, status)
+	}
+}
+
+// standingFactImportRefusal is the import refusal a defect row must produce
+// for fact: the rule check, or today's maintainer-path refusal of a fact
+// without a canonical rule claim (F19, F20).
+func standingFactImportRefusal(h *standingHarness, defect standingHarnessDefect, c standingHarnessCase, fact string) string {
+	if defect.Expected == standingHarnessMaintainerPath {
+		return "merge " + fact + " is not authorized by exact base policy " + h.PolicyDigest(c.Candidate.Base)
+	}
+	return "rule merge " + fact + " fails " + defect.Expected
+}
+
+// standingFactImportDefect signs each shape of defect, publishes it with
+// raw Git, and requires a fresh verifier's hn sync to refuse the signer's
+// chain with the row's refusal while importing every other chain. The
+// signer's local and remote chains are clean again afterwards.
+func standingFactImportDefect(t *testing.T, h *standingHarness, defect standingHarnessDefect) {
+	t.Helper()
+	started := time.Now()
+	c := defect.Prepare()
+	clean := standingFactChainHead(h, defect.Signer)
+	if remote := standingFactRemoteChain(h, defect.Signer); remote != clean {
+		t.Fatalf("%s's chain is %q locally and %q on the remote before %s", defect.Signer, clean, remote, defect.ID)
+	}
+	signed := defect.Build(c)
+	if len(signed) == 0 {
+		t.Fatalf("%s signed nothing", defect.ID)
+	}
+	for index, install := range standingFactShapes(h, clean, c, signed) {
+		fact := install()
+		if fact.Candidate != c.Candidate.ID {
+			t.Fatalf("%s shape %d cites %s, want %s", defect.ID, index, fact.Candidate, c.Candidate.ID)
+		}
+		standingFactRawPublish(h, defect.Signer)
+		verifier := h.Verifier()
+		output, status := h.RunIn(verifier, "sync", "origin")
+		want := standingFactImportRefusal(h, defect, c, fact.ID)
+		if status == 0 || !strings.Contains(output, want) {
+			t.Fatalf("%s shape %d: hn sync exited %d, want a refusal containing %q:\n%s", defect.ID, index, status, want, output)
+		}
+		standingFactAssertImportedExcept(t, h, verifier, output, defect.Signer)
+		standingFactAssertNotMerged(t, h, verifier, c.Candidate.ID)
+		standingFactSetChain(h, defect.Signer, clean)
+		standingFactRawPublish(h, defect.Signer)
+	}
+	t.Logf("%s: %d shape(s) refused on import in %s", defect.ID, len(signed), time.Since(started).Round(time.Millisecond))
+}
+
+// T035: replication reads path (b) inputs from one complete store, and a
+// missing or split commit pair is a dependency that is never evaluated.
+func TestStandingFactImportObjectAccess(t *testing.T) {
+	root := t.TempDir()
+	commit := func(repository string, files map[string]string) string {
+		t.Helper()
+		standingHarnessWriteFiles(t, repository, files)
+		runOperationalGit(t, repository, "commit", "-q", "-m", "standing import object access")
+		return runOperationalGit(t, repository, "rev-parse", "HEAD")
+	}
+	quarantine, accepted := filepath.Join(root, "quarantine"), filepath.Join(root, "accepted")
+	initOperationalRepository(t, quarantine, "Quarantine")
+	initOperationalRepository(t, accepted, "Accepted")
+	actors := map[string]string{}
+	for index, role := range standingHarnessRoles {
+		actors[role] = strings.Repeat(string("abcdef9"[index]), 64)
+	}
+	policy := standingHarnessDefaultPolicy().JSON(actors)
+	acceptedBase := commit(accepted, map[string]string{serveGovernedPolicyPath: policy})
+	acceptedHead := commit(accepted, map[string]string{"src/accepted.txt": "accepted head\n"})
+	quarantineBase := commit(quarantine, map[string]string{serveGovernedPolicyPath: policy, "src/quarantine.txt": "quarantine base\n"})
+	quarantineGit, acceptedGit := filepath.Join(quarantine, ".git"), filepath.Join(accepted, ".git")
+
+	access := replicationRuleObjectAccess(quarantineGit, acceptedGit)
+	if changed, err := access.ChangedPaths(acceptedBase, acceptedHead); err != nil || strings.Join(changed, ",") != "src/accepted.txt" {
+		t.Fatalf("base and head only in the accepted store: %v %#v", err, changed)
+	}
+	if changed, err := access.ChangedPaths(quarantineBase, acceptedHead); err == nil {
+		t.Fatalf("base only in the quarantine and head only in the accepted store produced %#v", changed)
+	}
+	if _, digest, err := access.PolicyAt(acceptedBase); err != nil || digest != eventID([]byte(policy)) {
+		t.Fatalf("policy at the accepted base = %q, %v", digest, err)
+	}
+
+	own := newRuleValidationMemo(access)
+	if (replicationDependencyOptions{RuleMemo: own}).ruleMemo(quarantineGit, acceptedGit) != own {
+		t.Fatal("ruleMemo did not return the option's memo")
+	}
+	if fresh := (replicationDependencyOptions{}).ruleMemo(quarantineGit, acceptedGit); fresh == nil || fresh == own {
+		t.Fatal("ruleMemo without an option did not create a memo")
+	}
+
+	proposalID := "sha256:" + strings.Repeat("1", 64)
+	arm := func(base, head, rule string, memo *ruleValidationMemo, evidence ...StoredEvent) (StoredEvent, *replicationDependency, error) {
+		t.Helper()
+		proposal := StoredEvent{ID: proposalID, Event: Event{Kind: "proposal.open", Actor: actors["A"], Base: base, Head: head}}
+		merge := StoredEvent{ID: "sha256:" + strings.Repeat("2", 64), Event: Event{Kind: "proposal.merged", Actor: actors["E"],
+			Subject: proposal.ID, Head: head, Commit: head, Policy: "sha256:" + strings.Repeat("3", 64), Rule: rule}}
+		byID := map[string]StoredEvent{proposal.ID: proposal}
+		for _, item := range evidence {
+			merge.Event.Evidence = append(merge.Event.Evidence, item.ID)
+			byID[item.ID] = item
+		}
+		byID[merge.ID] = merge
+		empty := map[string]string{}
+		dependency, err := replicationEventDependencyWithOptions(quarantineGit, acceptedGit, merge, byID, empty, empty, empty,
+			replicationDependencyOptions{RuleMemo: memo})
+		return merge, dependency, err
+	}
+
+	// Both commits in the accepted store: path (b) reads its changed paths
+	// there and judges the fact.
+	memo := newRuleValidationMemo(access)
+	merge, dependency, err := arm(acceptedBase, acceptedHead, "ordinary", memo)
+	var factErr *ruleFactError
+	if dependency != nil || !errors.As(err, &factErr) || factErr.FactID != merge.ID || factErr.Check != ruleCheckPolicyDigest {
+		t.Fatalf("accepted-store fact = %#v, %v; want the policy-digest refusal", dependency, err)
+	}
+	if entry := memo.changed[[2]string{acceptedBase, acceptedHead}]; entry.err != nil || strings.Join(entry.paths, ",") != "src/accepted.txt" {
+		t.Fatalf("accepted-store changed paths = %#v, %v", entry.paths, entry.err)
+	}
+
+	missing := strings.Repeat("4", 40)
+	for _, row := range []struct {
+		name, base, head, missing, reason string
+	}{
+		{"split stores", quarantineBase, acceptedHead, acceptedHead, "rule merge base and head commits are not in one store"},
+		{"absent base", missing, acceptedHead, missing, "rule merge base commit is absent"},
+		{"absent head", acceptedBase, missing, missing, "rule merge head commit is absent"},
+		{"absent base and head", missing, strings.Repeat("5", 40), missing, "rule merge base commit is absent"},
+	} {
+		memo := newRuleValidationMemo(access)
+		merge, dependency, err := arm(row.base, row.head, "ordinary", memo)
+		if err != nil || dependency == nil {
+			t.Fatalf("%s: dependency %#v, error %v; want a missing dependency", row.name, dependency, err)
+		}
+		want := replicationDependency{EventID: merge.ID, EventKind: "proposal.merged", Missing: row.missing,
+			Recovery: "add exact proposal selection --proposal " + proposalID, Reason: row.reason}
+		if *dependency != want {
+			t.Fatalf("%s: dependency %#v, want %#v", row.name, *dependency, want)
+		}
+		if memo.policyCalls+memo.changedPathCalls+memo.pipelineDigestCalls != 0 {
+			t.Fatalf("%s: path (b) read objects for an incomplete commit pair", row.name)
+		}
+	}
+
+	// A cited run result whose request is absent waits for the request,
+	// with the evidence recovery, before any object is read.
+	request := "sha256:" + strings.Repeat("6", 64)
+	result := StoredEvent{ID: "sha256:" + strings.Repeat("7", 64), Event: Event{Kind: "run.result", Actor: actors["T"],
+		Subject: request, Outcome: "passed", Commit: acceptedHead}}
+	memo = newRuleValidationMemo(access)
+	merge, dependency, err = arm(acceptedBase, acceptedHead, "ordinary", memo, result)
+	wantRequest := replicationDependency{EventID: merge.ID, EventKind: "proposal.merged", Missing: request,
+		Recovery: "select the full actor history supplying " + request, Reason: "run request is absent"}
+	if err != nil || dependency == nil || *dependency != wantRequest {
+		t.Fatalf("absent run request = %#v, %v; want %#v", dependency, err, wantRequest)
+	}
+	if memo.policyCalls+memo.changedPathCalls+memo.pipelineDigestCalls != 0 {
+		t.Fatal("path (b) read objects for a fact whose run request is absent")
+	}
+
+	// Without a rule claim the arm returns today's error, whatever the
+	// commits, and never waits for them.
+	merge, dependency, err = arm(quarantineBase, missing, "", nil)
+	want := validateReplicationMergeAt(quarantineGit, acceptedGit, merge, StoredEvent{ID: proposalID,
+		Event: Event{Kind: "proposal.open", Actor: actors["A"], Base: quarantineBase, Head: missing}}, nil)
+	if dependency != nil || err == nil || want == nil || err.Error() != want.Error() {
+		t.Fatalf("fact without a rule claim = %#v, %v; want %v", dependency, err, want)
+	}
+}
+
+// standingFactAssertVerifierMerged requires the verifier to report candidate
+// merged and to list fact in hn log.
+func standingFactAssertVerifierMerged(t *testing.T, h *standingHarness, verifier, candidate, fact string) {
+	t.Helper()
+	status, code := h.RunIn(verifier, "proposal", "status", candidate)
+	if code != 0 || !strings.Contains(status, "Status:   merged") {
+		t.Fatalf("hn proposal status %s in the verifier exited %d, want merged:\n%s", candidate, code, status)
+	}
+	log, code := h.RunIn(verifier, "log")
+	if code != 0 || !strings.Contains(log, operationalShortID(fact)) {
+		t.Fatalf("hn log in the verifier exited %d without fact %s:\n%s", code, fact, log)
+	}
+}
+
+// T039: a valid rule merge fact, published with raw Git, imports into a
+// fresh clone with no identity, which then reports its candidate merged; a
+// second sync changes nothing. An acceptance merge fact imported in the
+// same sync keeps today's verdict.
+func TestStandingFactImportValidRuleMerge(t *testing.T) {
+	h := newStandingHarness(t, standingHarnessDefaultPolicy())
+	maintained := h.ReadyCandidate(nil)
+	h.Accept("M", maintained.ID)
+	h.Checkout("M", "main", h.Base())
+	h.hn("M", "merge", maintained.ID)
+	acceptance := h.latest("M")
+	if acceptance.Kind != "proposal.merged" || acceptance.Subject != maintained.ID {
+		t.Fatalf("hn merge appended %#v, want the acceptance merge fact of %s", acceptance, maintained.ID)
+	}
+	h.Publish("M")
+
+	candidate := h.ReadyCandidate(nil)
+	fact := h.SignFact("E", nil)
+	standingFactRawPublish(h, "E")
+
+	verifier := h.Verifier()
+	output := h.hnIn(verifier, "sync", "origin")
+	t.Logf("first sync:\n%s", output)
+	standingFactAssertImportedExcept(t, h, verifier, output)
+	if accepted := standingFactAcceptedChain(h, verifier, "E"); accepted != standingFactChainHead(h, "E") {
+		t.Fatalf("E's accepted chain is %q, want the fact's chain %s", accepted, standingFactChainHead(h, "E"))
+	}
+	standingFactAssertVerifierMerged(t, h, verifier, candidate.ID, fact)
+	standingFactAssertVerifierMerged(t, h, verifier, maintained.ID, acceptance.ID)
+
+	before := runOperationalGit(t, verifier, "for-each-ref", "--format=%(refname) %(objectname)")
+	again := h.hnIn(verifier, "sync", "origin")
+	if strings.Contains(again, ": failed (") {
+		t.Fatalf("second sync reported a failure:\n%s", again)
+	}
+	if after := runOperationalGit(t, verifier, "for-each-ref", "--format=%(refname) %(objectname)"); after != before {
+		t.Fatalf("second sync changed the verifier's refs:\nbefore:\n%s\nafter:\n%s\n%s", before, after, again)
+	}
+	standingFactAssertVerifierMerged(t, h, verifier, candidate.ID, fact)
+}
+
+// T038 steps 1 to 3 (NFR-001, C-005): F01 to F20 published with raw Git are
+// refused by a fresh verifier's hn sync, which names the fact and its
+// failed check (or today's maintainer-path refusal for F19 and F20),
+// promotes nothing from the signer's chain and imports every other chain.
+//
+// Cost decision: as in TestStandingFactLocalDefects, the fact-only rows
+// share one harness and every row that builds its own candidates gets a
+// fresh harness, because every sync verifies every event on the remote.
+func TestStandingFactImportDefects(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds about twenty candidates for the fixture matrix")
+	}
+	started := time.Now()
+	binary := buildOperationalBinary(t)
+	factOnly := map[string]bool{"F01": true, "F03": true, "F04": true, "F13": true, "F14": true, "F19": true, "F20": true}
+	// F21 and F22 are missing-dependency rows with their own tests below.
+	semantic := func(id string) bool { return id != "F21" && id != "F22" }
+	t.Run("fact-only rows", func(t *testing.T) {
+		h := newStandingHarnessWithBinary(t, binary, standingHarnessDefaultPolicy())
+		defects := standingHarnessDefects(h, h.ReadyCandidate(nil))
+		for _, id := range standingHarnessDefectIDs {
+			if factOnly[id] {
+				standingFactImportDefect(t, h, defects[id])
+			}
+		}
+	})
+	for _, id := range standingHarnessDefectIDs {
+		if factOnly[id] || !semantic(id) {
+			continue
+		}
+		t.Run(id, func(t *testing.T) {
+			h := newStandingHarnessWithBinary(t, binary, standingHarnessDefaultPolicy())
+			defect, exists := standingHarnessDefects(h, h.ReadyCandidate(nil))[id]
+			if !exists {
+				t.Fatalf("defect table lacks %s", id)
+			}
+			standingFactImportDefect(t, h, defect)
+		})
+	}
+	t.Logf("F01 to F20 on import took %s", time.Since(started).Round(time.Millisecond))
+}
+
+// T038 step 4 (US3-5, FR-013): F21's only approval is R's, signed and never
+// published. Import waits for it as a missing dependency, and admits the
+// fact once R publishes.
+func TestStandingFactImportWithheldApproval(t *testing.T) {
+	h := newStandingHarness(t, standingHarnessDefaultPolicy())
+	defect := standingHarnessDefects(h, h.ReadyCandidate(nil))["F21"]
+	c := defect.Prepare()
+	signed := defect.Build(c)
+	if len(signed) != 1 {
+		t.Fatalf("F21 signed %d facts, want 1", len(signed))
+	}
+	fact := signed[0]
+	if remote := standingFactRemoteChain(h, "R"); remote == standingFactChainHead(h, "R") {
+		t.Fatalf("R's approval %s is already on the remote", c.Approval.ID)
+	}
+	standingFactRawPublish(h, "E")
+
+	verifier := h.Verifier()
+	output, status := h.RunIn(verifier, "sync", "origin")
+	want := "event " + fact.ID + " (proposal.merged) missing dependency " + c.Approval.ID +
+		": evidence is absent; recovery: select the full actor history supplying " + c.Approval.ID
+	if status == 0 || !strings.Contains(output, want) {
+		t.Fatalf("hn sync exited %d, want a refusal containing %q:\n%s", status, want, output)
+	}
+	standingFactAssertImportedExcept(t, h, verifier, output, "E")
+	standingFactAssertNotMerged(t, h, verifier, c.Candidate.ID)
+
+	h.Publish("R")
+	output = h.hnIn(verifier, "sync", "origin")
+	if strings.Contains(output, ": failed (") {
+		t.Fatalf("sync after R published reported a failure:\n%s", output)
+	}
+	if accepted := standingFactAcceptedChain(h, verifier, "E"); accepted != fact.Commit {
+		t.Fatalf("E's accepted chain is %q, want the fact's commit %s:\n%s", accepted, fact.Commit, output)
+	}
+	standingFactAssertVerifierMerged(t, h, verifier, c.Candidate.ID, fact.ID)
+}
+
+// T038 step 5 (FR-014): F22's candidate head is absent from every store of
+// the verifier. Import reports the head as a missing dependency of the fact
+// with the exact proposal selection as recovery, and never judges an empty
+// change list.
+func TestStandingFactImportAbsentCommit(t *testing.T) {
+	h := newStandingHarness(t, standingHarnessDefaultPolicy())
+	defect := standingHarnessDefects(h, h.ReadyCandidate(nil))["F22"]
+	c := defect.Prepare()
+	signed := defect.Build(c)
+	if len(signed) != 1 {
+		t.Fatalf("F22 signed %d facts, want 1", len(signed))
+	}
+	fact := signed[0]
+	standingFactRawPublish(h, "E")
+
+	verifier := h.Verifier()
+	runOperationalGitFailure(t, verifier, "cat-file", "-e", c.Candidate.Head+"^{commit}")
+	output, status := h.RunIn(verifier, "sync", "origin")
+	want := "event " + fact.ID + " (proposal.merged) missing dependency " + c.Candidate.Head +
+		": rule merge head commit is absent; recovery: add exact proposal selection --proposal " + c.Candidate.ID
+	if status == 0 || !strings.Contains(output, want) {
+		t.Fatalf("hn sync exited %d, want a refusal containing %q:\n%s", status, want, output)
+	}
+	// A's chain opens the withdrawn candidate, so it waits for the same code,
+	// and every chain citing A's candidates waits for A's: the existing
+	// import closure, which E's own diagnostic does not depend on.
+	assertOperationalContains(t, output, "missing dependency "+c.Candidate.ID+": proposal code ref is absent")
+	if accepted := standingFactAcceptedChain(h, verifier, "E"); accepted != "" {
+		t.Fatalf("the verifier promoted E's chain to %s:\n%s", accepted, output)
+	}
+	if strings.Contains(output, "fails "+ruleCheckChangedPaths) {
+		t.Fatalf("an absent head was judged as a change list:\n%s", output)
+	}
+}
+
+// T038 step 7 (US3-7, C-004): legacy history published with raw Git imports
+// into a fresh verifier with its old verdicts: L01 and L02 are promoted, the
+// maintainer merges of L03 to L05 report merged, and S's chain with L06 is
+// refused as before. B2 and B3, maintainer merges with a rule claim, are
+// imported by TestStandingFactBoundary on the "import" surface.
+func TestStandingFactImportLegacyHistory(t *testing.T) {
+	h := newStandingHarness(t, standingHarnessLegacyPolicy())
+	type built struct {
+		fixture standingHarnessFixture
+		signed  []standingHarnessSigned
+	}
+	var all []built
+	for _, fixture := range standingHarnessLegacyFixtures(h) {
+		all = append(all, built{fixture: fixture, signed: fixture.Build()})
+	}
+	for _, role := range []string{"R", "M", "S"} {
+		standingFactRawPublish(h, role)
+	}
+
+	verifier := h.Verifier()
+	output, status := h.RunIn(verifier, "sync", "origin")
+	t.Logf("hn sync exited %d:\n%s", status, output)
+	if status == 0 {
+		t.Fatalf("hn sync accepted S's chain with L06:\n%s", output)
+	}
+	assertOperationalContains(t, output, "Replication actor "+h.Actor("S")+": failed (", standingHarnessUnknownRuleField)
+	standingFactAssertImportedExcept(t, h, verifier, output, "S")
+	log := h.hnIn(verifier, "log")
+	for _, item := range all {
+		switch item.fixture.Verdict {
+		case standingHarnessValid, standingHarnessValidMaintainer, standingHarnessAnnotatedMaintainer:
+			for _, signed := range item.signed {
+				assertOperationalContains(t, log, operationalShortID(signed.ID))
+				if bytes.Contains(signed.Payload, []byte(`"kind":"proposal.merged"`)) {
+					standingFactAssertVerifierMerged(t, h, verifier, signed.Candidate, signed.ID)
+				}
+			}
+		case standingHarnessRefusedAsBefore:
+			for _, signed := range item.signed {
+				if strings.Contains(log, operationalShortID(signed.ID)) {
+					t.Fatalf("refused %s event %s is in the verifier's log:\n%s", item.fixture.ID, signed.ID, log)
+				}
+			}
+		default:
+			t.Fatalf("%s has unexpected verdict %q", item.fixture.ID, item.fixture.Verdict)
 		}
 	}
 }
