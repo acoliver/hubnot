@@ -1,13 +1,3 @@
----
-affected_files: []
-cycle_number: 1
-mission_slug: standing-acceptance-01M5VD2K
-reproduction_command:
-reviewed_at: '2026-10-27T09:16:11Z'
-reviewer_agent: user
-wp_id: WP09
----
-
 # WP09 review: changes required
 
 Implementation reviewed: `3ac781ee014bd25026ef3583a8a5fd8b2f2435a4`.
