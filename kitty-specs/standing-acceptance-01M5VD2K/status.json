@@ -1,19 +1,19 @@
 {
-  "event_count": 93,
-  "last_event_id": "01M5YVS8FS37EXJ7CV8FC1KN72",
-  "materialized_at": "2026-10-27T14:21:16.665567+00:00",
+  "event_count": 94,
+  "last_event_id": "01M5YVSEG9BDQ0V6730QE4GKNP",
+  "materialized_at": "2026-10-27T14:21:22.826061+00:00",
   "mission_number": "",
   "mission_slug": "standing-acceptance-01M5VD2K",
   "mission_type": "",
   "summary": {
-    "approved": 11,
+    "approved": 12,
     "blocked": 0,
     "canceled": 0,
     "claimed": 0,
     "done": 0,
     "for_review": 0,
     "in_progress": 0,
-    "in_review": 1,
+    "in_review": 0,
     "planned": 7
   },
   "work_packages": {
@@ -279,14 +279,14 @@
       }
     },
     "WP09": {
-      "actor": "llxprt",
+      "actor": "user",
       "agent": "llxprt",
       "agent_profile": "__resolved_profile_absent__",
       "agent_profile_version": "__resolved_profile_version_absent__",
       "force_count": 1,
-      "lane": "in_review",
-      "last_event_id": "01M5YQXJJJKR6PPX76HWWXQNAB",
-      "last_transition_at": "2026-10-27T13:13:43.762523+00:00",
+      "lane": "approved",
+      "last_event_id": "01M5YVSEG9BDQ0V6730QE4GKNP",
+      "last_transition_at": "2026-10-27T14:21:22.826061+00:00",
       "model": "__resolved_model_absent__",
       "notes": [
         "WP09 implemented in commit 3ac781e (shallow.go, policy.go, standing_fact_test.go). T040: the proposal.merged arm of guardShallowEventClosure now classifies evidence of a fact with a rule claim as selected event facts (the no-claim branch is unchanged and keeps decision). New shallowRuleObjectGuard requires base commit, head, proposal code ref equal to the head, base policy blob and each base-policy pipeline definition at the head, with candidate-owned gaps and recovery guidance. It replaces WP07's interim shallow refusal in localRuleMergeCheck and is called only there, after path (a) failed. T041: TestStandingFactShallowValidRuleMerge (complete closure fixture). TestStandingFactShallowDefects runs F01-F20, each matched control accepted first; every row names its derivation check, with no shallow gap in the log. TestStandingFactShallowMissingDependencies: review and result as selected event fact, request as run request, base commit, head and code ref as proposal code ref, policy blob, pipeline definition, plus F21; F22 is in T042. TestStandingFactShallowMaintainerMergesUnchanged: decision kept, rule-claim maintainer merge verifies without its code ref. TestStandingFactShallowLegacyHistory: L01-L05 verify, L06 refused. Boundary table shallow=true and TestStandingFactBoundary passes. Every refusal asserts refs unchanged. T042: TestStandingFactShallowNoEmptyDiff covers local, shallow and import; the Activity Log records git 2.53.0 and 'fatal: bad object'. Mutation checks: removing the guard or the relabel fails the tests. Gate: gofmt clean; go vet and go build pass. Race suite passes (hubnot 2466s under load) and the perf test passes (45s). Both ran on a clean checkout of 3ac781e because WP14 had uncommitted edits in the shared lane worktree. The authorized kitty-specs cleanup is commit 9626b56.",
@@ -295,10 +295,10 @@
       "provider": "__resolved_provider_absent__",
       "review": null,
       "review_result": {
-        "feedback_path": "/home/acoliver/projects/appaday/gitium/hubnot/kitty-specs/standing-acceptance-01M5VD2K/tasks/WP09-shallow-verification/review-cycle-1.md",
-        "reference": "review-cycle://standing-acceptance-01M5VD2K/WP09-shallow-verification/review-cycle-1.md",
+        "feedback_path": "/home/acoliver/projects/appaday/gitium/hubnot/kitty-specs/standing-acceptance-01M5VD2K/tasks/WP09-shallow-verification/review-cycle-2.md",
+        "reference": "review-cycle://standing-acceptance-01M5VD2K/WP09-shallow-verification/review-cycle-2.md",
         "reviewer": "user",
-        "verdict": "changes_requested"
+        "verdict": "approved"
       },
       "role": "reviewer",
       "shell_pid": 1906103,
