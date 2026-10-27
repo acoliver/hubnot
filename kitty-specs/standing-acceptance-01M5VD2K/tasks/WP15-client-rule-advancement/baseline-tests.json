@@ -1,0 +1,19 @@
+{
+  "wp_id": "WP15",
+  "captured_at": "2026-10-27T20:13:14Z",
+  "base_branch": "feat/standing-acceptance",
+  "base_commit": "0e2d610b9ae49401785aa8f1f6e1e3c8f606b1c7",
+  "test_runner": "pytest",
+  "total": 1,
+  "passed": 0,
+  "failed": 1,
+  "skipped": 0,
+  "failures": [
+    {
+      "test": "<gate-coverage-junit>",
+      "error": "no JUnit XML artifact produced by the scoped run",
+      "file": "unknown"
+    }
+  ],
+  "source_identity": "GateCoverageScopeSource/junit_xml"
+}
