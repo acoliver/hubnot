@@ -567,9 +567,9 @@ func validateMergeEventWith(memo *ruleValidationMemo, merge, proposal StoredEven
 // returned as is, so its message reads the same on every surface; a missing
 // input such as an absent commit refuses the fact and never evaluates it.
 // In a shallow clone an absent input is a ShallowDependencyGap with
-// recovery guidance (FR-014).
+// replayable recovery (FR-014).
 func localRuleMergeCheck(memo *ruleValidationMemo, merge, proposal StoredEvent, byID map[string]StoredEvent) error {
-	if err := shallowRuleObjectGuard(shallowRuleOperation(), proposal, nil); err != nil {
+	if err := shallowRuleMergeGuard(merge, proposal); err != nil {
 		return err
 	}
 	err := validateRuleMergeFactWith(memo, merge, proposal, byID)

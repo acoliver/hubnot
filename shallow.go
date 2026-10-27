@@ -1412,13 +1412,25 @@ func guardProposalEvaluationDependencies(operation string, proposal *StoredEvent
 	return nil
 }
 
-// shallowRuleOperation names the operation a path (b) guard reports: the
-// active shallow verification scope, or plain projection outside one.
-func shallowRuleOperation() string {
+// shallowRuleMergeOperation is the verification scope of a path (b) gap
+// found by projection outside any command scope.
+const shallowRuleMergeOperation = "rule merge verification"
+
+// shallowRuleMergeGuard runs shallowRuleObjectGuard for the candidate of a
+// rule merge fact so that every gap it records is replayable. Inside a
+// shallow verification scope the gap keeps that scope, whose replay reruns
+// projection. Outside one, as when hn log projects after its closure check,
+// the gap records a rule merge scope naming the fact, so recovery imports
+// the candidate's supplier and then reverifies the complete projection
+// instead of probing only the missing object.
+func shallowRuleMergeGuard(merge, proposal StoredEvent) error {
 	if activeShallowVerificationScope != nil {
-		return activeShallowVerificationScope.Operation
+		return shallowRuleObjectGuard(activeShallowVerificationScope.Operation, proposal, nil)
 	}
-	return "rule merge verification"
+	scope := shallowVerificationScope{Operation: shallowRuleMergeOperation, Subject: merge.ID}
+	return withShallowVerificationScope(scope, func() error {
+		return shallowRuleObjectGuard(scope.Operation, proposal, nil)
+	})
 }
 
 // shallowRuleObjectGuard requires, in a shallow repository, every Git object
@@ -1955,6 +1967,23 @@ func verifyShallowOperation(scope shallowVerificationScope) error {
 		}
 		_, err = loadPolicyFile("proposed", scope.ProposedFile)
 		return err
+	case shallowRuleMergeOperation:
+		// Projection judges every merge fact: path (a), and where it fails
+		// path (b) with its object guard and derivation. The fact must be
+		// in the accepted projection, so its absence is never success.
+		if err := guardShallowEventClosure(scope.Operation); err != nil {
+			return err
+		}
+		events, err := collectEvents()
+		if err != nil {
+			return err
+		}
+		for _, stored := range events {
+			if stored.ID == scope.Subject {
+				return nil
+			}
+		}
+		return fmt.Errorf("rule merge %s is not in the accepted projection", scope.Subject)
 	default:
 		return fmt.Errorf("unsupported shallow verification scope %q", scope.Operation)
 	}

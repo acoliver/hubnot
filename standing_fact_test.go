@@ -1354,6 +1354,57 @@ func TestStandingFactShallowMissingDependencies(t *testing.T) {
 	standingFactAssertVerifierMerged(t, h, verifier, withheld.Candidate.ID, signed[0].ID)
 }
 
+// FR-014 recovery (WP09 review cycle 1): a gap that plain projection finds
+// in path (b) is recovered by the command its guidance names. The verifier
+// saves an exact proposal selection for the candidate, hn log refuses with
+// the candidate's proposal code ref gap, hn sync --recover-shallow imports
+// the candidate's code and reverifies the projection, and hn log then lists
+// the fact with the gap record cleared. The missing code ref row holds the
+// head commit, so recovery that probes only the head would clear the gap
+// without importing the ref.
+func TestStandingFactShallowRecovery(t *testing.T) {
+	h := newStandingHarness(t, standingHarnessDefaultPolicy())
+	c := h.Case(h.ReadyCandidate(nil).ID)
+	clean := standingFactChainHead(h, "E")
+	for _, row := range []struct {
+		name        string
+		arrangement standingFactShallowArrangement
+	}{
+		{"missing code ref", standingFactShallowArrangement{SkipProposals: []string{c.Candidate.ID}}},
+		{"missing head", standingFactShallowArrangement{SkipCommits: []string{c.Candidate.Head}}},
+	} {
+		fact := h.SignFactFor("E", c, nil)
+		standingFactRawPublish(h, "E")
+		verifier := standingFactShallowVerifierWith(h, row.arrangement)
+		h.hnIn(verifier, "replication", "select", "origin", "--proposal", c.Candidate.ID)
+		accepted := acceptedProposalRef("origin", c.Candidate.ID)
+		runOperationalGitFailure(t, verifier, "rev-parse", "--verify", "-q", accepted)
+
+		want := "operation=rule merge verification; kind=" + string(shallowProposalCodeRef) + "; missing=" + c.Candidate.Head +
+			"; owner=" + replicationProposal + ":" + c.Candidate.ID + "; remote=origin; ref=" + proposalRef(c.Candidate.ID) +
+			"; recovery=hn sync origin --recover-shallow"
+		output, status := h.RunIn(verifier, "log")
+		t.Logf("%s: hn log before recovery exited %d:\n%s", row.name, status, output)
+		if status == 0 || !strings.Contains(output, want) {
+			t.Fatalf("%s: hn log exited %d, want a refusal containing %q:\n%s", row.name, status, want, output)
+		}
+
+		output, status = h.RunIn(verifier, "sync", "origin", "--recover-shallow")
+		t.Logf("%s: hn sync origin --recover-shallow exited %d:\n%s", row.name, status, output)
+		if promoted := "Shallow recovery " + replicationProposal + " " + c.Candidate.ID + ": promoted"; status != 0 || !strings.Contains(output, promoted) {
+			t.Fatalf("%s: recovery exited %d, want %q:\n%s", row.name, status, promoted, output)
+		}
+		if head := runOperationalGit(t, verifier, "rev-parse", "--verify", accepted); head != c.Candidate.Head {
+			t.Fatalf("%s: recovery left %s at %q, want %s", row.name, accepted, head, c.Candidate.Head)
+		}
+		if _, err := os.Stat(filepath.Join(verifier, ".git", "hn", "shallow-gap.json")); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("%s: recovery kept the shallow gap record: %v", row.name, err)
+		}
+		standingFactAssertVerifierMerged(t, h, verifier, c.Candidate.ID, fact.ID)
+		standingFactResetChain(h, "E", clean)
+	}
+}
+
 // T041 step 5 (C-004): maintainer merges keep their shallow verdicts. An
 // acceptance merge fact whose decision is missing still reports a missing
 // decision, and with a rule claim the same gap is labelled a selected event

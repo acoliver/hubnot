@@ -308,10 +308,24 @@ validity. The checks run in this order, and the first failure is reported as
 `rule-exists`, `rule-acceptance`, `rule-signer`, `rule-author`, `manual-path`,
 `changed-paths`, `evidence-item`, `evidence-duplicate`, `approval-threshold`
 and `pipeline-threshold`. A base or head commit that is missing from a full
-clone refuses the fact; it is never judged as an empty change list. A shallow
-clone refuses every fact that needs the rule check with
-`rule merge <full fact ID> cannot be verified in a shallow clone by this build; verify it in a full clone`,
-and accepts maintainer merges exactly as before.
+clone refuses the fact; it is never judged as an empty change list.
+
+A shallow clone runs the rule check only when it holds every input the check
+reads. For a fact with a rule claim, each listed evidence ID is a required
+`selected event fact`, and each listed run result also requires the
+`run request` it answers. When the maintainer check fails, the rule check then
+requires the candidate's `base commit`, its head commit with a
+`proposal code ref` equal to the signed head, the base `policy blob`, and each
+base-policy `pipeline definition` that the head defines. A missing input fails
+the command with a shallow dependency gap naming the dependency kind, the full
+missing ID, the owning candidate and the recovery command, as described in
+[Replication v0](replication-v0.md#depth-limited-repositories).
+`hn sync REMOTE --recover-shallow` imports the candidate's exact selection and
+verifies the complete projection again before it clears the gap. A missing
+object is never judged as an empty change list. Maintainer merges keep their
+previous shallow behavior: a fact that passes the maintainer check never waits
+for the rule check's inputs, and a fact without a rule claim still requires
+each listed evidence ID as a `decision`.
 
 Older clients ignore the `rule` key and run only the maintainer check. They
 therefore reject every fact that only the rule check admits, and agree with
