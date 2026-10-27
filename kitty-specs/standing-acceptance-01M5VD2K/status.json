@@ -1,19 +1,19 @@
 {
-  "event_count": 113,
-  "last_event_id": "01M5ZPBQEP91RNBRWYGMX9ACCV",
-  "materialized_at": "2026-10-27T22:05:44.790417+00:00",
+  "event_count": 114,
+  "last_event_id": "01M5ZSQWXP7Y8TPD501SH6H3EJ",
+  "materialized_at": "2026-10-27T23:04:49.334980+00:00",
   "mission_number": "",
   "mission_slug": "standing-acceptance-01M5VD2K",
   "mission_type": "",
   "summary": {
-    "approved": 15,
+    "approved": 16,
     "blocked": 0,
     "canceled": 0,
     "claimed": 0,
     "done": 0,
     "for_review": 0,
     "in_progress": 0,
-    "in_review": 1,
+    "in_review": 0,
     "planned": 3
   },
   "work_packages": {
@@ -477,19 +477,25 @@
       }
     },
     "WP15": {
-      "actor": "llxprt",
+      "actor": "user",
       "agent": "llxprt",
       "agent_profile": "__resolved_profile_absent__",
       "agent_profile_version": "__resolved_profile_version_absent__",
       "force_count": 0,
-      "lane": "in_review",
-      "last_event_id": "01M5ZPBQEP91RNBRWYGMX9ACCV",
-      "last_transition_at": "2026-10-27T22:05:44.790417+00:00",
+      "lane": "approved",
+      "last_event_id": "01M5ZSQWXP7Y8TPD501SH6H3EJ",
+      "last_transition_at": "2026-10-27T23:04:49.334980+00:00",
       "model": "__resolved_model_absent__",
       "notes": [
         "WP15 implemented in eb0ac0d (plus planning-artifact cleanup 8eef433). serve_client.go: serveAdvanceBinding.Rule; step 1 (serveAdvanceValidate with branch and binding) replaces acceptance and maintainer checks with serveAdvanceRuleAuthority (evaluateRuleAcceptance on the same events and base policy, target branch set, Satisfied, executing actor); step 6 appends --push-option=hn-rule=NAME only under a rule (hn merge --remote argument list unchanged); serveAdvanceRuleUnsupported maps unsupported-command to 'REMOTE does not support rule advancement (hn-rule); upgrade hn on the server'; serveAdvanceRerun names hn automerge ... --execute --remote under a rule; step 8 re-evaluates the rule and calls appendRuleMergeEvent with commit = head, printing 'Recorded rule merge event ... under rule NAME with N evidence item(s)' (and the 'Recorded missing rule merge event' prefix on the step 5 path WP19 wires). automerge.go: automergeRemote passes Rule only for standing rules; comment updated. No rerun paths added (WP19). Tests in standing_serve_test.go: UserStory4 (US4-1, US4-2, C-008, push options traced), Veto (US4-3 client and server via publish seam), InterruptedAfterPublish, ForbiddenCommands (FR-018/FR-019/NFR-003, hn merge --remote sends exactly hn-advance and hn-expected-tip), RuleUnsupported, RerunCommand, ValidateRuleBinding, AgreementPreviewServer (13 fixtures, matched inputs asserted, 100% agreement logged), AuthorizationAndTransport, DocumentedAdvance (standing-serve-advance). docs/serve-v0.md Automerge rules client paragraphs, refusal handling, minimum server note and example. Pre-existing tests unmodified. Gate: gofmt clean; go vet ./... and go build ./... pass; go test -race -count=1 -timeout 150m -skip perf ./... passed (hubnot 4089s); perf test without -race passed (25.8s). Focused race run (TestStandingServe|TestServeAdvance|TestServeAutomerge|TestServeReplication|TestServeQuality) passed (862s)."
       ],
       "provider": "__resolved_provider_absent__",
+      "review_result": {
+        "feedback_path": "/home/acoliver/projects/appaday/gitium/hubnot/kitty-specs/standing-acceptance-01M5VD2K/tasks/WP15-client-rule-advancement/review-cycle-1.md",
+        "reference": "review-cycle://standing-acceptance-01M5VD2K/WP15-client-rule-advancement/review-cycle-1.md",
+        "reviewer": "user",
+        "verdict": "approved"
+      },
       "role": "reviewer",
       "shell_pid": 857417,
       "shell_pid_created_at": "1793138741.86",
