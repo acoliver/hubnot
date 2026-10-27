@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -34,7 +35,17 @@ type automergeInspection struct {
 	RuleAcceptance    *ruleAcceptance // set whenever Rule is
 	Branch, Current   string
 	Changed, Blockers []string
+	// Repair is the existing merge commit of a candidate whose code merged
+	// under a standing rule but whose rule merge fact was not recorded
+	// (FR-020). It is set only when that is the sole difference from an
+	// eligible candidate, in place of the moved-target blocker.
+	Repair string
 }
+
+// automergeTargetMoved is the blocker of a target that no longer equals the
+// signed base. Its text is unchanged under acceptance mode maintainers,
+// whose missing merge-event repair is hn merge.
+const automergeTargetMoved = "target no longer equals the signed base; revise the candidate (use hn merge for a missing merge-event repair)"
 
 func cmdAutomerge(args []string) error {
 	if len(args) < 1 {
@@ -90,12 +101,22 @@ func cmdAutomerge(args []string) error {
 			return fmt.Errorf("cannot tell whether %s, the upstream of %s, is an hn serve remote (%s); retry when it is reachable", upstream, inspection.Rule.TargetBranch, reason)
 		}
 	}
+	// The repair state never reaches mergeProposal, which refuses a
+	// contained head whenever a guard is present.
+	if inspection.Repair != "" {
+		return recordMissingRuleMerge(identity, inspection, *rule)
+	}
 	guard := &proposalMergeGuard{ExpectedActor: identity.Actor}
+	// The command a user reruns after an interruption. Under acceptance mode
+	// rule only the same automerge command can record the rule merge fact;
+	// hn merge repair stays maintainer-only.
+	rerun := "hn merge " + inspection.Proposal.ID
 	// Under acceptance mode rule the standing rule stands in for the
 	// per-proposal acceptance and maintainer checks (FR-009); a maintainer
 	// listed in the rule's actors gets the same authority (FR-011).
 	if inspection.Rule.Acceptance.Standing() {
-		guard.Rule = &ruleMergeAuthority{Name: *rule, Latest: inspection.RuleAcceptance}
+		rerun = automergeRuleRerun(inspection.Proposal.ID, *rule)
+		guard.Rule = &ruleMergeAuthority{Name: *rule, Latest: inspection.RuleAcceptance, Rerun: rerun}
 	}
 	guard.Check = func(proposal *StoredEvent, evaluation *ProposalEvaluation, branch, current string) error {
 		next, err := inspectAutomerge(proposal.ID, *rule)
@@ -123,12 +144,47 @@ func cmdAutomerge(args []string) error {
 		return nil
 	}
 	guard.Advance = func(proposal *StoredEvent, evaluation *ProposalEvaluation, branch, current, message string) (string, error) {
-		return advanceAutomerge(proposal, evaluation, inspection.Rule.TargetBranch, current, message, guard.Check)
+		return advanceAutomerge(proposal, evaluation, inspection.Rule.TargetBranch, current, message, rerun, guard.Check)
 	}
 	if err := runAutomergeHook("before-native-merge"); err != nil {
 		return err
 	}
 	return mergeProposal([]string{inspection.Proposal.ID}, guard)
+}
+
+// automergeRuleRerun is the command that repairs an interrupted local merge
+// under a standing rule.
+func automergeRuleRerun(proposalID, rule string) string {
+	return fmt.Sprintf("hn automerge %s --rule %s --execute", proposalID, rule)
+}
+
+// recordMissingRuleMerge is the local repair of FR-020. The code merged
+// under a standing rule but its rule merge fact was not recorded; it
+// inspects the candidate again, requires the same repair state, and records
+// the fact once with commit set to the existing merge commit. It creates no
+// commit and moves no branch.
+func recordMissingRuleMerge(identity *Identity, first *automergeInspection, rule string) error {
+	next, err := inspectAutomerge(first.Proposal.ID, rule)
+	if err != nil {
+		return err
+	}
+	if err := next.eligible(); err != nil {
+		return err
+	}
+	if next.Repair == "" || next.Repair != first.Repair || next.Branch != first.Branch || next.Current != first.Current ||
+		next.Proposal.Event.Base != first.Proposal.Event.Base || next.Proposal.Event.Head != first.Proposal.Event.Head ||
+		next.Evaluation.PolicyDigest != first.Evaluation.PolicyDigest || !next.RuleAcceptance.Satisfied() {
+		return fmt.Errorf("automerge candidate, policy or target changed before merge")
+	}
+	if !actorListed(identity.Actor, next.Rule.Actors) {
+		return fmt.Errorf("identity %s is no longer an executing actor for automerge rule %q", identity.Actor, rule)
+	}
+	stored, err := appendRuleMergeEvent(identity, next.Proposal, next.Evaluation, next.RuleAcceptance, next.Repair)
+	if err != nil {
+		return fmt.Errorf("rule merge event repair at %s failed: %w", shortOID(next.Repair), err)
+	}
+	fmt.Printf("Recorded missing rule merge event %s under rule %s with %d evidence item(s)\n", shortID(stored.ID), safeText(stored.Event.Rule), len(stored.Event.Evidence))
+	return nil
 }
 
 // Avoid promisor lazy fetch and recovery-ledger writes in preview without
@@ -292,9 +348,9 @@ func inspectAutomerge(query, ruleName string) (*automergeInspection, error) {
 			result.Blockers = append(result.Blockers, fmt.Sprintf("pipeline %q has a current trusted failure", pipeline.Name))
 		}
 	}
-	if current != proposal.Event.Base {
-		result.Blockers = append(result.Blockers, "target no longer equals the signed base; revise the candidate (use hn merge for a missing merge-event repair)")
-	}
+	// The moved-target blocker is placed here once every other blocker is
+	// known, so a repair state is reported only as the sole difference.
+	targetMoved, targetAt := current != proposal.Event.Base, len(result.Blockers)
 	if len(changed) == 0 {
 		result.Blockers = append(result.Blockers, "proposal has no changed paths")
 	}
@@ -341,7 +397,27 @@ func inspectAutomerge(query, ruleName string) (*automergeInspection, error) {
 	if len(status) > 0 {
 		result.Blockers = append(result.Blockers, "worktree and index must be clean before automerge")
 	}
+	if targetMoved {
+		if standing && len(result.Blockers) == 0 && !evaluation.Merged && targetDigest == evaluation.PolicyDigest {
+			result.Repair = automergeRepairCommit(proposal, current)
+		}
+		if result.Repair == "" {
+			result.Blockers = slices.Insert(result.Blockers, targetAt, automergeTargetMoved)
+		}
+	}
 	return result, nil
+}
+
+// automergeRepairCommit returns the one first-parent merge commit of current
+// that names the candidate head as a parent, or "" when there is none or
+// more than one. Its errors mean "not a repair state", never a failure of
+// the inspection, so the moved-target blocker refuses instead.
+func automergeRepairCommit(proposal *StoredEvent, current string) string {
+	commit, err := findProposalMergeCommit(proposal, current)
+	if err != nil || !validFullGitObjectID(commit) {
+		return ""
+	}
+	return commit
 }
 
 // automergeRuleInputs gathers the rule derivation's inputs from what the
@@ -405,6 +481,9 @@ func printAutomergeInspection(i *automergeInspection) {
 	fmt.Println("Changed paths:")
 	for _, p := range i.Changed {
 		fmt.Printf("  %q\n", p)
+	}
+	if i.Repair != "" {
+		fmt.Printf("Repair: code merged at %s; --execute records the missing rule merge fact\n", shortOID(i.Repair))
 	}
 	if len(i.Blockers) == 0 {
 		fmt.Println("Eligible: explicit --execute is required to merge locally.")
@@ -575,7 +654,10 @@ func (t *automergeRefTransaction) close() {
 	_ = t.wait()
 }
 
-func advanceAutomerge(proposal *StoredEvent, evaluation *ProposalEvaluation, branch, current, message string, check func(*StoredEvent, *ProposalEvaluation, string, string) error) (string, error) {
+// rerun is the command the recovery messages name: hn merge PROPOSAL under
+// acceptance mode maintainers, the same hn automerge command under
+// acceptance mode rule.
+func advanceAutomerge(proposal *StoredEvent, evaluation *ProposalEvaluation, branch, current, message, rerun string, check func(*StoredEvent, *ProposalEvaluation, string, string) error) (string, error) {
 	if current != proposal.Event.Base {
 		return "", fmt.Errorf("automerge target must equal the signed base")
 	}
@@ -620,7 +702,7 @@ func advanceAutomerge(proposal *StoredEvent, evaluation *ProposalEvaluation, bra
 	// actual value before deciding whether a safe checkout rollback is needed.
 	actualRaw, readErr := boundedPolicyGitOutput("", 128, "rev-parse", "--verify", "refs/heads/"+branch)
 	if readErr != nil {
-		return "", fmt.Errorf("automerge ref outcome is uncertain; inspect branch %q and run 'hn merge %s' if code merged", branch, proposal.ID)
+		return "", fmt.Errorf("automerge ref outcome is uncertain; inspect branch %q and run '%s' if code merged", branch, rerun)
 	}
 	actual := strings.TrimSpace(string(actualRaw))
 	if actual != commit {
@@ -632,7 +714,7 @@ func advanceAutomerge(proposal *StoredEvent, evaluation *ProposalEvaluation, bra
 		return "", fmt.Errorf("automerge target was not advanced to the prepared merge; current target %s (commit confirmation: %v)", actual, commitErr)
 	}
 	if err := runAutomergeHook("merge-committed"); err != nil {
-		return "", fmt.Errorf("code merged at %s but event recording interrupted; run 'hn merge %s': %w", commit, proposal.ID, err)
+		return "", fmt.Errorf("code merged at %s but event recording interrupted; run '%s': %w", commit, rerun, err)
 	}
 	return commit, nil
 }

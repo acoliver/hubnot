@@ -128,6 +128,9 @@ type proposalMergeGuard struct {
 type ruleMergeAuthority struct {
 	Name   string
 	Latest *ruleAcceptance // refreshed by the guard's Check on every re-inspection
+	// Rerun is the hn automerge command that records a rule merge fact
+	// whose recording failed after the code merged; hn merge cannot.
+	Rerun string
 }
 
 // authorize is the identity check of mergeProposal. With a rule authority
@@ -394,6 +397,9 @@ func mergeProposal(args []string, guard *proposalMergeGuard) error {
 	if byRule {
 		stored, err := appendRuleMergeEvent(identity, proposal, evaluation, guard.Rule.Latest, mergeCommit)
 		if err != nil {
+			if guard.Rule.Rerun != "" {
+				return fmt.Errorf("code merged at %s but recording failed: %w; run '%s'", shortOID(mergeCommit), err, guard.Rule.Rerun)
+			}
 			return fmt.Errorf("code merged at %s but recording failed: %w", shortOID(mergeCommit), err)
 		}
 		fmt.Printf("Merged proposal %s into %s at %s\n", shortID(proposal.ID), branch, shortOID(mergeCommit))

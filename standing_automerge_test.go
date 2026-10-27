@@ -1,7 +1,10 @@
 package main
 
 import (
+	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
@@ -895,4 +898,577 @@ func TestStandingAutomergeDocumentedExecute(t *testing.T) {
 	if fact := h.fact("E", values["<fact-id>"]); fact.Rule != "ordinary" || fact.Actor != h.Actor("E") {
 		t.Fatalf("documented flow recorded %+v, want a rule merge fact of rule ordinary by E", fact)
 	}
+}
+
+// Local repair (WP12, FR-020) and executing-actor containment (FR-019,
+// NFR-003, C-007). Every refusal is checked against a snapshot of the
+// acting clone's refs, the number of events on each of its chains and the
+// bare remote's refs.
+
+// standingAutomergeRepairLine is the preview line of a repair state.
+func standingAutomergeRepairLine(merge string) string {
+	return fmt.Sprintf("Repair: code merged at %s; --execute records the missing rule merge fact\n", shortOID(merge))
+}
+
+// standingAutomergeContain leaves role's main at a native two-parent merge
+// of c's head on c's base whose merge fact was never recorded, the state an
+// interrupted hn automerge leaves behind. It builds the commit with git
+// commit-tree and moves main with git update-ref, with no in-process step,
+// and returns the merge commit.
+func standingAutomergeContain(h *standingHarness, role string, c standingHarnessCase) string {
+	h.t.Helper()
+	h.Checkout(role, "main", c.Base)
+	tree := h.git(role, "rev-parse", c.Candidate.Head+"^{tree}")
+	merge := h.git(role, "commit-tree", tree, "-p", c.Base, "-p", c.Candidate.Head,
+		"-m", "Merge HN proposal "+operationalShortID(c.Candidate.ID)+" without its merge fact")
+	h.git(role, "update-ref", "refs/heads/main", merge, c.Base)
+	h.git(role, "reset", "-q", "--hard", "main")
+	if status := h.git(role, "status", "--porcelain", "--untracked-files=all"); status != "" {
+		h.t.Fatalf("contained state in %s's clone is not clean:\n%s", role, status)
+	}
+	return merge
+}
+
+// standingAutomergeState is every ref of the clone at directory, the event
+// count of every chain it holds and every ref of the bare remote.
+func standingAutomergeState(h *standingHarness, directory string) string {
+	h.t.Helper()
+	refs := runOperationalGit(h.t, directory, "for-each-ref", "--format=%(refname) %(objectname)")
+	var chains []string
+	for _, ref := range strings.Fields(runOperationalGit(h.t, directory, "for-each-ref", "--format=%(refname)", "refs/hn/actors", "refs/hn/remotes")) {
+		if !strings.HasPrefix(ref, "refs/hn/actors/") {
+			if _, _, ok := parseAcceptedActorRef(ref); !ok {
+				continue
+			}
+		}
+		chains = append(chains, ref+" "+runOperationalGit(h.t, directory, "rev-list", "--count", ref))
+	}
+	return "refs:\n" + refs + "\nchain events:\n" + strings.Join(chains, "\n") + "\nremote refs:\n" + h.RemoteRefs()
+}
+
+// requireStandingAutomergeContained runs hn args in the clone at directory
+// and requires it to fail with every one of want in its output, with no ref
+// of the clone or the remote changed and no event on any chain (NFR-003).
+func requireStandingAutomergeContained(h *standingHarness, directory string, args []string, want ...string) string {
+	h.t.Helper()
+	before := standingAutomergeState(h, directory)
+	output, status := h.RunIn(directory, args...)
+	if status == 0 {
+		h.t.Fatalf("hn %s succeeded, want a refusal with %q:\n%s", strings.Join(args, " "), want, output)
+	}
+	for _, text := range want {
+		if !strings.Contains(output, text) {
+			h.t.Fatalf("hn %s exited %d without %q:\n%s", strings.Join(args, " "), status, text, output)
+		}
+	}
+	if after := standingAutomergeState(h, directory); after != before {
+		h.t.Fatalf("refused hn %s changed state:\nbefore:\n%s\nafter:\n%s", strings.Join(args, " "), before, after)
+	}
+	return output
+}
+
+// standingAutomergeRefsBut drops ref's line from a Refs listing.
+func standingAutomergeRefsBut(refs, ref string) string {
+	var kept []string
+	for _, line := range strings.Split(refs, "\n") {
+		if !strings.HasPrefix(line, ref+" ") {
+			kept = append(kept, line)
+		}
+	}
+	return strings.Join(kept, "\n")
+}
+
+// requireStandingRuleRepair runs the repair in role's clone, whose main is
+// the contained merge, and requires exactly one new rule merge fact of rule
+// ordinary for c with commit set to merge and c's evidence, no commit, no
+// moved ref other than role's own chain, and the documented output. It
+// returns the fact.
+func requireStandingRuleRepair(h *standingHarness, role string, c standingHarnessCase, merge string) standingHarnessFact {
+	h.t.Helper()
+	t := h.t
+	refs := h.Refs(role)
+	run := standingAutomergeExecute(h, role, merge, c.Candidate.ID, "ordinary")
+	if run.Status != 0 {
+		t.Fatalf("%s's repair of %s exited %d:\n%s", role, c.Candidate.ID, run.Status, run.Output)
+	}
+	if run.After != merge {
+		t.Fatalf("repair moved main from %s to %s", merge, run.After)
+	}
+	chain := operationalActorRef(h.Actor(role))
+	if after := h.Refs(role); standingAutomergeRefsBut(after, chain) != standingAutomergeRefsBut(refs, chain) {
+		t.Fatalf("repair changed refs other than %s:\nbefore:\n%s\nafter:\n%s", chain, refs, after)
+	}
+	if len(run.Appended) != 1 || run.Appended[0].Kind != "proposal.merged" {
+		t.Fatalf("%s's chain gained %#v, want exactly one proposal.merged", role, run.Appended)
+	}
+	fact := h.fact(role, run.Appended[0].ID)
+	evidence := c.Evidence()
+	sort.Strings(evidence)
+	if fact.Rule != "ordinary" || fact.Subject != c.Candidate.ID || fact.Head != c.Candidate.Head || fact.Commit != merge ||
+		fact.Policy != h.PolicyDigest(c.Base) || fact.Actor != h.Actor(role) || strings.Join(fact.Evidence, ",") != strings.Join(evidence, ",") {
+		t.Fatalf("repaired fact %+v, want rule ordinary by %s at %s under the base policy citing %v", fact, role, merge, evidence)
+	}
+	assertOperationalContains(t, run.Output, standingAutomergeRepairLine(merge),
+		fmt.Sprintf("Recorded missing rule merge event %s under rule ordinary with %d evidence item(s)\n", operationalShortID(fact.ID), len(evidence)))
+	if strings.Contains(run.Output, "Merged proposal") {
+		t.Fatalf("repair reports a merge:\n%s", run.Output)
+	}
+	return fact
+}
+
+// requireStandingRepairDone requires a second rerun after a repair to be
+// blocked as already merged and to change nothing.
+func requireStandingRepairDone(h *standingHarness, role string, c standingHarnessCase, merge string) {
+	h.t.Helper()
+	refs := h.Refs(role)
+	again := standingAutomergeExecute(h, role, merge, c.Candidate.ID, "ordinary")
+	if again.Status == 0 || !strings.Contains(again.Output, "hn: automerge blocked: ") ||
+		!stringInSlice("proposal is already recorded as merged", standingAutomergeBlockers(again.Output)) {
+		h.t.Fatalf("second rerun exited %d, want blocked as already merged:\n%s", again.Status, again.Output)
+	}
+	if strings.Contains(again.Output, "Repair:") || again.After != merge || len(again.Appended) != 0 || h.Refs(role) != refs {
+		h.t.Fatalf("second rerun changed state or reported a repair:\n%s", again.Output)
+	}
+}
+
+// T056 steps 1 to 3: a run interrupted for real after the code merged is
+// repaired by the same command through the binary, exactly once, and the
+// repaired fact is admitted by another clone.
+func TestStandingAutomergeRepairInterruptedRun(t *testing.T) {
+	h := newStandingHarness(t, standingHarnessDefaultPolicy())
+	candidate := h.ReadyCandidate(standingAutomergeFiles)
+	c := h.Case(candidate.ID)
+	rerun := "hn automerge " + candidate.ID + " --rule ordinary --execute"
+
+	h.hn("E", "sync", "origin")
+	h.Checkout("E", "main", h.Base())
+	before := len(h.Events("E"))
+	t.Cleanup(func() { automergeProcessHook = nil })
+	interruption := errors.New("interrupted by the standing repair test")
+	automergeProcessHook = func(step string) error {
+		if step == "merge-committed" {
+			return interruption
+		}
+		return nil
+	}
+	var runErr error
+	h.inClone("E", func(*Identity) {
+		runErr = cmdAutomerge([]string{candidate.ID, "--rule", "ordinary", "--execute"})
+	})
+	automergeProcessHook = nil
+	merge := h.git("E", "rev-parse", "main")
+	if want := fmt.Sprintf("code merged at %s but event recording interrupted; run '%s': %v", merge, rerun, interruption); runErr == nil || runErr.Error() != want {
+		t.Fatalf("interrupted run returned %v, want %q", runErr, want)
+	}
+	if parents := strings.Fields(h.git("E", "rev-list", "--parents", "-n", "1", merge)); len(parents) != 3 || parents[1] != h.Base() || parents[2] != candidate.Head {
+		t.Fatalf("main is %v, want a merge of %s and %s", parents, h.Base(), candidate.Head)
+	}
+	if after := h.Events("E"); len(after) != before {
+		t.Fatalf("interrupted run appended %d event(s) to E's chain", len(after)-before)
+	}
+
+	preview, status := standingAutomergePreview(h, "E", merge, candidate.ID, "ordinary")
+	requireStandingAutomergeEligible(t, preview, status)
+	assertOperationalContains(t, preview, "Target: main at "+merge+"\n",
+		standingAutomergeRepairLine(merge)+"Eligible: explicit --execute is required to merge locally.\n")
+
+	fact := requireStandingRuleRepair(h, "E", c, merge)
+	assertOperationalContains(t, h.hn("E", "proposal", "status", candidate.ID),
+		"Status:   merged\n"+standingAutomergeRuleStatusLine("ordinary", h.Actor("E"), fact.ID))
+	requireStandingRepairDone(h, "E", c, merge)
+
+	// The repaired fact is an ordinary rule merge fact for every verifier.
+	h.git("E", "push", "-q", "origin", "main")
+	h.Publish("E")
+	h.hn("M", "sync", "origin")
+	assertOperationalContains(t, h.hn("M", "proposal", "status", candidate.ID),
+		"Status:   merged\n"+standingAutomergeRuleStatusLine("ordinary", h.Actor("E"), fact.ID))
+}
+
+// T056 steps 4, 5 and 7: the same repair from a state built with Git alone,
+// and the refusals of a vetoed candidate, of a target whose policy moved
+// and of hn merge by the executing actor.
+func TestStandingAutomergeRepairConstructedState(t *testing.T) {
+	h := newStandingHarness(t, standingHarnessDefaultPolicy())
+
+	repaired := h.readyCase("A", h.Base(), standingAutomergeFiles)
+	h.hn("E", "sync", "origin")
+	merge := standingAutomergeContain(h, "E", repaired)
+	// hn merge stays maintainer-only: it refuses E before any repair path.
+	requireStandingAutomergeContained(h, h.Work("E"), []string{"merge", repaired.Candidate.ID},
+		"proposal lacks 1 required acceptance decision(s)")
+	preview, status := standingAutomergePreview(h, "E", merge, repaired.Candidate.ID, "ordinary")
+	requireStandingAutomergeEligible(t, preview, status)
+	assertOperationalContains(t, preview, standingAutomergeRepairLine(merge))
+	requireStandingRuleRepair(h, "E", repaired, merge)
+	requireStandingRepairDone(h, "E", repaired, merge)
+
+	// A trusted change request that arrives before the rerun.
+	vetoed := h.readyCase("A", h.Base(), map[string]string{"src/vetoed.txt": "vetoed after the merge\n"})
+	h.hn("E", "sync", "origin")
+	merge = standingAutomergeContain(h, "E", vetoed)
+	h.RequestChanges("S", vetoed.Candidate.ID)
+	preview, status = standingAutomergePreview(h, "E", merge, vetoed.Candidate.ID, "ordinary")
+	requireStandingAutomergeBlocked(t, preview, status, standingAutomergeChangeRequest, automergeTargetMoved)
+	if strings.Contains(preview, "Repair:") {
+		t.Fatalf("vetoed candidate reports a repair:\n%s", preview)
+	}
+	requireStandingAutomergeContained(h, h.Work("E"), []string{"automerge", vetoed.Candidate.ID, "--rule", "ordinary", "--execute"},
+		"hn: automerge blocked: "+standingAutomergeChangeRequest+"; "+automergeTargetMoved+"\n")
+
+	// The target moved again with a policy-changing merge.
+	moved := h.readyCase("A", h.Base(), map[string]string{"src/moved.txt": "merged before a policy change\n"})
+	h.hn("E", "sync", "origin")
+	standingAutomergeContain(h, "E", moved)
+	amended := standingHarnessDefaultPolicy()
+	amended.Rules[0].Paths = []string{"src/", "tests/", "docs/", "lib/"}
+	policyChange := h.PolicyCommit(h.Base(), amended)
+	h.git("E", "fetch", "-q", "origin")
+	h.git("E", "merge", "-q", "--no-ff", "--no-edit", "-m", "Land a policy change outside hn", policyChange)
+	tip := h.git("E", "rev-parse", "main")
+	preview, status = standingAutomergePreview(h, "E", tip, moved.Candidate.ID, "ordinary")
+	requireStandingAutomergeBlocked(t, preview, status, automergeTargetMoved, "current target policy differs from the signed base policy")
+	if strings.Contains(preview, "Repair:") {
+		t.Fatalf("moved policy reports a repair:\n%s", preview)
+	}
+	requireStandingAutomergeContained(h, h.Work("E"), []string{"automerge", moved.Candidate.ID, "--rule", "ordinary", "--execute"},
+		"hn: automerge blocked: ", automergeTargetMoved)
+}
+
+// T056 steps 6 and 7: under acceptance mode maintainers the contained state
+// keeps the blocker that directs to hn merge, hn merge refuses the
+// executing actor and repairs for the maintainer as before.
+func TestStandingAutomergeRepairMaintainersModeUnchanged(t *testing.T) {
+	h := newStandingHarness(t, standingHarnessDefaultPolicy())
+	variant := h.PolicyCommit(h.Base(), standingAutomergeMaintainersVariant())
+	c := h.readyCase("A", variant, standingAutomergeFiles)
+	h.Accept("M", c.Candidate.ID)
+
+	h.hn("E", "sync", "origin")
+	standingAutomergeContain(h, "E", c)
+	requireStandingAutomergeContained(h, h.Work("E"), []string{"merge", c.Candidate.ID},
+		fmt.Sprintf("identity %s is not a maintainer under proposal policy", shortID(h.Actor("E"))))
+
+	h.hn("M", "sync", "origin")
+	merge := standingAutomergeContain(h, "M", c)
+	preview, status := standingAutomergePreview(h, "M", merge, c.Candidate.ID, "ordinary")
+	requireStandingAutomergeBlocked(t, preview, status, automergeTargetMoved)
+	if strings.Contains(preview, "Repair:") {
+		t.Fatalf("maintainers-mode rule reports a repair:\n%s", preview)
+	}
+	requireStandingAutomergeContained(h, h.Work("M"), []string{"automerge", c.Candidate.ID, "--rule", "ordinary", "--execute"},
+		"hn: automerge blocked: "+automergeTargetMoved+"\n")
+
+	refs := h.Refs("M")
+	before := len(h.Events("M"))
+	output := h.hn("M", "merge", c.Candidate.ID)
+	appended := h.Events("M")[before:]
+	if len(appended) != 1 || appended[0].Kind != "proposal.merged" {
+		t.Fatalf("hn merge repair appended %#v, want one proposal.merged", appended)
+	}
+	fact := h.fact("M", appended[0].ID)
+	if fact.Commit != merge || fact.Rule != "" || fact.Subject != c.Candidate.ID {
+		t.Fatalf("hn merge repair recorded %+v, want an acceptance merge fact at %s", fact, merge)
+	}
+	assertOperationalContains(t, output, fmt.Sprintf("Recorded missing merge event %s for proposal %s at %s with 1 acceptance decision(s)\n",
+		operationalShortID(fact.ID), operationalShortID(c.Candidate.ID), shortOID(merge)))
+	chain := operationalActorRef(h.Actor("M"))
+	if main := h.git("M", "rev-parse", "main"); main != merge || standingAutomergeRefsBut(h.Refs("M"), chain) != standingAutomergeRefsBut(refs, chain) {
+		t.Fatalf("hn merge repair moved main to %s or changed other refs", main)
+	}
+}
+
+// T057 cases 1 to 3: policy amendments, rules a candidate grants itself and
+// protected-check changes never merge by rule, whoever executes it.
+func TestStandingAutomergeContainmentManualPath(t *testing.T) {
+	h := newStandingHarness(t, standingHarnessDefaultPolicy())
+	base := h.Base()
+	execute := func(role, target, candidate, rule string, want ...string) {
+		t.Helper()
+		h.hn(role, "sync", "origin")
+		h.Checkout(role, "main", target)
+		requireStandingAutomergeContained(h, h.Work(role), []string{"automerge", candidate, "--rule", rule, "--execute"},
+			append([]string{"hn: automerge blocked: "}, want...)...)
+	}
+
+	// US2-3: a head that adds rule selfgrant listing its author A and S.
+	selfgrant := standingHarnessDefaultPolicy()
+	selfgrant.Rules = append(selfgrant.Rules, standingHarnessRule{
+		Name: "selfgrant", TargetBranch: "main", Acceptance: standingHarnessString(automergeAcceptanceRule),
+		Actors: []string{"A", "S"}, Authors: []string{"A"}, Paths: []string{"src/"},
+	})
+	grant := h.readyCase("A", base, map[string]string{
+		serveGovernedPolicyPath: selfgrant.JSON(h.actors), "src/selfgrant.txt": "granted by its own head\n",
+	})
+	for _, role := range []string{"A", "S"} {
+		execute(role, base, grant.Candidate.ID, "selfgrant", `automerge rule "selfgrant" does not exist in the signed base policy`)
+	}
+
+	// US6-4: every review, CI result, designated approval and maintainer
+	// acceptance is present, and the protected check still takes the
+	// manual path; so does a policy change next to an allowed path.
+	protected := standingHarnessDefaultPolicy()
+	protected.ProtectedPaths = []string{"scripts/lint.sh"}
+	protectedBase := h.PolicyCommit(base, protected)
+	check := h.readyCase("A", protectedBase, map[string]string{
+		"scripts/lint.sh": "#!/bin/sh\nexit 0\n", "src/x": "changed with the check\n",
+	})
+	h.Approve("M", check.Candidate.ID)
+	h.Accept("M", check.Candidate.ID)
+	execute("E", protectedBase, check.Candidate.ID, "ordinary", "protected check changes require manual merge")
+
+	policy := string(runOperationalGitBytes(t, h.Remote(), "show", base+":"+serveGovernedPolicyPath))
+	amendsPolicy := h.readyCase("A", base, map[string]string{serveGovernedPolicyPath: policy + "\n", "src/x": "changed with the policy\n"})
+	h.Accept("M", amendsPolicy.Candidate.ID)
+	execute("E", base, amendsPolicy.Candidate.ID, "ordinary", "policy amendments require manual merge")
+
+	// US2-2: an amendment adding a standing rule, before its evidence and
+	// once accepted, is refused under every rule; M lands it with hn merge.
+	amended := standingHarnessDefaultPolicy()
+	amended.Rules = append(amended.Rules, standingHarnessRule{
+		Name: "docsonly", TargetBranch: "main", Acceptance: standingHarnessString(automergeAcceptanceRule),
+		Actors: []string{"E"}, Authors: []string{"A"}, Paths: []string{"docs/"},
+	})
+	amendment := h.Open("M", base, h.PolicyCommit(base, amended))
+	execute("E", base, amendment.ID, "ordinary", "policy amendments require manual merge")
+	h.Approve("R", amendment.ID)
+	h.RunCI(h.RequestCI("M", amendment.ID).ID)
+	h.Accept("M", amendment.ID)
+	for _, role := range []string{"E", "X"} {
+		for _, rule := range []string{"ordinary", "other"} {
+			execute(role, base, amendment.ID, rule, "policy amendments require manual merge")
+		}
+	}
+	h.hn("M", "sync", "origin")
+	h.Checkout("M", "main", base)
+	output := h.hn("M", "merge", amendment.ID)
+	assertOperationalContains(t, output, "Merged proposal "+operationalShortID(amendment.ID)+" into main at ", "Recorded merge event ")
+	if merge := h.latest("M"); merge.Kind != "proposal.merged" || merge.Subject != amendment.ID || h.fact("M", merge.ID).Rule != "" {
+		t.Fatalf("hn merge of the amendment appended %#v, want its acceptance merge fact", merge)
+	}
+}
+
+// standingAutomergeCopyIdentity gives the clone at directory the hn
+// identity of role's clone, so a fresh clone acts as role.
+func standingAutomergeCopyIdentity(h *standingHarness, role, directory string) {
+	h.t.Helper()
+	source := filepath.Join(h.Work(role), ".git", "hn")
+	target := filepath.Join(directory, ".git", "hn")
+	err := filepath.WalkDir(source, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		relative, err := filepath.Rel(source, path)
+		if err != nil {
+			return err
+		}
+		if relative != "." && relative != "active" && relative != "identity.json" && relative != "rotation.json" &&
+			relative != "identities" && filepath.Dir(relative) != "identities" {
+			if entry.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if entry.IsDir() {
+			return os.MkdirAll(filepath.Join(target, relative), 0o700)
+		}
+		content, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(filepath.Join(target, relative), content, 0o600)
+	})
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	if actor := readOperationalIdentity(h.t, h.Binary(), directory).Actor; actor != h.Actor(role) {
+		h.t.Fatalf("copied identity is %s, want %s", actor, h.Actor(role))
+	}
+}
+
+// T057 case 4 (US6-5): a moved target, a dirty worktree, an unfinished
+// merge, a shallow clone and a partial clone each refuse execution with
+// today's message.
+func TestStandingAutomergeContainmentRepositoryState(t *testing.T) {
+	h := newStandingHarness(t, standingHarnessDefaultPolicy())
+	c := h.readyCase("A", h.Base(), standingAutomergeFiles)
+	args := []string{"automerge", c.Candidate.ID, "--rule", "ordinary", "--execute"}
+	work := h.Work("E")
+	h.hn("E", "sync", "origin")
+
+	moved := h.Commit("M", h.Base(), map[string]string{"docs/moved.txt": "the target moved\n"})
+	h.Checkout("E", "main", moved)
+	requireStandingAutomergeContained(h, work, args, "hn: automerge blocked: "+automergeTargetMoved+"\n")
+
+	h.Checkout("E", "main", h.Base())
+	dirty := filepath.Join(work, "src", "dirty.txt")
+	if err := os.WriteFile(dirty, []byte("uncommitted\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	requireStandingAutomergeContained(h, work, args, "hn: automerge blocked: worktree and index must be clean before automerge\n")
+	if err := os.Remove(dirty); err != nil {
+		t.Fatal(err)
+	}
+
+	ours := h.Commit("E", h.Base(), map[string]string{"docs/conflict.txt": "ours\n"})
+	theirs := h.Commit("E", h.Base(), map[string]string{"docs/conflict.txt": "theirs\n"})
+	h.Checkout("E", "main", ours)
+	runOperationalGitFailure(t, work, "merge", "--no-edit", theirs)
+	mergeHead := filepath.Join(work, h.git("E", "rev-parse", "--git-path", "MERGE_HEAD"))
+	if _, err := os.Stat(mergeHead); err != nil {
+		t.Fatalf("the conflicting merge left no MERGE_HEAD: %v", err)
+	}
+	requireStandingAutomergeContained(h, work, args, "automerge refuses an unfinished Git operation (MERGE_HEAD); finish or abort it first")
+	if _, err := os.Stat(mergeHead); err != nil {
+		t.Fatalf("the refusal removed MERGE_HEAD: %v", err)
+	}
+	h.git("E", "merge", "--abort")
+
+	shallow := filepath.Join(t.TempDir(), "shallow")
+	runOperationalGit(t, "", "clone", "-q", "--depth", "1", "--no-local", h.Remote(), shallow)
+	standingAutomergeCopyIdentity(h, "E", shallow)
+	requireStandingAutomergeContained(h, shallow, args, "automerge requires a full repository; hydrate shallow history or use manual merge")
+
+	partial := filepath.Join(t.TempDir(), "partial")
+	runOperationalGit(t, "", "clone", "-q", "--filter=blob:none",
+		"--upload-pack=git -c uploadpack.allowFilter=true upload-pack", "file://"+h.Remote(), partial)
+	if promisor := runOperationalGit(t, partial, "config", "--get", "remote.origin.promisor"); promisor != "true" {
+		t.Fatalf("partial clone has remote.origin.promisor %q, want true", promisor)
+	}
+	standingAutomergeCopyIdentity(h, "E", partial)
+	requireStandingAutomergeContained(h, partial, args, "automerge does not support partial/promisor repositories; hydrate a full clone or use manual merge")
+}
+
+// T057 case 5 (US6-6): the executing actor E cannot publish a decision that
+// counts, cannot merge manually, locally or through a remote, and cannot
+// execute a rule that does not list it.
+func TestStandingAutomergeContainmentForbiddenCommands(t *testing.T) {
+	policy := standingHarnessDefaultPolicy()
+	policy.Rules[1].Paths = []string{"src/", "tests/", "docs/"}
+	h := newStandingHarness(t, policy)
+	c := h.readyCase("A", h.Base(), standingAutomergeFiles)
+	work, short := h.Work("E"), shortID(h.Actor("E"))
+	h.hn("E", "sync", "origin")
+	h.Checkout("E", "main", h.Base())
+
+	requireStandingAutomergeContained(h, work, []string{"decide", c.Candidate.ID, "--accept"},
+		fmt.Sprintf("identity %s is not a maintainer under policy %s", short, shortID(h.PolicyDigest(h.Base()))))
+	requireStandingAutomergeContained(h, work, []string{"merge", c.Candidate.ID}, "proposal lacks 1 required acceptance decision(s)")
+
+	// A maintainer acceptance does not open the manual paths to E.
+	h.Accept("M", c.Candidate.ID)
+	h.hn("E", "sync", "origin")
+	requireStandingAutomergeContained(h, work, []string{"merge", c.Candidate.ID},
+		fmt.Sprintf("identity %s is not a maintainer under proposal policy", short))
+	requireStandingAutomergeContained(h, work, []string{"merge", c.Candidate.ID, "--remote", "origin"},
+		fmt.Sprintf("advancement step 1 (validate locally) failed: identity %s is not a maintainer under proposal policy", short))
+
+	// Rule other has the same paths and authors but lists only X.
+	preview, status := h.Run("E", "automerge", c.Candidate.ID, "--rule", "other")
+	requireStandingAutomergeEligible(t, preview, status)
+	requireStandingAutomergeContained(h, work, []string{"automerge", c.Candidate.ID, "--rule", "other", "--execute"},
+		fmt.Sprintf("identity %s is not an executing actor for automerge rule %q", h.Actor("E"), "other"))
+}
+
+// T057 case 6 (US6-1 to US6-3 at execution): every veto and rule blocker
+// refuses --execute with automerge blocked: naming it, and the satisfied
+// control merges.
+func TestStandingAutomergeContainmentBlockersAtExecution(t *testing.T) {
+	h := newStandingHarness(t, standingHarnessDefaultPolicy())
+	refuse := func(c standingHarnessCase, blocker string) {
+		t.Helper()
+		h.hn("E", "sync", "origin")
+		h.Checkout("E", "main", c.Base)
+		requireStandingAutomergeContained(h, h.Work("E"), []string{"automerge", c.Candidate.ID, "--rule", "ordinary", "--execute"},
+			"hn: automerge blocked: ", blocker)
+	}
+
+	rejected := h.readyCase("A", h.Base(), nil)
+	h.Reject("M", rejected.Candidate.ID, "Rejected by the standing containment test.")
+	refuse(rejected, "proposal has a current maintainer rejection")
+
+	changes := h.readyCase("A", h.Base(), nil)
+	h.RequestChanges("S", changes.Candidate.ID)
+	refuse(changes, standingAutomergeChangeRequest)
+
+	failed := h.readyCase("A", h.Base(), nil)
+	h.FailCI()
+	h.act("T", "run.result", true, "run", "execute", failed.Request.ID, "--backend", "host", "--allow-unsafe-host-execution", "--rerun")
+	h.PassCI()
+	refuse(failed, `pipeline "test" has a current trusted failure`)
+
+	missing := h.openCase("A", h.Base(), nil)
+	h.Approve("R", missing.Candidate.ID)
+	refuse(missing, standingAutomergeNoPass)
+
+	refuse(h.readyCase("M", h.Base(), nil), "proposal author is not allowed by the rule")
+	refuse(h.readyCase("A", h.Base(), map[string]string{"other/x": "outside the rule\n"}), `changed path "other/x" is outside the rule allowlist`)
+
+	satisfied := h.readyCase("A", h.Base(), standingAutomergeFiles)
+	h.hn("E", "sync", "origin")
+	run := standingAutomergeExecute(h, "E", h.Base(), satisfied.Candidate.ID, "ordinary")
+	requireStandingRuleMerge(h, "E", run, satisfied.Candidate, "ordinary", satisfied.Evidence()...)
+}
+
+// standingAutomergeInterrupt runs hn automerge candidate --rule rule
+// --execute in-process in role's clone, with fn called at the
+// merge-committed seam, and returns the resulting main and its error.
+func standingAutomergeInterrupt(h *standingHarness, role, target, candidate, rule string, fn func() error) (string, error) {
+	h.t.Helper()
+	h.hn(role, "sync", "origin")
+	h.Checkout(role, "main", target)
+	h.t.Cleanup(func() { automergeProcessHook = nil })
+	automergeProcessHook = func(step string) error {
+		if step == "merge-committed" {
+			return fn()
+		}
+		return nil
+	}
+	var runErr error
+	h.inClone(role, func(*Identity) {
+		runErr = cmdAutomerge([]string{candidate, "--rule", rule, "--execute"})
+	})
+	automergeProcessHook = nil
+	return h.git(role, "rev-parse", "main"), runErr
+}
+
+// T055 steps 3 and 4: the rerun hints. Under acceptance mode maintainers the
+// interrupted run still names hn merge, byte for byte; under acceptance mode
+// rule a recording failure after the merge names the same hn automerge
+// command, which then repairs.
+func TestStandingAutomergeRepairRerunHints(t *testing.T) {
+	h := newStandingHarness(t, standingHarnessDefaultPolicy())
+	interruption := errors.New("interrupted by the standing hint test")
+
+	variant := h.PolicyCommit(h.Base(), standingAutomergeMaintainersVariant())
+	accepted := h.readyCase("A", variant, standingAutomergeFiles)
+	h.Accept("M", accepted.Candidate.ID)
+	merge, err := standingAutomergeInterrupt(h, "M", variant, accepted.Candidate.ID, "ordinary", func() error { return interruption })
+	if want := fmt.Sprintf("code merged at %s but event recording interrupted; run 'hn merge %s': %v", merge, accepted.Candidate.ID, interruption); err == nil || err.Error() != want {
+		t.Fatalf("maintainers-mode interruption returned %v, want %q", err, want)
+	}
+
+	// A held lock on E's actor ref makes the append fail after the merge.
+	c := h.readyCase("A", h.Base(), map[string]string{"src/hint.txt": "recorded after a failure\n"})
+	lock := filepath.Join(h.Work("E"), h.git("E", "rev-parse", "--git-path", operationalActorRef(h.Actor("E")))+".lock")
+	t.Cleanup(func() { _ = os.Remove(lock) })
+	before := len(h.Events("E"))
+	merge, err = standingAutomergeInterrupt(h, "E", h.Base(), c.Candidate.ID, "ordinary", func() error {
+		if err := os.MkdirAll(filepath.Dir(lock), 0o755); err != nil {
+			return err
+		}
+		return os.WriteFile(lock, nil, 0o644)
+	})
+	prefix := fmt.Sprintf("code merged at %s but recording failed: ", shortOID(merge))
+	suffix := fmt.Sprintf("; run 'hn automerge %s --rule ordinary --execute'", c.Candidate.ID)
+	if err == nil || !strings.HasPrefix(err.Error(), prefix) || !strings.HasSuffix(err.Error(), suffix) {
+		t.Fatalf("recording failure returned %v, want %q...%q", err, prefix, suffix)
+	}
+	if merge == h.Base() || len(h.Events("E")) != before {
+		t.Fatalf("recording failure left main at %s with %d new event(s)", merge, len(h.Events("E"))-before)
+	}
+	if err := os.Remove(lock); err != nil {
+		t.Fatal(err)
+	}
+	requireStandingRuleRepair(h, "E", c, merge)
 }

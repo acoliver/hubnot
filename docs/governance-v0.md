@@ -550,6 +550,134 @@ Merged by rule ordinary, signed by <executor-actor> in fact <fact-id>
 `<fact-id>` is the full event ID, including its `sha256:` prefix.
 
 ### Commit path, publication and recovery
+
+Automatic execution creates a native two-parent merge commit from the verified
+head tree and uses an expected-old Git ref transaction for the actual target
+advance. It rechecks current evidence and target while holding that lease, then
+records the signed `proposal.merged` fact: with the exact acceptances under
+acceptance mode `maintainers`, or as a rule merge fact under a standing rule.
+Ignored files that the checkout would overwrite cause refusal.
+
+This commit path uses `git commit-tree`, not ordinary `git merge`/`git commit`.
+It does not run `pre-merge-commit` or `pre-commit` hooks. Put required checks in
+native pipelines and configure their trusted runners in policy; a local Git
+merge hook is not an automerge acceptance gate. Operator-controlled Git
+`reference-transaction` hooks retain their normal behavior.
+
+Without `--remote`, no command here starts a daemon, executes a pipeline,
+creates an approval or acceptance, synchronizes, or pushes. Publication
+remains explicit:
+
+```sh
+hn sync origin
+
+git push origin main:main
+```
+
+An `hn serve` remote accepts no local merge commit on a protected branch, so
+the explicit publication above cannot land an automerge there. Use
+`hn automerge PROPOSAL --rule NAME --execute --remote REMOTE`, which imports
+the hosted facts, inspects the rule again against them and asks the server to
+advance the branch to the signed head. See
+[Automerge rules](serve-v0.md#automerge-rules).
+
+If code merged but its signed fact could not be recorded under acceptance
+mode `maintainers`, inspect the target and retry `hn merge C` for the existing
+manual repair. Under a standing rule, rerun the same `hn automerge` command
+instead (see [Repairing an interrupted rule merge](#repairing-an-interrupted-rule-merge)). Repair requires current
+qualifying evidence and one unique first-parent merge that directly names C's
+head; it adds only the missing event. Repeating automerge does not create a
+second merge when the target already moved. A failure before ref advancement
+can leave unreferenced Git objects; an interrupted checkout can leave staged
+candidate changes on the old target. Preserve local work, inspect `git status`
+and the target, and reconcile the checkout before retrying. Do not discard local
+changes merely to make a retry eligible.
+
+These gates enforce Hubnot's native merge path. They do not prevent a process
+with direct host or Git write access from changing branches outside Hubnot, and
+the local ref lease is not a distributed transaction across arbitrary writers
+or remote replicas.
+
+### Limits of standing acceptance
+
+A standing rule delegates one act: running `hn automerge` for the proposals
+the rule covers. An executing actor that is not a maintainer gains no other
+authority. Each refusal below happens before any event is signed and before
+any ref changes.
+
+| Command run by an executing actor that is not a maintainer | Result |
+|----|----|
+| `hn automerge PROPOSAL --rule NAME --execute` for a rule that lists the actor | merges when every check of the rule passes |
+| `hn automerge PROPOSAL --rule OTHER --execute` for a rule that does not list the actor | refused with `identity <actor> is not an executing actor for automerge rule "OTHER"` |
+| `hn decide PROPOSAL --accept` | refused with `identity <actor> is not a maintainer under policy <digest>` |
+| `hn merge PROPOSAL` | refused with `identity <actor> is not a maintainer under proposal policy`, or with `proposal lacks N required acceptance decision(s)` while no maintainer has accepted |
+| `hn merge PROPOSAL --remote REMOTE` | refused at step 1 with the same maintainer message |
+| Any rule for a policy amendment or a protected-check change | refused with `policy amendments require manual merge` or `protected check changes require manual merge` |
+
+The maintainer refusals print shortened actor IDs and policy digests.
+
+Policy amendments and protected-check changes always take the manual path. A
+maintainer accepts them with `hn decide --accept` and lands them with
+`hn merge`, even when they already carry every review, passing result,
+designated approval and acceptance. A candidate also cannot use a rule that
+its own head adds. Rules come from the signed base policy, so `hn automerge`
+reports `automerge rule "NAME" does not exist in the signed base policy`.
+
+Every blocker of the preview applies to execution under a standing rule: a
+maintainer rejection, a change request from any trusted reviewer, a trusted
+pipeline failure, too few counted approvals or passing results, an author or
+a changed path outside the rule, a target that moved since the signed base, a
+dirty worktree, an unfinished Git operation, a shallow clone and a partial
+clone. Execution then refuses with `automerge blocked:` followed by the
+blockers.
+
+#### Repairing an interrupted rule merge
+
+An interruption can leave the merge commit on the target branch without its
+rule merge fact. The error names the command to run next. Under a standing
+rule that command is the same `hn automerge` command:
+
+```text
+code merged at <merge-commit> but event recording interrupted; run 'hn automerge <candidate-id> --rule ordinary --execute': ...
+```
+
+The same rerun hint follows `code merged at <merge-short> but recording
+failed:` and the message for an uncertain ref outcome.
+
+Rerun that command in the same clone. Its preview replaces the blocker
+`target no longer equals the signed base; ...` with a repair line when all of
+these hold:
+
+- the candidate has no merge fact under its base policy;
+- the checked-out target contains the head through exactly one first-parent
+  merge commit that names the head as a parent;
+- the `.hn/policy.json` digest of the target equals the base policy digest;
+- every other check of the rule passes on the current evidence.
+
+```text
+Repair: code merged at <merge-short>; --execute records the missing rule merge fact
+Eligible: explicit --execute is required to merge locally.
+```
+
+With `--execute` the command inspects the candidate again and records the
+missing rule merge fact once, with `commit` set to the existing merge commit:
+
+```text
+Recorded missing rule merge event <fact-short> under rule ordinary with 2 evidence item(s)
+```
+
+The repair creates no commit and moves no branch; only the executing actor's
+own event chain gains the fact. A second rerun is blocked with `proposal is
+already recorded as merged` and changes nothing. When any condition fails,
+for example because a trusted change request arrived or the target moved on
+with a policy change, the preview keeps the moved-target blocker next to the
+other blockers and `--execute` records nothing.
+
+Under acceptance mode `maintainers` the repair is unchanged: the moved-target
+blocker directs to `hn merge C`, and its repair path requires a base-policy
+maintainer. An executing actor of a standing rule cannot repair through
+`hn merge`.
+
 ### Standing acceptance rule fields
 
 An automerge rule may carry two optional fields, `acceptance` and `reviewers`.
@@ -743,48 +871,3 @@ Rule ordinary; target branch main:
 Pipelines:
   (none)
 ```
-
-
-Automatic execution creates a native two-parent merge commit from the verified
-head tree and uses an expected-old Git ref transaction for the actual target
-advance. It rechecks current evidence and target while holding that lease, then
-records the existing signed `proposal.merged` fact with the exact acceptances.
-Ignored files that the checkout would overwrite cause refusal.
-
-This commit path uses `git commit-tree`, not ordinary `git merge`/`git commit`.
-It does not run `pre-merge-commit` or `pre-commit` hooks. Put required checks in
-native pipelines and configure their trusted runners in policy; a local Git
-merge hook is not an automerge acceptance gate. Operator-controlled Git
-`reference-transaction` hooks retain their normal behavior.
-
-Without `--remote`, no command here starts a daemon, executes a pipeline,
-creates an approval or acceptance, synchronizes, or pushes. Publication
-remains explicit:
-
-```sh
-hn sync origin
-
-git push origin main:main
-```
-
-An `hn serve` remote accepts no local merge commit on a protected branch, so
-the explicit publication above cannot land an automerge there. Use
-`hn automerge PROPOSAL --rule NAME --execute --remote REMOTE`, which imports
-the hosted facts, inspects the rule again against them and asks the server to
-advance the branch to the signed head. See
-[Automerge rules](serve-v0.md#automerge-rules).
-
-If code merged but its signed fact could not be recorded, inspect the target
-and retry `hn merge C` for the existing manual repair. Repair requires current
-qualifying evidence and one unique first-parent merge that directly names C's
-head; it adds only the missing event. Repeating automerge does not create a
-second merge when the target already moved. A failure before ref advancement
-can leave unreferenced Git objects; an interrupted checkout can leave staged
-candidate changes on the old target. Preserve local work, inspect `git status`
-and the target, and reconcile the checkout before retrying. Do not discard local
-changes merely to make a retry eligible.
-
-These gates enforce Hubnot's native merge path. They do not prevent a process
-with direct host or Git write access from changing branches outside Hubnot, and
-the local ref lease is not a distributed transaction across arbitrary writers
-or remote replicas.
