@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -346,4 +347,488 @@ func TestStandingServeWireRuleRefusedBeforeVerdict(t *testing.T) {
 
 	g.AcceptMain(g.Maintainer, head, advance...)
 	g.VerifyAccepted(p.Candidate.ID)
+}
+
+// Standing serve fixture (WP14 T067).
+//
+// newStandingServeFixture hosts repository r like newServeGovernedFixture,
+// with the participants of the standing harness: author A, maintainer M,
+// counted reviewer R, second trusted reviewer S, runner U, executing actor
+// E of rule ordinary (not a maintainer) and executing actor X of rule
+// other only. Author, Reviewer, Runner, Maintainer and CIFailFlag are set
+// as the governed fixture sets them, so every serveGovernedFixture method
+// works unchanged. main is protected because hn serve repo create
+// protects refs/heads/main by default, as for the governed fixture.
+func newStandingServeFixture(t *testing.T, policy func(actors map[string]string) string) *serveGovernedFixture {
+	t.Helper()
+	h := newServeHarness(t)
+	f := &servePushFixture{
+		t:       t,
+		h:       h,
+		hosted:  h.Layout().RepoGitDir("r"),
+		actors:  map[string]string{},
+		keys:    map[string]serveTestKey{},
+		clients: map[string]serveHarnessClientEnv{},
+		work:    map[string]string{},
+	}
+	names := []string{"A", "M", "R", "S", "U", "E", "X"}
+	for _, name := range names {
+		work := filepath.Join(t.TempDir(), "work-"+name)
+		runOperationalGit(t, "", "init", "-q", "-b", "main", work)
+		runOperationalCommand(t, h.Binary, work, "init", "--name", "Standing "+name)
+		f.actors[name] = readOperationalIdentity(t, h.Binary, work).Actor
+		f.work[name] = work
+	}
+	g := &serveGovernedFixture{
+		servePushFixture: f,
+		Author:           "A", Reviewer: "R", Runner: "U", Maintainer: "M",
+		CIFailFlag: filepath.Join(t.TempDir(), "ci-fails"),
+	}
+
+	source := filepath.Join(t.TempDir(), "source")
+	initOperationalRepository(t, source, "Source")
+	serveHarnessWriteFile(t, source, serveGovernedPolicyPath, policy(f.actors))
+	serveHarnessWriteFile(t, source, filepath.Join(".hn", "pipelines", "test.json"), serveGovernedPipelineJSON(t, g.CIFailFlag))
+	serveHarnessCommit(t, source, "standing base")
+	h.Serve("serve", "repo", "create", "r", "--from", source)
+
+	for _, name := range names {
+		f.keys[name] = serveHarnessAddKey(h, f.actors[name])
+		f.clients[name] = serveHarnessClient(t, h, f.keys[name], nil)
+		f.git(name, "remote", "add", "origin", serveHarnessCloneURL("r"))
+		f.git(name, "fetch", "-q", "origin")
+		f.git(name, "checkout", "-q", "-B", "main", "origin/main")
+		f.hn(name, "replication", "select", "origin", "--all")
+	}
+	g.Base = g.ServerTip("main")
+	if len(g.Base) != len(servePushZero) {
+		t.Fatalf("hosted main %q is not a SHA-1 object ID; the fixtures assume SHA-1", g.Base)
+	}
+	return g
+}
+
+// standingServePolicyDocument is the policy of standingServeDefaultPolicy
+// by role, for variants. U is the runner, as in the governed fixture.
+func standingServePolicyDocument() standingHarnessPolicy {
+	return standingHarnessPolicy{
+		Maintainers:       []string{"M"},
+		TrustedReviewers:  []string{"R", "S"},
+		RequiredApprovals: 1,
+		Runners:           []string{"U"},
+		Rules: []standingHarnessRule{
+			{
+				Name: "ordinary", TargetBranch: "main", Acceptance: standingHarnessString(automergeAcceptanceRule),
+				Actors: []string{"E"}, Authors: []string{"A"}, Reviewers: []string{"R"},
+				Paths: []string{"src/", "tests/", "docs/"},
+			},
+			{
+				Name: "other", TargetBranch: "main", Acceptance: standingHarnessString(automergeAcceptanceRule),
+				Actors: []string{"X"}, Authors: []string{"A"}, Paths: []string{"src/", "tests/", "docs/"},
+			},
+			{
+				Name: "maint", TargetBranch: "main", Actors: []string{"M"}, Authors: []string{"A"},
+				Paths: []string{"src/"},
+			},
+			{
+				Name: "release", TargetBranch: "release", Acceptance: standingHarnessString(automergeAcceptanceRule),
+				Actors: []string{"E"}, Authors: []string{"A"}, Paths: []string{"src/"},
+			},
+		},
+	}
+}
+
+// standingServeDefaultPolicy: maintainer M, trusted reviewers R and S, one
+// approval and one acceptance, pipeline test run by U, and the rules
+// ordinary (E for A's changes under src/, tests/ and docs/, counting R),
+// other (X, same paths), maint (acceptance maintainers, M) and release
+// (standing, for branch release).
+func standingServeDefaultPolicy(actors map[string]string) string {
+	return standingServePolicyDocument().JSON(actors)
+}
+
+// StandingReady commits files on the base as the author, opens a
+// candidate, and gathers R's approval and U's passing result on M's run
+// request. Nothing accepts it: only a standing rule can.
+func (g *serveGovernedFixture) StandingReady(files map[string]string) serveGovernedProposal {
+	g.t.Helper()
+	var p serveGovernedProposal
+	p.Candidate = g.OpenProposal(g.Base, g.Commit(g.Base, files))
+	p.Approval = g.Approve(p.Candidate.ID)
+	p.Request = g.RequestCI(p.Candidate.ID)
+	p.Result = g.RunCI(p.Request.ID)
+	return p
+}
+
+// RulePush requests advancement of main to head for candidate under rule
+// from who's clone, bound to the current hosted tip, the way the client
+// does: the three push options on PushMain's forced refspec.
+func (g *serveGovernedFixture) RulePush(who, candidate, head, rule string) (output string, rejections []serveRejection, ok bool) {
+	g.t.Helper()
+	tip := g.ServerTip("main")
+	return g.PushMain(who, head, "hn-advance="+candidate, "hn-expected-tip="+tip, "hn-rule="+rule)
+}
+
+// standingServeImport runs hn sync origin in who's clone, which imports
+// the hosted facts and the candidates' code, as hn automerge --remote does
+// before it requests advancement.
+func standingServeImport(g *serveGovernedFixture, who string) {
+	g.t.Helper()
+	g.hn(who, "sync", "origin")
+}
+
+// standingServeRuleRefused requires who's rule push to be refused with code
+// on main, attributed to who, as one line pair, with every hosted ref
+// byte-identical afterwards (C-005). It returns the rejection and the two
+// relayed lines.
+func standingServeRuleRefused(t *testing.T, g *serveGovernedFixture, who, candidate, head, rule, code string) (serveRejection, []string) {
+	t.Helper()
+	before := g.ServerRefs()
+	output, rejections, ok := g.RulePush(who, candidate, head, rule)
+	if ok {
+		t.Fatalf("rule push of %s under %s by %s was accepted:\n%s", candidate, rule, who, output)
+	}
+	if after := g.ServerRefs(); after != before {
+		t.Fatalf("refused rule push changed hosted refs:\nbefore\n%s\nafter\n%s", before, after)
+	}
+	_, lines := extractServeRejections(output)
+	if len(rejections) != 1 || len(lines) != 2 {
+		t.Fatalf("got %d rejections in %d lines, want one pair:\n%s", len(rejections), len(lines), output)
+	}
+	rejection := rejections[0]
+	if rejection.Ref != serveGovernedMain || rejection.Actor != g.actors[who] || rejection.Code != code {
+		t.Fatalf("rejection %s %s %s, want %s %s %s:\n%s", rejection.Ref, rejection.Actor, rejection.Code,
+			serveGovernedMain, g.actors[who], code, output)
+	}
+	return rejection, lines
+}
+
+// standingServeNotSatisfied checks a protected-rule-not-satisfied line: the
+// candidate alone in ids, the next action with the candidate and rule
+// substituted, the missing kinds and the sentence with each unmet text.
+func standingServeNotSatisfied(t *testing.T, rejection serveRejection, candidate, rule string, missing []string, unmet ...string) {
+	t.Helper()
+	requireServeIDs(t, rejection, candidate)
+	requireServeNext(t, rejection, "run hn automerge "+candidate+" --rule "+rule)
+	requireServeMissing(t, rejection, missing...)
+	want := "candidate " + candidate + " does not satisfy rule " + rule + ": " + strings.Join(unmet, "; ") + "."
+	if rejection.Sentence != want {
+		t.Fatalf("sentence\n%q\nwant\n%q", rejection.Sentence, want)
+	}
+}
+
+// US4-1 on the server, US4-4, FR-018 and US4-5: an executing actor of a
+// satisfied standing rule advances main to the exact head; the same actor
+// needs maintainer acceptance without hn-rule, and an actor outside the
+// rule is refused at step 13.
+func TestStandingServeVerdictAcceptsRuleAdvancement(t *testing.T) {
+	// Arrange
+	g := newStandingServeFixture(t, standingServeDefaultPolicy)
+	p := g.StandingReady(map[string]string{"src/feature.txt": "standing feature\n"})
+	candidate, head := p.Candidate.ID, p.Candidate.Head
+	for _, who := range []string{"E", "X"} {
+		standingServeImport(g, who)
+	}
+
+	// Act and assert: US4-4, a direct push without push options.
+	direct := g.RejectMain("E", head, serveReasonProtectedNotReady)
+	requireServeIDs(t, direct, candidate)
+	requireServeMissing(t, direct, serveEvidenceAcceptance)
+
+	// FR-018: an advancement request without hn-rule still needs
+	// maintainer acceptance, at step 10.
+	unnamed := g.RejectMain("E", head, serveReasonProtectedNotReady, "hn-advance="+candidate, "hn-expected-tip="+g.Base)
+	requireServeIDs(t, unnamed, candidate)
+	requireServeMissing(t, unnamed, serveEvidenceAcceptance)
+
+	// US4-5: X executes rule other only.
+	outsider, _ := standingServeRuleRefused(t, g, "X", candidate, head, "ordinary", serveReasonAdvanceNotRuleExecutor)
+	requireServeIDs(t, outsider, candidate)
+	requireServeNext(t, outsider, "ask an executing actor of the rule to run hn automerge --remote")
+	if want := "actor " + g.actors["X"] + " requested advancement of refs/heads/main under rule ordinary and is not one of its executing actors in the base policy of " + candidate + "."; outsider.Sentence != want {
+		t.Fatalf("sentence\n%q\nwant\n%q", outsider.Sentence, want)
+	}
+
+	// US4-1: E's request under rule ordinary.
+	commits := serveHarnessGit(t, g.hosted, "rev-list", "--count", head)
+	output, rejections, ok := g.RulePush("E", candidate, head, "ordinary")
+	if !ok || len(rejections) != 0 {
+		t.Fatalf("rule advancement was refused:\n%s", output)
+	}
+	if tip := g.ServerTip("main"); tip != head {
+		t.Fatalf("hosted main = %s, want the candidate head %s", tip, head)
+	}
+	if got := serveHarnessGit(t, g.hosted, "rev-list", "--count", serveGovernedMain); got != commits {
+		t.Fatalf("main reaches %s commits and the head %s; the server created a commit", got, commits)
+	}
+	entries := g.pushLog()
+	if last := entries[len(entries)-1]; last.Verdict != servePushVerdictAccepted || last.Actor != g.actors["E"] {
+		t.Fatalf("push log entry %+v, want E's accepted push", last)
+	}
+}
+
+// standingServeVetoCase is US4-3: E imports the hosted facts for a ready
+// candidate, then S publishes a change request in its own push, and E's
+// rule push is refused at step 10 with protected-rule-veto. It returns the
+// fixture, the candidate, the change request, the rejection and the two
+// relayed lines.
+func standingServeVetoCase(t *testing.T) (*serveGovernedFixture, serveGovernedProposal, operationalEvent, serveRejection, []string) {
+	t.Helper()
+	g := newStandingServeFixture(t, standingServeDefaultPolicy)
+	p := g.StandingReady(map[string]string{"src/veto.txt": "vetoed change\n"})
+	standingServeImport(g, "E")
+	change := g.act("S", "review.submit", "review", p.Candidate.ID, "--request-changes", "--body", "Changes requested after the import.")
+	rejection, lines := standingServeRuleRefused(t, g, "E", p.Candidate.ID, p.Candidate.Head, "ordinary", serveReasonProtectedRuleVeto)
+	return g, p, change, rejection, lines
+}
+
+// US4-3: a trusted change request or a trusted failure that reaches the
+// server after the executing actor's import blocks the rule at step 10.
+func TestStandingServeVerdictVetoes(t *testing.T) {
+	// Arrange and act
+	g, p, change, rejection, _ := standingServeVetoCase(t)
+
+	// Assert
+	requireServeIDs(t, rejection, p.Candidate.ID, change.ID)
+	requireServeNext(t, rejection, "resolve the named events, then retry")
+	if want := "candidate " + p.Candidate.ID + " is blocked by rule ordinary: trusted change request " + change.ID + "."; rejection.Sentence != want {
+		t.Fatalf("sentence\n%q\nwant\n%q", rejection.Sentence, want)
+	}
+	if tip := g.ServerTip("main"); tip != g.Base {
+		t.Fatalf("hosted main moved to %s", tip)
+	}
+
+	// Arrange: a second candidate whose runner's latest result fails.
+	failing := g.StandingReady(map[string]string{"tests/failing.txt": "failing change\n"})
+	standingServeImport(g, "E")
+	writeServeTestFile(t, g.CIFailFlag, "fail\n", 0o644)
+	failure := g.RunCI(failing.Request.ID, "--rerun")
+	if err := os.Remove(g.CIFailFlag); err != nil {
+		t.Fatal(err)
+	}
+
+	// Act
+	rejection, _ = standingServeRuleRefused(t, g, "E", failing.Candidate.ID, failing.Candidate.Head, "ordinary", serveReasonProtectedRuleVeto)
+
+	// Assert
+	requireServeIDs(t, rejection, failing.Candidate.ID, failure.ID)
+	if want := "candidate " + failing.Candidate.ID + " is blocked by rule ordinary: trusted failure " + failure.ID + "."; rejection.Sentence != want {
+		t.Fatalf("sentence\n%q\nwant\n%q", rejection.Sentence, want)
+	}
+	if tip := g.ServerTip("main"); tip != g.Base {
+		t.Fatalf("hosted main moved to %s", tip)
+	}
+}
+
+// US4-6 and FR-017: M lands a policy amendment H1 on main. A builds the
+// candidate's head on top of H1 but signs the older base, so the server
+// reaches step 7a with a destination policy that differs from the base
+// policy and refuses before it reads any rule evidence.
+func TestStandingServeVerdictDestinationPolicy(t *testing.T) {
+	// Arrange
+	g := newStandingServeFixture(t, standingServeDefaultPolicy)
+	amended := standingServePolicyDocument()
+	amended.Rules[1].Paths = []string{"src/", "tests/", "docs/", "other/"}
+	h1 := g.Commit(g.Base, map[string]string{serveGovernedPolicyPath: amended.JSON(g.actors)})
+	g.ReadyProposal(g.Base, h1)
+	g.AcceptMain("M", h1)
+	head := g.Commit(h1, map[string]string{"src/after-amendment.txt": "built on the amendment\n"})
+	p := g.OpenProposal(g.Base, head)
+	g.Approve(p.ID)
+	g.RunCI(g.RequestCI(p.ID).ID)
+	standingServeImport(g, "E")
+	_, baseDigest, err := loadReplicationPolicyAt(g.hosted, g.hosted, g.Base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, destDigest, err := loadReplicationPolicyAt(g.hosted, g.hosted, h1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if baseDigest == destDigest {
+		t.Fatal("the amendment did not change the policy digest")
+	}
+
+	// Act
+	rejection, _ := standingServeRuleRefused(t, g, "E", p.ID, head, "ordinary", serveReasonProtectedDestinationPolicy)
+
+	// Assert
+	requireServeIDs(t, rejection, p.ID)
+	requireServeMissing(t, rejection, serveEvidenceProposal)
+	requireServeNext(t, rejection, "revise "+p.ID+" against "+h1)
+	want := "refs/heads/main at " + h1[:8] + " has policy " + destDigest + " and candidate " + p.ID +
+		" was based on policy " + baseDigest + "; rule ordinary applies only under its own policy."
+	if rejection.Sentence != want {
+		t.Fatalf("sentence\n%q\nwant\n%q", rejection.Sentence, want)
+	}
+	if tip := g.ServerTip("main"); tip != h1 {
+		t.Fatalf("hosted main moved to %s", tip)
+	}
+}
+
+// Step 10 under a rule, conditions a, b, c, e and f, each
+// protected-rule-not-satisfied; a maintainer rejection is still
+// protected-blocked at step 9; and boundary fixture B5 after the verdict:
+// M's maintainer advancement naming a rule that does not exist.
+func TestStandingServeVerdictRuleNotSatisfied(t *testing.T) {
+	// Arrange
+	g := newStandingServeFixture(t, standingServeDefaultPolicy)
+	ready := g.StandingReady(map[string]string{"src/ready.txt": "ready change\n"})
+	outsidePath := g.StandingReady(map[string]string{"other/x": "outside every rule path\n"})
+	g.Author = "S"
+	otherAuthor := g.StandingReady(map[string]string{"src/by-s.txt": "authored by S\n"})
+	g.Author = "A"
+	unapproved := g.OpenProposal(g.Base, g.Commit(g.Base, map[string]string{"src/unapproved.txt": "no approval\n"}))
+	g.RunCI(g.RequestCI(unapproved.ID).ID)
+	untested := g.OpenProposal(g.Base, g.Commit(g.Base, map[string]string{"src/untested.txt": "no CI\n"}))
+	g.Approve(untested.ID)
+	standingServeImport(g, "E")
+	id, head := ready.Candidate.ID, ready.Candidate.Head
+
+	for _, tc := range []struct {
+		name, candidate, head, rule string
+		missing                     []string
+		unmet                       []string
+	}{
+		{"a: rule missing", id, head, "nosuch", nil,
+			[]string{`automerge rule "nosuch" does not exist in the signed base policy`}},
+		{"b: acceptance maintainers", id, head, "maint", nil,
+			[]string{`automerge rule "maint" has acceptance "maintainers" and needs maintainer acceptance`}},
+		{"c: another target branch", id, head, "release", nil,
+			[]string{`rule target "release" does not match main`}},
+		{"e: author outside", otherAuthor.Candidate.ID, otherAuthor.Candidate.Head, "ordinary", nil,
+			[]string{"proposal author is not allowed by the rule"}},
+		{"e: path outside", outsidePath.Candidate.ID, outsidePath.Candidate.Head, "ordinary", nil,
+			[]string{`changed path "other/x" is outside the rule allowlist`}},
+		{"f: approval missing", unapproved.ID, unapproved.Head, "ordinary", []string{serveEvidenceReview},
+			[]string{"rule approval threshold is unmet: 0 of 1 counted approvals"}},
+		{"f: CI missing", untested.ID, untested.Head, "ordinary", []string{serveEvidenceCI},
+			[]string{`pipeline "test" has 0 of 1 passing trusted results`}},
+	} {
+		// Act
+		rejection, _ := standingServeRuleRefused(t, g, "E", tc.candidate, tc.head, tc.rule, serveReasonProtectedRuleNotSatisfied)
+
+		// Assert
+		t.Logf("%s: %s", tc.name, rejection.Sentence)
+		standingServeNotSatisfied(t, rejection, tc.candidate, tc.rule, tc.missing, tc.unmet...)
+	}
+
+	// B5 after the verdict: once M accepts the candidate, M could advance
+	// it without hn-rule, but the maintainer path does not apply to a
+	// request that names a rule, so naming one that does not exist fails.
+	g.Accept(id)
+	b5, _ := standingServeRuleRefused(t, g, "M", id, head, "nosuch", serveReasonProtectedRuleNotSatisfied)
+	standingServeNotSatisfied(t, b5, id, "nosuch", nil, `automerge rule "nosuch" does not exist in the signed base policy`)
+
+	// Step 9 before any rule step: a current maintainer rejection.
+	decision := g.Reject(id)
+	standingServeImport(g, "E")
+	blocked, _ := standingServeRuleRefused(t, g, "E", id, head, "ordinary", serveReasonProtectedBlocked)
+	requireServeIDs(t, blocked, id, decision.ID)
+	requireServeSentence(t, blocked, "has a current maintainer rejection "+decision.ID)
+	if tip := g.ServerTip("main"); tip != g.Base {
+		t.Fatalf("hosted main moved to %s", tip)
+	}
+}
+
+// Two executing actors request advancement of two ready candidates against
+// the same expected tip at the same time. The repository lock serializes
+// them: exactly one moves main, and the other is refused at step 3 or 5.
+func TestStandingServeVerdictRace(t *testing.T) {
+	// Arrange
+	g := newStandingServeFixture(t, func(actors map[string]string) string {
+		policy := standingServePolicyDocument()
+		policy.Rules[0].Actors = []string{"E", "X"}
+		return policy.JSON(actors)
+	})
+	first := g.StandingReady(map[string]string{"src/first.txt": "first\n"})
+	second := g.StandingReady(map[string]string{"src/second.txt": "second\n"})
+	requests := []struct {
+		who string
+		p   serveGovernedProposal
+	}{{"E", first}, {"X", second}}
+	for _, request := range requests {
+		standingServeImport(g, request.who)
+	}
+
+	// Act
+	type outcome struct {
+		output     string
+		rejections []serveRejection
+		ok         bool
+	}
+	outcomes := make([]outcome, len(requests))
+	var wait sync.WaitGroup
+	for index, request := range requests {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			output, rejections, ok := g.PushMain(request.who, request.p.Candidate.Head,
+				"hn-advance="+request.p.Candidate.ID, "hn-expected-tip="+g.Base, "hn-rule=ordinary")
+			outcomes[index] = outcome{output, rejections, ok}
+		}()
+	}
+	wait.Wait()
+
+	// Assert
+	var winners, losers []int
+	for index, result := range outcomes {
+		if result.ok {
+			winners = append(winners, index)
+		} else {
+			losers = append(losers, index)
+		}
+	}
+	if len(winners) != 1 || len(losers) != 1 {
+		t.Fatalf("want exactly one accepted request, got outcomes:\n%s\n---\n%s", outcomes[0].output, outcomes[1].output)
+	}
+	winner, loser := requests[winners[0]], outcomes[losers[0]]
+	if tip := g.ServerTip("main"); tip != winner.p.Candidate.Head {
+		t.Fatalf("hosted main = %s, want the winner's head %s", tip, winner.p.Candidate.Head)
+	}
+	if len(loser.rejections) != 1 {
+		t.Fatalf("loser got %d rejections:\n%s", len(loser.rejections), loser.output)
+	}
+	if code := loser.rejections[0].Code; code != serveReasonProtectedStaleTip && code != serveReasonProtectedNotFastForward {
+		t.Fatalf("loser code %s, want protected-stale-tip or protected-not-fast-forward:\n%s", code, loser.output)
+	}
+}
+
+// T069: the guide's standing-serve-veto example is the real US4-3 output,
+// line for line, after its placeholders are replaced with fixture IDs.
+func TestStandingServeDocumentedVeto(t *testing.T) {
+	// Arrange
+	contents, err := os.ReadFile(filepath.Join("docs", "serve-v0.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	const marker = "<!-- example: standing-serve-veto -->\n"
+	guide := string(contents)
+	if strings.Count(guide, marker) != 1 {
+		t.Fatalf("the serve guide must contain exactly one %q", strings.TrimSpace(marker))
+	}
+	_, after, _ := strings.Cut(guide, marker)
+	_, after, found := strings.Cut(after, "```text\n")
+	if !found {
+		t.Fatal("no text block after the example marker")
+	}
+	block, _, found := strings.Cut(after, "```\n")
+	if !found {
+		t.Fatal("unterminated example block")
+	}
+	documented := strings.Split(strings.TrimSuffix(block, "\n"), "\n")
+	if len(documented) != 2 {
+		t.Fatalf("example has %d lines, want the rejection line and its sentence", len(documented))
+	}
+
+	// Act
+	g, p, change, _, lines := standingServeVetoCase(t)
+
+	// Assert
+	replace := strings.NewReplacer(
+		"<executor>", g.actors["E"],
+		"sha256:<candidate>", p.Candidate.ID,
+		"sha256:<change request>", change.ID,
+	)
+	want := []string{replace.Replace(documented[0]), replace.Replace(documented[1])}
+	requireServeRelayedLines(t, lines, want)
 }

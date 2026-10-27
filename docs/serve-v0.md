@@ -772,20 +772,23 @@ anything other than a full actor fingerprint.
 
 ### Push options
 
-The server accepts two push options, each at most once:
+The server accepts three push options, each at most once:
 
 | Option | Value |
 |----|----|
 | `hn-advance` | a full candidate event ID, `sha256:` followed by 64 lowercase hex digits |
 | `hn-expected-tip` | a full commit ID |
+| `hn-rule` | an automerge rule name, 1 to 64 of `A-Z a-z 0-9 - _ .`, excluding `.` and `..` |
 
 A push with any other option, a repeated option or a malformed value is
 rejected: every ref update in it gets `unsupported-command` with the sentence
-`push options other than hn-advance and hn-expected-tip are not supported.`.
+`push options other than hn-advance, hn-expected-tip and hn-rule are not supported.`.
+`hn-rule` without `hn-advance` in the same push is rejected the same way.
 A push with `hn-advance` must contain exactly one ref update, to a protected
 branch; otherwise every ref update gets `unsupported-command` as well.
 [Advancing a protected branch](#advancing-a-protected-branch) describes what
-the two options do.
+`hn-advance` and `hn-expected-tip` do, and
+[Automerge rules](#automerge-rules) describes `hn-rule`.
 
 ### Ref update limits
 
@@ -1108,6 +1111,10 @@ tip the push replaced. That head carries the trusted CI results both policies
 require. The server checks this with the same signed facts every client can
 verify. It never creates a commit and never signs anything, and its
 acceptance is not evidence: a client trusts the branch only through the facts.
+When an advancement request names an automerge rule, the rule's standing
+acceptance takes the place of maintainer acceptance, and the base policy and
+the destination policy must be the same policy, as
+[Automerge rules](#automerge-rules) describes.
 
 ### The checks for a protected update
 
@@ -1155,6 +1162,10 @@ that fails:
     protected baseline.
 13. With `hn-advance`, a pushing actor who is not a maintainer under both the
     base and the destination policy gets `advance-not-maintainer`.
+
+An advancement request that names an automerge rule with `hn-rule` adds step
+7a, judges steps 10 and 13 by the rule and skips step 11, as
+[Automerge rules](#automerge-rules) describes.
 
 Facts in the same push count once their actor refs have passed. A maintainer
 can push an acceptance in `refs/hn/actors/ACTOR` together with the protected
@@ -1213,7 +1224,10 @@ maintainer, because the signed facts already carry the maintainers'
 acceptance. An advancement request with the `hn-advance` push option, which
 `hn merge --remote` sends, additionally requires the pushing actor to be a
 maintainer under both policies (step 13). See
-[Advancing a protected branch](#advancing-a-protected-branch).
+[Advancing a protected branch](#advancing-a-protected-branch). A request that
+also names an automerge rule with `hn-rule` requires the pushing actor to be
+one of the rule's executing actors instead, as
+[Automerge rules](#automerge-rules) describes.
 
 ### Rejection examples for protected branches
 
@@ -1428,14 +1442,65 @@ asks you to update it and rerun. Finally it runs the advancement of
 `hn merge PROPOSAL --remote REMOTE`, bound to that tip with `hn-expected-tip`
 and to the rule's executing actor, and the server applies every check above.
 
-The server itself does not evaluate automerge rules. Evidence that reaches the
-server after the import and before the push is judged only by the ordinary
-protected-branch checks.
-
 Without `--remote`, `hn automerge --execute` refuses a target branch that
 tracks an `hn serve` remote, or a remote it cannot reach to tell, before it
 creates a local merge commit or merge fact, because the server never accepts a
 local merge commit on a protected branch.
+
+#### How the server judges a rule
+
+An advancement request that carries `hn-rule=NAME` together with `hn-advance`
+and `hn-expected-tip` asks the server to accept the candidate under the named
+rule in place of maintainer acceptance. The server evaluates the rule itself,
+from the candidate's signed base policy and the facts it holds, with the same
+derivation `hn automerge` uses in the clone. It adds one check to
+[the checks for a protected update](#the-checks-for-a-protected-update),
+judges two by the rule and skips one:
+
+- **Step 7a**, after step 7: the destination policy at the tip must be the
+  candidate's base policy, compared by digest. A rule applies only under the
+  policy that defines it, so when the branch's policy changed after the
+  candidate's base, the request is `protected-destination-policy` with
+  `missing=proposal` and the next action `revise ID against T`.
+- **Step 10**: the rule replaces readiness and maintainer acceptance. The
+  request is `protected-rule-not-satisfied` when the base policy has no rule
+  with that name, when the rule's acceptance mode is `maintainers`, when the
+  rule targets another branch, when the author or a changed path is outside
+  the rule, when the candidate changes the policy or a protected-check path,
+  or when counted approvals or passing results are below the policy's
+  thresholds. The last case names `missing=review`, `missing=ci` or both, and
+  the next action is `run hn automerge ID --rule NAME`. A current trusted
+  change request or a current trusted failure is `protected-rule-veto`, and
+  `ids` names the candidate and then each blocking event.
+- **Step 11** does not run. Step 7a already made the destination policy the
+  base policy, so step 11 would repeat step 10.
+- **Step 13**: the pushing actor must be listed in the rule's `actors` in the
+  base policy; otherwise the request is `advance-not-rule-executor`. The
+  pushing actor does not need to be a maintainer.
+
+Steps 1 to 9 and step 12 run unchanged, so a current maintainer rejection is
+still `protected-blocked` at step 9. The server reads the facts it holds when
+the push arrives. A trusted change request or failing run that reaches the
+server after `hn automerge` imported the facts and before it pushed therefore
+blocks the advancement at step 10:
+
+<!-- example: standing-serve-veto -->
+Reviewer `S` requests changes after the executing actor's import (US4-3):
+
+```text
+hn-serve/1 reject ref=refs/heads/main actor=<executor> code=protected-rule-veto ids=sha256:<candidate>,sha256:<change request> next="resolve the named events, then retry"
+hn-serve: candidate sha256:<candidate> is blocked by rule ordinary: trusted change request sha256:<change request>.
+```
+
+The values in angle brackets stand for the executing actor, the candidate and
+the change request. Git relays both lines with a `remote: ` prefix.
+
+A direct push and an advancement request without `hn-rule` are judged as
+before: they need maintainer acceptance under both policies, whatever
+automerge rules the policy has. The server signs nothing and creates no commit
+for a rule advancement either. The three reason codes for rule advancement are
+listed in
+[Reason codes for rule advancement](protocol-v0.md#reason-codes-for-rule-advancement).
 
 ### Two advancements at the same time
 

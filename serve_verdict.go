@@ -218,13 +218,6 @@ func evaluateServePush(ctx *serveVerdictContext, updates []serveRefUpdate, optio
 		return rejectServeEveryUpdate(ctx, updates, serveReasonUnsupportedCommand,
 			"hn-advance requires a push with exactly one ref update, to a protected branch.")
 	}
-	// Until the protected verdict evaluates rules (WP14), a request that
-	// names a rule is refused like an older server refuses it, so no build
-	// applies the maintainer path to it (FR-025).
-	if options.Rule != "" {
-		return rejectServeEveryUpdate(ctx, updates, serveReasonUnsupportedCommand,
-			"this server does not evaluate hn-rule advancement yet.")
-	}
 	ordered := slices.Clone(updates)
 	sort.SliceStable(ordered, func(i, j int) bool { return ordered[i].Ref < ordered[j].Ref })
 	ctx.PushUpdates = ordered
