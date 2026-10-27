@@ -566,11 +566,11 @@ func validateMergeEventWith(memo *ruleValidationMemo, merge, proposal StoredEven
 // localRuleMergeCheck is path (b) for local projection. A ruleFactError is
 // returned as is, so its message reads the same on every surface; a missing
 // input such as an absent commit refuses the fact and never evaluates it.
+// In a shallow clone an absent input is a ShallowDependencyGap with
+// recovery guidance (FR-014).
 func localRuleMergeCheck(memo *ruleValidationMemo, merge, proposal StoredEvent, byID map[string]StoredEvent) error {
-	// Interim boundary (FR-025): the shallow closure rules of WP09 do not
-	// exist yet, so a shallow clone cannot know it holds every input.
-	if shallow, err := repositoryIsShallow(); err != nil || shallow {
-		return fmt.Errorf("rule merge %s cannot be verified in a shallow clone by this build; verify it in a full clone", merge.ID)
+	if err := shallowRuleObjectGuard(shallowRuleOperation(), proposal, nil); err != nil {
+		return err
 	}
 	err := validateRuleMergeFactWith(memo, merge, proposal, byID)
 	var factErr *ruleFactError

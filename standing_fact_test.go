@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -27,7 +28,7 @@ import (
 var standingFactRulePathSurfaces = map[string]bool{
 	"local":   true,
 	"import":  true,
-	"shallow": false,
+	"shallow": true,
 }
 
 // standingFactSurfaces is the order the boundary test visits surfaces in.
@@ -1011,5 +1012,513 @@ func TestStandingFactImportLegacyHistory(t *testing.T) {
 		default:
 			t.Fatalf("%s has unexpected verdict %q", item.fixture.ID, item.fixture.Verdict)
 		}
+	}
+}
+
+// Shallow verification tests (WP09, FR-012 to FR-014, FR-025, C-004).
+//
+// A shallow verifier is a depth-one clone of the remote whose accepted refs
+// are filled with Git alone, so each test decides exactly which facts and
+// objects the verifier holds. Facts reach the remote with raw Git as in the
+// import tests, and the signer's chain is reset on both sides after each
+// case.
+
+// standingFactShallowArrangement is what a shallow verifier leaves out. The
+// zero value is the complete closure of decision 01M5VSEHFV2K03JJY0NN6DFNAT:
+// every actor chain in full, every proposal code ref and every scratch
+// branch (the harness pushes each commit to one) at depth one, so the base
+// and head of every candidate, the base policy blob and the pipeline
+// definitions are present.
+type standingFactShallowArrangement struct {
+	SkipChains    []string // roles whose actor chains are not fetched
+	SkipProposals []string // candidates whose proposal code refs are not fetched
+	SkipCommits   []string // commits no fetched ref may point at
+	DropObjects   []string // objects deleted from the verifier after fetching
+}
+
+// standingFactShallowVerifierWith builds a shallow verifier with the
+// replication selection the existing shallow verifier uses, --all for
+// origin, holding the complete closure minus what arrangement leaves out.
+func standingFactShallowVerifierWith(h *standingHarness, arrangement standingFactShallowArrangement) string {
+	h.t.Helper()
+	shallow := filepath.Join(h.t.TempDir(), "shallow")
+	runOperationalGit(h.t, "", "clone", "-q", "--depth", "1", "file://"+h.Remote(), shallow)
+	configureOperationalGit(h.t, shallow, "Standing Shallow Verifier")
+	h.hnIn(shallow, "replication", "select", "origin", "--all")
+	skipRef, skipCommit := map[string]bool{}, map[string]bool{}
+	for _, role := range arrangement.SkipChains {
+		skipRef[actorRef(h.Actor(role))] = true
+	}
+	for _, candidate := range arrangement.SkipProposals {
+		skipRef[proposalRef(candidate)] = true
+	}
+	for _, commit := range arrangement.SkipCommits {
+		skipCommit[commit] = true
+	}
+	var chains, code []string
+	listed := runOperationalGit(h.t, h.Remote(), "for-each-ref", "--format=%(objectname) %(refname)",
+		"refs/hn/actors", "refs/hn/proposals", "refs/heads/standing")
+	for _, line := range strings.Split(listed, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) != 2 || skipRef[fields[1]] || skipCommit[fields[0]] {
+			continue
+		}
+		ref := fields[1]
+		switch {
+		case strings.HasPrefix(ref, "refs/hn/actors/"):
+			chains = append(chains, "+"+ref+":"+acceptedActorRef("origin", strings.TrimPrefix(ref, "refs/hn/actors/")))
+		case strings.HasPrefix(ref, "refs/hn/proposals/"):
+			code = append(code, "+"+ref+":"+acceptedProposalRef("origin", strings.TrimPrefix(ref, "refs/hn/proposals/")))
+		default:
+			code = append(code, "+"+ref+":refs/remotes/origin/"+strings.TrimPrefix(ref, "refs/heads/"))
+		}
+	}
+	if len(chains) > 0 {
+		runOperationalGit(h.t, shallow, append([]string{"fetch", "-q", "origin"}, chains...)...)
+	}
+	if len(code) > 0 {
+		runOperationalGit(h.t, shallow, append([]string{"fetch", "-q", "--depth", "1", "origin"}, code...)...)
+	}
+	standingFactDropObjects(h.t, shallow, arrangement.DropObjects...)
+	if value := runOperationalGit(h.t, shallow, "rev-parse", "--is-shallow-repository"); value != "true" {
+		h.t.Fatalf("shallow verifier is not shallow: %s", value)
+	}
+	return shallow
+}
+
+// standingFactDropObjects deletes objects from repository with Git and the
+// file system alone: every pack is unpacked into loose objects, and the
+// loose files of objects are removed. Nothing else in the repository
+// changes.
+func standingFactDropObjects(t *testing.T, repository string, objects ...string) {
+	t.Helper()
+	if len(objects) == 0 {
+		return
+	}
+	objectDir := filepath.Join(repository, ".git", "objects")
+	packs, err := filepath.Glob(filepath.Join(objectDir, "pack", "*.pack"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	contents := make([][]byte, 0, len(packs))
+	for _, pack := range packs {
+		data, err := os.ReadFile(pack)
+		if err != nil {
+			t.Fatal(err)
+		}
+		contents = append(contents, data)
+	}
+	// unpack-objects skips objects the repository already holds, so the
+	// packs leave before their objects are written loose.
+	files, err := filepath.Glob(filepath.Join(objectDir, "pack", "pack-*"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, file := range files {
+		if err := os.Remove(file); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, data := range contents {
+		standingHarnessGitInput(t, repository, data, nil, "unpack-objects", "-q")
+	}
+	for _, object := range objects {
+		if err := os.Remove(filepath.Join(objectDir, object[:2], object[2:])); err != nil {
+			t.Fatalf("drop object %s: %v", object, err)
+		}
+		runOperationalGitFailure(t, repository, "cat-file", "-e", object)
+	}
+}
+
+// standingFactShallowGap is the stable diagnostic of a shallow dependency
+// gap of kind for missing: owned by candidate with the exact proposal
+// selection as recovery, or, with no candidate, an event fact recovered by
+// selecting the actor history that supplies it. Every harness verifier
+// selects --all, so no gap names an already selected supplier.
+func standingFactShallowGap(kind ShallowDependencyKind, missing, candidate string) string {
+	gap := "kind=" + string(kind) + "; missing=" + missing
+	if candidate == "" {
+		return gap + "; remote=origin; recovery=select the actor history supplying full event ID " + missing + ", then retry"
+	}
+	return gap + "; owner=" + replicationProposal + ":" + candidate + "; remote=origin; ref=" + proposalRef(candidate) +
+		"; recovery=hn replication select origin --proposal " + candidate +
+		" (preserve existing selectors and budgets), then hn sync origin --recover-shallow"
+}
+
+// standingFactAssertShallowRefused requires hn proposal status of candidate
+// and hn log in the shallow verifier to refuse with want, to leave every ref
+// unchanged, and never to report the interim refusal WP09 removed or a
+// judged empty change list. A semantic refusal must not be a shallow gap.
+func standingFactAssertShallowRefused(t *testing.T, h *standingHarness, verifier, candidate, fact, want string, semantic bool) {
+	t.Helper()
+	for _, command := range [][]string{{"proposal", "status", candidate}, {"log"}} {
+		before := runOperationalGit(t, verifier, "for-each-ref", "--format=%(refname) %(objectname)")
+		output, status := h.RunIn(verifier, command...)
+		t.Logf("hn %s in the shallow verifier exited %d:\n%s", strings.Join(command, " "), status, output)
+		if status == 0 || !strings.Contains(output, want) {
+			t.Fatalf("hn %s in the shallow verifier exited %d, want a refusal containing %q:\n%s", strings.Join(command, " "), status, want, output)
+		}
+		if semantic && strings.Contains(output, "shallow dependency gap") {
+			t.Fatalf("hn %s refused a semantic row through a shallow gap:\n%s", strings.Join(command, " "), output)
+		}
+		for _, never := range []string{standingFactInterimShallow(fact), "the candidate has no changed paths"} {
+			if strings.Contains(output, never) {
+				t.Fatalf("hn %s reported %q:\n%s", strings.Join(command, " "), never, output)
+			}
+		}
+		if after := runOperationalGit(t, verifier, "for-each-ref", "--format=%(refname) %(objectname)"); after != before {
+			t.Fatalf("hn %s changed the shallow verifier's refs:\nbefore:\n%s\nafter:\n%s", strings.Join(command, " "), before, after)
+		}
+	}
+}
+
+// standingFactResetChain makes role's local and remote chains clean again.
+func standingFactResetChain(h *standingHarness, role, clean string) {
+	h.t.Helper()
+	standingFactSetChain(h, role, clean)
+	standingFactRawPublish(h, role)
+}
+
+// standingFactShallowControl publishes control with raw Git, requires a
+// shallow verifier with the complete closure to report its candidate
+// merged, and resets E's chain to clean.
+func standingFactShallowControl(t *testing.T, h *standingHarness, control standingHarnessSigned, clean string) {
+	t.Helper()
+	if control.Role != "E" {
+		t.Fatalf("control %s is signed by %s, want E", control.ID, control.Role)
+	}
+	standingFactRawPublish(h, "E")
+	verifier := standingFactShallowVerifierWith(h, standingFactShallowArrangement{})
+	standingFactAssertVerifierMerged(t, h, verifier, control.Candidate, control.ID)
+	standingFactResetChain(h, "E", clean)
+}
+
+// T041 step 2: the valid rule merge fact of User Story 1 verifies in a
+// shallow clone that holds its complete closure. This arrangement, the zero
+// standingFactShallowArrangement, is the shallow fixture of the matrix.
+func TestStandingFactShallowValidRuleMerge(t *testing.T) {
+	h := newStandingHarness(t, standingHarnessDefaultPolicy())
+	candidate := h.ReadyCandidate(nil)
+	fact := h.SignFact("E", nil)
+	standingFactRawPublish(h, "E")
+	verifier := standingFactShallowVerifierWith(h, standingFactShallowArrangement{})
+	standingFactAssertVerifierMerged(t, h, verifier, candidate.ID, fact)
+	if output, status := h.RunIn(verifier, "issue", "list"); status != 0 {
+		t.Fatalf("hn issue list in the shallow verifier exited %d:\n%s", status, output)
+	}
+}
+
+// standingFactShallowDefect runs one semantic row on the shallow surface.
+// The row's matched valid control is accepted first with the complete
+// closure; then each shape of the defect, published with raw Git, is
+// refused by a fresh shallow verifier with the same arrangement, naming the
+// row's derivation check (or today's maintainer-path refusal for F19 and
+// F20) and never a shallow gap.
+func standingFactShallowDefect(t *testing.T, h *standingHarness, defect standingHarnessDefect) {
+	t.Helper()
+	started := time.Now()
+	c := defect.Prepare()
+	cleanE := standingFactChainHead(h, "E")
+	clean := standingFactChainHead(h, defect.Signer)
+	for _, role := range []string{"E", defect.Signer} {
+		if remote := standingFactRemoteChain(h, role); remote != standingFactChainHead(h, role) {
+			t.Fatalf("%s's chain is %q locally and %q on the remote before %s", role, standingFactChainHead(h, role), remote, defect.ID)
+		}
+	}
+
+	// F15 to F18 controls open their own candidate, which needs syncs, so
+	// the control runs while no defect is on the remote.
+	standingFactShallowControl(t, h, defect.Control(c), cleanE)
+
+	signed := defect.Build(c)
+	if len(signed) == 0 {
+		t.Fatalf("%s signed nothing", defect.ID)
+	}
+	for index, install := range standingFactShapes(h, clean, c, signed) {
+		fact := install()
+		if fact.Candidate != c.Candidate.ID {
+			t.Fatalf("%s shape %d cites %s, want %s", defect.ID, index, fact.Candidate, c.Candidate.ID)
+		}
+		standingFactRawPublish(h, defect.Signer)
+		verifier := standingFactShallowVerifierWith(h, standingFactShallowArrangement{})
+		standingFactAssertShallowRefused(t, h, verifier, c.Candidate.ID, fact.ID, standingFactRefusal(defect, fact.ID), true)
+		standingFactResetChain(h, defect.Signer, clean)
+	}
+	t.Logf("%s: control accepted and %d shape(s) refused with %q in a shallow clone in %s",
+		defect.ID, len(signed), defect.Expected, time.Since(started).Round(time.Millisecond))
+}
+
+// T041 step 3 (NFR-001, decisions 01M5VSEHFV2K03JJY0NN6DFNAT and
+// 01M5VWE2Q3AVA8NPGRCSKBFW5M): F01 to F20 on the shallow surface, each with
+// a complete closure and a passing matched control.
+//
+// Cost decision: as in TestStandingFactImportDefects, the fact-only rows
+// share one harness and every row that builds its own candidates gets a
+// fresh harness.
+func TestStandingFactShallowDefects(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds about twenty candidates for the fixture matrix")
+	}
+	started := time.Now()
+	binary := buildOperationalBinary(t)
+	factOnly := map[string]bool{"F01": true, "F03": true, "F04": true, "F13": true, "F14": true, "F19": true, "F20": true}
+	// F21 and F22 are missing-dependency rows, in the tests below.
+	semantic := func(id string) bool { return id != "F21" && id != "F22" }
+	t.Run("fact-only rows", func(t *testing.T) {
+		h := newStandingHarnessWithBinary(t, binary, standingHarnessDefaultPolicy())
+		defects := standingHarnessDefects(h, h.ReadyCandidate(nil))
+		for _, id := range standingHarnessDefectIDs {
+			if factOnly[id] {
+				standingFactShallowDefect(t, h, defects[id])
+			}
+		}
+	})
+	for _, id := range standingHarnessDefectIDs {
+		if factOnly[id] || !semantic(id) {
+			continue
+		}
+		t.Run(id, func(t *testing.T) {
+			h := newStandingHarnessWithBinary(t, binary, standingHarnessDefaultPolicy())
+			defect, exists := standingHarnessDefects(h, h.ReadyCandidate(nil))[id]
+			if !exists {
+				t.Fatalf("defect table lacks %s", id)
+			}
+			standingFactShallowDefect(t, h, defect)
+		})
+	}
+	t.Logf("F01 to F20 in a shallow clone took %s", time.Since(started).Round(time.Millisecond))
+}
+
+// T041 step 4 (FR-013, FR-014): the missing-dependency table of the shallow
+// surface. Each row is a valid rule merge fact by E that a shallow verifier
+// missing one input refuses with that input's gap kind and recovery, with
+// every ref unchanged. The policy blob and pipeline definition rows delete
+// one object from an otherwise complete verifier, because no fetch through
+// Git's public commands yields a commit without its tree's blobs. F21 runs
+// last, since its approval stays unpublished until the end.
+func TestStandingFactShallowMissingDependencies(t *testing.T) {
+	h := newStandingHarness(t, standingHarnessDefaultPolicy())
+	c := h.Case(h.ReadyCandidate(nil).ID)
+	// A candidate whose base is a scratch commit, so the verifier can lack
+	// the base while holding the head.
+	offMainBase := h.Commit("M", h.base, nil)
+	offMain := h.readyCase("A", offMainBase, nil)
+	policyBlob := runOperationalGit(t, h.Remote(), "rev-parse", c.Candidate.Base+":"+serveGovernedPolicyPath)
+	pipelineBlob := runOperationalGit(t, h.Remote(), "rev-parse", c.Candidate.Head+":.hn/pipelines/"+standingHarnessPipeline+".json")
+	clean := standingFactChainHead(h, "E")
+
+	rows := []struct {
+		name        string
+		c           standingHarnessCase
+		arrangement standingFactShallowArrangement
+		kind        ShallowDependencyKind
+		missing     string
+		owner       string
+	}{
+		{"missing review", c, standingFactShallowArrangement{SkipChains: []string{"R"}}, shallowSelectedFact, c.Approval.ID, ""},
+		{"missing run result", c, standingFactShallowArrangement{SkipChains: []string{"T"}}, shallowSelectedFact, c.Result.ID, ""},
+		{"missing run request", c, standingFactShallowArrangement{SkipChains: []string{"M"}}, shallowRunRequest, c.Request.ID, ""},
+		{"missing base commit", offMain, standingFactShallowArrangement{SkipCommits: []string{offMainBase}},
+			shallowBaseCommit, offMainBase, offMain.Candidate.ID},
+		{"missing head", c, standingFactShallowArrangement{SkipCommits: []string{c.Candidate.Head}},
+			shallowProposalCodeRef, c.Candidate.Head, c.Candidate.ID},
+		{"missing code ref", c, standingFactShallowArrangement{SkipProposals: []string{c.Candidate.ID}},
+			shallowProposalCodeRef, c.Candidate.Head, c.Candidate.ID},
+		{"missing policy blob", c, standingFactShallowArrangement{DropObjects: []string{policyBlob}},
+			shallowPolicyBlob, policyBlob, c.Candidate.ID},
+		{"missing pipeline definition", c, standingFactShallowArrangement{DropObjects: []string{pipelineBlob}},
+			shallowPipelineDefinition, pipelineBlob, c.Candidate.ID},
+	}
+	for _, row := range rows {
+		fact := h.SignFactFor("E", row.c, nil)
+		standingFactRawPublish(h, "E")
+		verifier := standingFactShallowVerifierWith(h, row.arrangement)
+		standingFactAssertShallowRefused(t, h, verifier, row.c.Candidate.ID, fact.ID, standingFactShallowGap(row.kind, row.missing, row.owner), false)
+		t.Logf("%s: refused as %s %s", row.name, row.kind, row.missing)
+		standingFactResetChain(h, "E", clean)
+	}
+
+	// F21: R's approval is signed and never published.
+	f21 := standingHarnessDefects(h, c.Candidate)["F21"]
+	withheld := f21.Prepare()
+	signed := f21.Build(withheld)
+	if len(signed) != 1 {
+		t.Fatalf("F21 signed %d facts, want 1", len(signed))
+	}
+	standingFactRawPublish(h, "E")
+	verifier := standingFactShallowVerifierWith(h, standingFactShallowArrangement{})
+	standingFactAssertShallowRefused(t, h, verifier, withheld.Candidate.ID, signed[0].ID,
+		standingFactShallowGap(shallowSelectedFact, withheld.Approval.ID, ""), false)
+	h.Publish("R")
+	verifier = standingFactShallowVerifierWith(h, standingFactShallowArrangement{})
+	standingFactAssertVerifierMerged(t, h, verifier, withheld.Candidate.ID, signed[0].ID)
+}
+
+// T041 step 5 (C-004): maintainer merges keep their shallow verdicts. An
+// acceptance merge fact whose decision is missing still reports a missing
+// decision, and with a rule claim the same gap is labelled a selected event
+// fact. A maintainer merge with a rule claim verifies without its proposal
+// code ref, which path (a) never reads, while a rule merge for the same
+// candidate in the same verifier waits for it. The candidate's head commit
+// stays present: validating the maintainer's acceptance decision reads the
+// pipeline definitions at the head, as it did before this mission. B2 and
+// B3 are verified on the shallow surface by TestStandingFactBoundary.
+func TestStandingFactShallowMaintainerMergesUnchanged(t *testing.T) {
+	h := newStandingHarness(t, standingHarnessDefaultPolicy())
+	unaccepted := h.Case(h.ReadyCandidate(nil).ID)
+	// No chain supplies this decision.
+	absent := eventID([]byte("standing shallow: a decision no chain supplies"))
+	cleanM := standingFactChainHead(h, "M")
+	for _, row := range []struct {
+		rule string
+		kind ShallowDependencyKind
+	}{{"", shallowDecision}, {"ordinary", shallowSelectedFact}} {
+		fact := h.SignFactFor("M", unaccepted, func(event *Event) {
+			event.Evidence, event.Rule = []string{absent}, row.rule
+		})
+		standingFactRawPublish(h, "M")
+		verifier := standingFactShallowVerifierWith(h, standingFactShallowArrangement{})
+		standingFactAssertShallowRefused(t, h, verifier, unaccepted.Candidate.ID, fact.ID, standingFactShallowGap(row.kind, absent, ""), false)
+		standingFactResetChain(h, "M", cleanM)
+	}
+
+	accepted := h.Case(h.ReadyCandidate(nil).ID)
+	decision := h.Accept("M", accepted.Candidate.ID)
+	maintainer := h.SignFactFor("M", accepted, func(event *Event) {
+		event.Evidence, event.Rule = []string{decision.ID, accepted.Approval.ID}, "ordinary"
+	})
+	standingFactRawPublish(h, "M")
+	withoutCodeRef := standingFactShallowArrangement{SkipProposals: []string{accepted.Candidate.ID}}
+	verifier := standingFactShallowVerifierWith(h, withoutCodeRef)
+	runOperationalGitFailure(t, verifier, "rev-parse", "--verify", "-q", acceptedProposalRef("origin", accepted.Candidate.ID))
+	log := h.hnIn(verifier, "log")
+	assertOperationalContains(t, log, operationalShortID(maintainer.ID))
+	standingFactAssertVerifierMerged(t, h, standingFactShallowVerifierWith(h, standingFactShallowArrangement{}), accepted.Candidate.ID, maintainer.ID)
+
+	clean := standingFactChainHead(h, "E")
+	rule := h.SignFactFor("E", accepted, nil)
+	standingFactRawPublish(h, "E")
+	verifier = standingFactShallowVerifierWith(h, withoutCodeRef)
+	before := runOperationalGit(t, verifier, "for-each-ref", "--format=%(refname) %(objectname)")
+	output, status := h.RunIn(verifier, "log")
+	want := standingFactShallowGap(shallowProposalCodeRef, accepted.Candidate.Head, accepted.Candidate.ID)
+	if status == 0 || !strings.Contains(output, want) {
+		t.Fatalf("hn log with rule merge %s exited %d, want a refusal containing %q:\n%s", rule.ID, status, want, output)
+	}
+	if after := runOperationalGit(t, verifier, "for-each-ref", "--format=%(refname) %(objectname)"); after != before {
+		t.Fatalf("hn log changed the shallow verifier's refs:\nbefore:\n%s\nafter:\n%s", before, after)
+	}
+	standingFactResetChain(h, "E", clean)
+}
+
+// T041 step 5 (US3-7, C-004): legacy history verifies in a shallow clone
+// with its old verdicts. L01 and L02 are listed and the maintainer merges of
+// L03 to L05 report merged; once S publishes its chain with L06, the
+// strict resource decoder refuses it as before.
+func TestStandingFactShallowLegacyHistory(t *testing.T) {
+	h := newStandingHarness(t, standingHarnessLegacyPolicy())
+	type built struct {
+		fixture standingHarnessFixture
+		signed  []standingHarnessSigned
+	}
+	var all []built
+	for _, fixture := range standingHarnessLegacyFixtures(h) {
+		all = append(all, built{fixture: fixture, signed: fixture.Build()})
+	}
+	for _, role := range []string{"R", "M"} {
+		standingFactRawPublish(h, role)
+	}
+	verifier := standingFactShallowVerifierWith(h, standingFactShallowArrangement{})
+	log := h.hnIn(verifier, "log")
+	for _, item := range all {
+		switch item.fixture.Verdict {
+		case standingHarnessValid, standingHarnessValidMaintainer, standingHarnessAnnotatedMaintainer:
+			for _, signed := range item.signed {
+				assertOperationalContains(t, log, operationalShortID(signed.ID))
+				if bytes.Contains(signed.Payload, []byte(`"kind":"proposal.merged"`)) {
+					standingFactAssertVerifierMerged(t, h, verifier, signed.Candidate, signed.ID)
+				}
+			}
+		case standingHarnessRefusedAsBefore:
+			for _, signed := range item.signed {
+				if strings.Contains(log, operationalShortID(signed.ID)) {
+					t.Fatalf("refused %s event %s is in the shallow verifier's log:\n%s", item.fixture.ID, signed.ID, log)
+				}
+			}
+			standingFactRawPublish(h, item.fixture.Signer)
+			refused := standingFactShallowVerifierWith(h, standingFactShallowArrangement{})
+			output, status := h.RunIn(refused, "log")
+			if status == 0 || !strings.Contains(output, standingHarnessUnknownRuleField) {
+				t.Fatalf("hn log with %s's chain holding %s exited %d, want %q:\n%s", item.fixture.Signer, item.fixture.ID, status, standingHarnessUnknownRuleField, output)
+			}
+		default:
+			t.Fatalf("%s has unexpected verdict %q", item.fixture.ID, item.fixture.Verdict)
+		}
+	}
+}
+
+// T042 (FR-014): a rule merge fact whose candidate head is unavailable is
+// refused or waits on every surface reached through public commands, and no
+// surface judges an empty change list. Local projection runs in a full
+// clone whose copy of the head was deleted: git diff-tree exits non-zero
+// for the absent object, so changedPathsAt returns its error. Shallow
+// verification and hn sync import run after F22 withdraws the head from
+// the remote.
+func TestStandingFactShallowNoEmptyDiff(t *testing.T) {
+	h := newStandingHarness(t, standingHarnessDefaultPolicy())
+	local := h.Case(h.ReadyCandidate(nil).ID)
+	clean := standingFactChainHead(h, "E")
+	fact := h.SignFactFor("E", local, nil)
+	standingFactRawPublish(h, "E")
+	emptyList := "fails " + ruleCheckChangedPaths + ": the candidate has no changed paths"
+
+	// Local projection: a full clone that imported the fact, with its head
+	// deleted and every ref to it removed.
+	full := h.Verifier()
+	h.hnIn(full, "sync", "origin")
+	standingFactAssertVerifierMerged(t, h, full, local.Candidate.ID, fact.ID)
+	for _, line := range strings.Split(runOperationalGit(t, full, "for-each-ref", "--format=%(objectname) %(refname)"), "\n") {
+		if fields := strings.Fields(line); len(fields) == 2 && fields[0] == local.Candidate.Head {
+			runOperationalGit(t, full, "update-ref", "-d", fields[1])
+		}
+	}
+	standingFactDropObjects(t, full, local.Candidate.Head)
+	if value := runOperationalGit(t, full, "rev-parse", "--is-shallow-repository"); value != "false" {
+		t.Fatalf("the full clone is shallow: %s", value)
+	}
+	output, status := h.RunIn(full, "log")
+	t.Logf("hn log in the full clone without the head exited %d:\n%s", status, output)
+	if want := "merge " + fact.ID + ": inspect changed paths"; status == 0 || !strings.Contains(output, want) {
+		t.Fatalf("hn log in the full clone exited %d, want a refusal containing %q:\n%s", status, want, output)
+	}
+	if strings.Contains(output, emptyList) {
+		t.Fatalf("local projection judged an empty change list:\n%s", output)
+	}
+	standingFactResetChain(h, "E", clean)
+
+	// F22: the candidate head is absent from every store.
+	f22 := standingHarnessDefects(h, local.Candidate)["F22"]
+	withdrawn := f22.Prepare()
+	signed := f22.Build(withdrawn)
+	if len(signed) != 1 {
+		t.Fatalf("F22 signed %d facts, want 1", len(signed))
+	}
+	standingFactRawPublish(h, "E")
+
+	shallow := standingFactShallowVerifierWith(h, standingFactShallowArrangement{})
+	runOperationalGitFailure(t, shallow, "cat-file", "-e", withdrawn.Candidate.Head+"^{commit}")
+	standingFactAssertShallowRefused(t, h, shallow, withdrawn.Candidate.ID, signed[0].ID,
+		standingFactShallowGap(shallowProposalCodeRef, withdrawn.Candidate.Head, withdrawn.Candidate.ID), false)
+
+	verifier := h.Verifier()
+	runOperationalGitFailure(t, verifier, "cat-file", "-e", withdrawn.Candidate.Head+"^{commit}")
+	output, status = h.RunIn(verifier, "sync", "origin")
+	t.Logf("hn sync without the head exited %d:\n%s", status, output)
+	want := "event " + signed[0].ID + " (proposal.merged) missing dependency " + withdrawn.Candidate.Head + ": rule merge head commit is absent"
+	if status == 0 || !strings.Contains(output, want) {
+		t.Fatalf("hn sync exited %d, want a refusal containing %q:\n%s", status, want, output)
+	}
+	if strings.Contains(output, emptyList) {
+		t.Fatalf("import judged an empty change list:\n%s", output)
 	}
 }
