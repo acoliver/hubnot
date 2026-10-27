@@ -1,19 +1,19 @@
 {
-  "event_count": 72,
-  "last_event_id": "01M5XGCV7SV12Y4DBGWTKFSQ88",
-  "materialized_at": "2026-10-27T01:43:01.113308+00:00",
+  "event_count": 73,
+  "last_event_id": "01M5XN15ZBVC3A44WRN505VZK2",
+  "materialized_at": "2026-10-27T03:04:01.771890+00:00",
   "mission_number": "",
   "mission_slug": "standing-acceptance-01M5VD2K",
   "mission_type": "",
   "summary": {
-    "approved": 8,
+    "approved": 9,
     "blocked": 0,
     "canceled": 0,
     "claimed": 0,
     "done": 0,
     "for_review": 0,
     "in_progress": 0,
-    "in_review": 2,
+    "in_review": 1,
     "planned": 9
   },
   "work_packages": {
@@ -325,19 +325,25 @@
       "last_transition_at": "2026-10-26T07:29:44.836999+00:00"
     },
     "WP13": {
-      "actor": "llxprt",
+      "actor": "user",
       "agent": "llxprt",
       "agent_profile": "__resolved_profile_absent__",
       "agent_profile_version": "__resolved_profile_version_absent__",
       "force_count": 0,
-      "lane": "in_review",
-      "last_event_id": "01M5XGCV7SV12Y4DBGWTKFSQ88",
-      "last_transition_at": "2026-10-27T01:43:01.113308+00:00",
+      "lane": "approved",
+      "last_event_id": "01M5XN15ZBVC3A44WRN505VZK2",
+      "last_transition_at": "2026-10-27T03:04:01.771890+00:00",
       "model": "__resolved_model_absent__",
       "notes": [
         "Implemented in c165bfd. T059: servePushOptionRule, servePushOptions.Rule, servePushOptionLimit=3, sentence names all three options. T060: parser accepts hn-rule with the rule-name grammar (validPipelineName), refuses repeats, bad names and hn-rule without hn-advance; error texts follow the existing '%s appears more than once' / '%s value %q is not ...' style, so they equal the contract table exactly. T061: serveRuleReasonCatalogue with the three codes; serveReasonLookup searches both catalogues; audit found no production code ranging over serveReasonCatalogue (renderer, line parser, client extractor and push log validateServePushLogCode all go through the lookup); serveReasonCatalogue byte-identical. T063: hn-rule row and paragraph in Push options, new '### Reason codes for rule advancement' table after the first table; 'two push options' -> 'three' and field/sync text now say 'reason-code tables'. T093: interim unsupported-command refusal at the top of evaluateServePush after the hn-advance shape check. T062/T093 tests in standing_serve_test.go (8 TestStandingServeWire* tests, including docs drift via standingServeRuleReasonDocsTable and B5 with code asserted as a member of {unsupported-command, protected-rule-not-satisfied}). B5 checked for vacuity: with the refusal disabled in a scratch worktree it fails ('push naming rule nosuch was accepted'). No pre-existing test modified. Gate on a clean scratch worktree at c165bfd: gofmt clean, go vet and go build pass, race suite ok (hubnot 1866s, forge, githubapi), perf test ok (15.8s). Note: the first race run in the shared lane workspace failed only TestStandingFactBoundary while WP08's uncommitted edits to standing_fact_test.go/quarantine.go were in the tree; that test passes at c165bfd and at base 336d920 in clean worktrees, with and without -race. Placeholder <candidate>/<rule> substitution is left to WP14 (callers build Next themselves, as for existing templates)."
       ],
       "provider": "__resolved_provider_absent__",
+      "review_result": {
+        "feedback_path": "/home/acoliver/projects/appaday/gitium/hubnot/kitty-specs/standing-acceptance-01M5VD2K/tasks/WP13-hn-rule-push-option-and-reasons/review-cycle-1.md",
+        "reference": "review-cycle://standing-acceptance-01M5VD2K/WP13-hn-rule-push-option-and-reasons/review-cycle-1.md",
+        "reviewer": "user",
+        "verdict": "approved"
+      },
       "role": "reviewer",
       "shell_pid": 1089577,
       "shell_pid_created_at": "1793065377.41",
