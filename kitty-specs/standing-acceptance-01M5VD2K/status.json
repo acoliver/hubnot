@@ -1,7 +1,7 @@
 {
-  "event_count": 70,
-  "last_event_id": "01M5XG9RNWMQ9M9A72A5VPD4C2",
-  "materialized_at": "2026-10-27T01:41:20.188130+00:00",
+  "event_count": 71,
+  "last_event_id": "01M5XGAPB2VMGHAJGD42FN57DR",
+  "materialized_at": "2026-10-27T01:41:50.563030+00:00",
   "mission_number": "",
   "mission_slug": "standing-acceptance-01M5VD2K",
   "mission_type": "",
@@ -11,9 +11,9 @@
     "canceled": 0,
     "claimed": 0,
     "done": 0,
-    "for_review": 2,
+    "for_review": 1,
     "in_progress": 0,
-    "in_review": 0,
+    "in_review": 1,
     "planned": 9
   },
   "work_packages": {
@@ -252,17 +252,17 @@
       "agent_profile": "__resolved_profile_absent__",
       "agent_profile_version": "__resolved_profile_version_absent__",
       "force_count": 0,
-      "lane": "for_review",
-      "last_event_id": "01M5XG8GGKVP3B5A0BT8K13TGP",
-      "last_transition_at": "2026-10-27T01:40:39.059509+00:00",
+      "lane": "in_review",
+      "last_event_id": "01M5XGAPB2VMGHAJGD42FN57DR",
+      "last_transition_at": "2026-10-27T01:41:50.563030+00:00",
       "model": "__resolved_model_absent__",
       "notes": [
         "Commit 7952a30. quarantine.go: proposal.merged arm of replicationEventDependencyWithOptions now calls admitMergeFact with validateReplicationMergeAt unchanged as path (a); path (b) (replicationRuleMergeCheck) first reports an absent or split base/head pair (recovery: add exact proposal selection --proposal <candidate>) or an absent request of a cited run result as a missing dependency, then calls validateRuleMergeFactWith through replicationRuleObjectAccess (loadReplicationPolicyAt, changedPathsInOneStore, replicationPipelineDigestAt). Absent evidence is still reported before either path. replicationDependencyOptions.RuleMemo plus ruleMemo(); runReplicationTransaction shares one memo per pass. serve_verdict_facts.go unchanged: checkServeActorDependencies gets a fresh memo per event (nil option), which is correct; WP16 proves serve end to end. protected_checks.go not edited. standing_fact_test.go: TestStandingFactImportObjectAccess (one-store reads, split/absent commit and absent run request dependencies with zero object reads, no-claim error identical to today), TestStandingFactImportDefects (F01-F20 raw-pushed, fresh verifier refuses naming full fact ID and check, or the maintainer-path text for F19/F20, nothing promoted from the signer chain, every other chain imported, status not merged; 1m57s under load from a concurrent race run), TestStandingFactImportWithheldApproval (F21 missing dependency on the approval, then merged after R publishes), TestStandingFactImportAbsentCommit (F22 reports the absent head with the proposal-selection recovery; the author chain also waits for its absent code ref, which propagates to chains citing it), TestStandingFactImportValidRuleMerge (T039, valid fact and acceptance fact import into a fresh identity-less clone, second sync leaves refs unchanged), TestStandingFactImportLegacyHistory (L01-L05 old verdicts, L06 refused as before); boundary table import: true and TestStandingFactBoundary passes (covers B2/B3 on import). Non-vacuity: the new black-box tests fail against the pre-WP08 code. Gate: gofmt -l clean; go vet ./... and go build ./... pass; go test -race -count=1 -timeout 60m -skip perf ./... ok (hubnot 1932.8s under load); TestMemoryIndexTenThousandRecordsPerformanceAndRecovery without -race ok (20.5s). Follow-up for a docs owner: docs/protocol-v0.md says a missing base/head commit refuses the fact; on import it is a missing dependency."
       ],
       "provider": "__resolved_provider_absent__",
-      "role": "implementer",
-      "shell_pid": 2359259,
-      "shell_pid_created_at": "1793059000.62",
+      "role": "reviewer",
+      "shell_pid": 1075825,
+      "shell_pid_created_at": "1793065307.7",
       "subtasks": {
         "T035": "done",
         "T036": "done",
