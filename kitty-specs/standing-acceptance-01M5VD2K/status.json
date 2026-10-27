@@ -293,8 +293,8 @@
       ],
       "provider": "__resolved_provider_absent__",
       "role": "reviewer",
-      "shell_pid": 3193912,
-      "shell_pid_created_at": "1793082428.15",
+      "shell_pid": 3401284,
+      "shell_pid_created_at": "1793083697.71",
       "subtasks": {
         "T040": "done",
         "T041": "done",
@@ -393,7 +393,15 @@
       "provider": "__resolved_provider_absent__",
       "role": "implementer",
       "shell_pid": 3305711,
-      "shell_pid_created_at": "1793070329.2"
+      "shell_pid_created_at": "1793070329.2",
+      "subtasks": {
+        "T064": "done",
+        "T065": "done",
+        "T066": "done",
+        "T067": "done",
+        "T068": "done",
+        "T069": "done"
+      }
     },
     "WP15": {
       "actor": "finalize-tasks",
