@@ -206,4 +206,3 @@ Black-box tests through the forced-command harness. Run `go test -race -run 'Tes
 
 - 2026-10-26T06:54:14Z – system – Prompt generated via /spec-kitty.tasks
 - 2026-10-26T09:45:00Z – llxprt – Prompt revised after analysis (C1; decision 01M5VSEHF5B1FM9TB52KWKQGWZ): removes WP13's interim hn-rule refusal with the rule steps (serve_verdict.go added to ownership); B5 assertion
-- 2026-10-27T09:45:00Z – maintainer – Gate decision for this host: the race gate is `go test -race -count=1 -timeout 150m -skip ...`, run with the `go` on PATH (it shares the heavy-test slots; do not put /usr/bin first). Under the current shared load the suite takes 35 to 90 minutes. A timeout or timing-only failure with no assertion failure and no data race is host load, not a defect: rerun (the failing test alone first) and do not reject the WP for it. WP14 review cycle 1 found no implementation defect; its only blocker was the 60-minute timeout.
