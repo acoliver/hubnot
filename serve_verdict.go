@@ -64,10 +64,10 @@ func serveZeroOID(oid string) bool {
 	return oid != "" && strings.Trim(oid, "0") == ""
 }
 
-// servePushOptions holds the two push options the server accepts, each
+// servePushOptions holds the three push options the server accepts, each
 // empty when absent.
 type servePushOptions struct {
-	Advance, ExpectedTip string
+	Advance, ExpectedTip, Rule string
 }
 
 // classifyServeRef returns the class of ref, checking the classes in the
@@ -217,6 +217,13 @@ func evaluateServePush(ctx *serveVerdictContext, updates []serveRefUpdate, optio
 	if options.Advance != "" && (len(updates) != 1 || updates[0].Class != serveRefProtected) {
 		return rejectServeEveryUpdate(ctx, updates, serveReasonUnsupportedCommand,
 			"hn-advance requires a push with exactly one ref update, to a protected branch.")
+	}
+	// Until the protected verdict evaluates rules (WP14), a request that
+	// names a rule is refused like an older server refuses it, so no build
+	// applies the maintainer path to it (FR-025).
+	if options.Rule != "" {
+		return rejectServeEveryUpdate(ctx, updates, serveReasonUnsupportedCommand,
+			"this server does not evaluate hn-rule advancement yet.")
 	}
 	ordered := slices.Clone(updates)
 	sort.SliceStable(ordered, func(i, j int) bool { return ordered[i].Ref < ordered[j].Ref })

@@ -405,7 +405,7 @@ separate explicit `git push` for that outcome.
 
 `hn serve` hosts repositories over SSH and answers with ordinary Git
 transports. This section defines what a client can observe from such a server:
-a marker ref, two push options and a line format for rejections. `serve_wire.go`
+a marker ref, three push options and a line format for rejections. `serve_wire.go`
 and `serve_reasons.go` implement it.
 
 ### Server marker and identification
@@ -443,11 +443,15 @@ A client may send these push options with `git push --push-option`:
 |----|----|----|
 | `hn-advance` | full candidate event ID, `sha256:` followed by 64 lowercase hex digits | requests advancement of a protected branch to that candidate's signed head |
 | `hn-expected-tip` | full commit ID of the branch tip the client read | the update is refused with `protected-stale-tip` when the branch has moved |
+| `hn-rule` | rule name, 1 to 64 of `A-Z a-z 0-9 - _ .`, excluding `.` and `..` | names the automerge rule whose standing acceptance the advancement uses; valid only together with `hn-advance` |
 
-Each option may appear at most once. A push with `hn-advance` must contain
-exactly one ref update, and that update must target a protected branch. Any
-other option, a repeated option, a malformed value, or an `hn-advance` push
-with another shape rejects every ref update in the push with
+Each option may appear at most once, and a push carries at most three options.
+`hn-rule` requires `hn-advance` in the same push. A push with `hn-advance` must
+contain exactly one ref update, and that update must target a protected
+branch. Any other option, a repeated option, a malformed value, more than
+three options, `hn-rule` without `hn-advance`, or an `hn-advance` push with
+another shape rejects every ref update in the push with `unsupported-command`.
+A server built before rule advancement refuses `hn-rule` the same way, with
 `unsupported-command`.
 
 ### Rejection lines
@@ -467,7 +471,7 @@ are omitted when they have no value.
 |----|----|
 | `ref` | full ref name, or `-` for a refusal of the whole session |
 | `actor` | full mapped actor fingerprint, or `-` when the key is unknown |
-| `code` | one code from the reason-code table below |
+| `code` | one code from the reason-code tables below |
 | `ids` | comma-separated full `sha256:` event IDs and full commit IDs |
 | `missing` | comma-separated evidence kinds, always in the order `proposal`, `review`, `ci`, `acceptance` |
 | `budget`, `limit`, `measured` | the exceeded budget, its limit and the measured value; see the budget fields below |
@@ -522,7 +526,7 @@ The client parses each rejection and renders it again with the rules above.
 It never echoes the server's bytes, so a hostile server cannot place terminal
 control sequences in the output. A rejection line that does not parse is
 dropped. A rejection without a sentence line gets the meaning from the
-reason-code table as its sentence. A remote that does not identify as
+reason-code tables as its sentence. A remote that does not identify as
 `hn serve` gets the plain error even when its hooks print lines in this format.
 
 ### Budget fields
@@ -571,6 +575,17 @@ The next action is a template. A server replaces placeholders such as
 | `over-budget` | A pushed Hubnot ref exceeds a server budget | split the history or ask the administrator |
 | `lfs-quota` | An LFS upload would exceed the repository quota | ask the administrator to raise the quota |
 | `lfs-object-mismatch` | Uploaded LFS content does not match its object ID or size | retry the upload |
+
+### Reason codes for rule advancement
+
+A protected-branch advancement that names a rule with `hn-rule` can also be
+refused with these codes.
+
+| Code | Meaning | Typical next action |
+|----|----|----|
+| `advance-not-rule-executor` | The requester is not an executing actor of the named rule in the base policy | ask an executing actor of the rule to run `hn automerge --remote` |
+| `protected-rule-not-satisfied` | The named rule does not exist, is not a standing rule, or the candidate does not satisfy it | run `hn automerge <candidate> --rule <rule>` |
+| `protected-rule-veto` | A current trusted change request or trusted failure blocks the rule | resolve the named events, then retry |
 
 ## Known limits
 
