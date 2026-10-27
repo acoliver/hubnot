@@ -77,6 +77,26 @@ or new rich payload shapes. Rolling back a binary cannot remove already
 published signed facts, and this feature provides no implicit history rewrite
 or Beads migration. Preserve a compatible reader when retaining rich histories.
 
+Standing acceptance follows the same rule. Executables built before it, such
+as the reference build of commit `7a47e69`, reject a policy that contains
+`acceptance` or `reviewers` as an unknown field. That includes
+`"acceptance": "maintainers"`, which means the same as leaving the field out.
+Every client that works on a repository using either field therefore needs a
+newer executable. Older executables also reject every `proposal.merged` fact
+that is valid only through a standing rule. Such a fact lists no maintainer
+acceptance decisions and is usually signed by an actor who is not a
+maintainer, so the older maintainer check refuses it. A mixed team fails
+closed and cannot mistake standing acceptance for maintainer acceptance.
+
+Older and newer clients agree on every maintainer merge, including one whose
+payload also names a rule. The older client ignores the unknown `rule` key,
+and the newer client runs the maintainer check first and reports the rule
+name as an unverified annotation. Both clients also reach the same verdict on
+all history signed before standing acceptance. Rolling back a binary does not
+remove published rule merge facts, and a newer client keeps judging each of
+them against its own base policy. `TestStandingCompatOlderClient` builds the
+older client and checks each of these statements.
+
 ## Automation identity and historical observations
 
 Public identity JSON explicitly selects actor, name and public key; it never
