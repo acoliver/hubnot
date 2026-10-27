@@ -1,19 +1,19 @@
 {
-  "event_count": 98,
-  "last_event_id": "01M5YZW1H17B29GHGXQR8X6K8R",
-  "materialized_at": "2026-10-27T15:32:42.145650+00:00",
+  "event_count": 99,
+  "last_event_id": "01M5Z5B2EVK9CBQPCC2PERMB1X",
+  "materialized_at": "2026-10-27T17:08:17.499213+00:00",
   "mission_number": "",
   "mission_slug": "standing-acceptance-01M5VD2K",
   "mission_type": "",
   "summary": {
-    "approved": 12,
+    "approved": 13,
     "blocked": 0,
     "canceled": 0,
     "claimed": 0,
     "done": 0,
     "for_review": 0,
     "in_progress": 0,
-    "in_review": 1,
+    "in_review": 0,
     "planned": 6
   },
   "work_packages": {
@@ -343,19 +343,25 @@
       }
     },
     "WP11": {
-      "actor": "llxprt",
+      "actor": "user",
       "agent": "llxprt",
       "agent_profile": "__resolved_profile_absent__",
       "agent_profile_version": "__resolved_profile_version_absent__",
       "force_count": 0,
-      "lane": "in_review",
-      "last_event_id": "01M5YZW1H17B29GHGXQR8X6K8R",
-      "last_transition_at": "2026-10-27T15:32:42.145650+00:00",
+      "lane": "approved",
+      "last_event_id": "01M5Z5B2EVK9CBQPCC2PERMB1X",
+      "last_transition_at": "2026-10-27T17:08:17.499213+00:00",
       "model": "__resolved_model_absent__",
       "notes": [
         "Implemented T048-T053 and T094 in commit 160e70b (lane cleanup b1bc409). governance.go: proposalMergeGuard gains Rule *ruleMergeAuthority and authorize(); mergeProposal replaces only the acceptance check (old line 172), the two maintainer checks (185, 291) and drops !Accepted at 285, each inside a byRule branch with the existing code untouched in the else branch; contained-merge repair (241, 247) unchanged. appendRuleMergeEvent signs in memory, re-reads the fact through verifyEvent, runs validateProposalMergeBinding and validateMergeEventWith over collectEvents plus the fact, requires mergeByRule, then appendEvent and asserts the stored ID equals the checked ID. automerge.go: cmdAutomerge builds the rule authority only under acceptance mode rule (maintainers also, FR-011); guard.Check refreshes Latest and refuses an unsatisfied refresh. policy.go: hn proposal status prints the rule-merge or unverified-annotation line per rule claim, sorted by fact ID. Only cmdAutomerge builds a proposalMergeGuard. docs/governance-v0.md: Executing a standing rule section and the standing-execute example. Tests (standing_automerge_test.go): ExecuteUserStory1 (US1-1, US1-2 verifier, US1-3, in-process self-check refusal with ref unchanged), ExecuteWithoutMaintainer (SC-002), ExecuteMaintainerAndSecondRule (FR-011, docsonly), ExecuteStatusOfMaintainerMerges (B2, B3, plain acceptance merge), AgreementPreviewExecute (14 fixtures, 100% agreement, X logged as authorization refusal), DocumentedExecute. Gate: gofmt clean; go vet and go build pass; go test -race full suite (skip perf) ok in 2606s; TestMemoryIndexTenThousandRecordsPerformanceAndRecovery without race ok in 12.4s. No pre-existing test modified."
       ],
       "provider": "__resolved_provider_absent__",
+      "review_result": {
+        "feedback_path": "/home/acoliver/projects/appaday/gitium/hubnot/kitty-specs/standing-acceptance-01M5VD2K/tasks/WP11-local-execution-and-recording/review-cycle-1.md",
+        "reference": "review-cycle://standing-acceptance-01M5VD2K/WP11-local-execution-and-recording/review-cycle-1.md",
+        "reviewer": "user",
+        "verdict": "approved"
+      },
       "role": "reviewer",
       "shell_pid": 3144855,
       "shell_pid_created_at": "1793117864.9",
