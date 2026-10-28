@@ -11,7 +11,6 @@ import (
 	"fmt"
 	"hash"
 	"io"
-	"os"
 	"reflect"
 	"strconv"
 	"strings"
@@ -236,6 +235,20 @@ func auditPackObjectIDs(pack []byte, oidLength int) ([]string, error) {
 }
 
 func auditPackObjectIDsAndSizes(pack []byte, oidLength int, sizes map[string]int64) ([]string, error) {
+	var visit func(string, auditPackObject)
+	if sizes != nil {
+		visit = func(oid string, object auditPackObject) { sizes[oid] = object.size }
+	}
+	return walkAuditPack(pack, oidLength, false, visit)
+}
+
+// walkAuditPack parses pack, bounded as validateAuditPack describes, and
+// calls visit, when not nil, with each object in pack order as soon as it
+// is hashed, with the contents of commits and trees when keepContents is
+// set. It returns the pack's sorted object IDs once the trailer and the
+// absence of duplicates are checked; on an error the visited objects are
+// not a valid pack's.
+func walkAuditPack(pack []byte, oidLength int, keepContents bool, visit func(string, auditPackObject)) ([]string, error) {
 	if len(pack) < 32 || len(pack) > maxAuditPack || string(pack[:4]) != "PACK" || binary.BigEndian.Uint32(pack[4:8]) != 2 {
 		return nil, fmt.Errorf("invalid bounded audit dependency pack")
 	}
@@ -247,6 +260,7 @@ func auditPackObjectIDsAndSizes(pack []byte, oidLength int, sizes map[string]int
 	r := bytes.NewReader(pack[12:])
 	total := int64(0)
 	for i := uint32(0); i < count; i++ {
+		start := len(pack) - r.Len()
 		b, err := r.ReadByte()
 		if err != nil {
 			return nil, err
@@ -280,16 +294,27 @@ func auditPackObjectIDsAndSizes(pack []byte, oidLength int, sizes map[string]int
 		if oidLength == 64 {
 			h = sha256.New()
 		}
-		fmt.Fprintf(h, "%s %d%c", []string{"", "commit", "tree", "blob", "tag"}[kind], size, byte(0))
-		n, err := io.Copy(h, io.LimitReader(z, int64(size)+1))
+		typ := []string{"", "commit", "tree", "blob", "tag"}[kind]
+		fmt.Fprintf(h, "%s %d%c", typ, size, byte(0))
+		var content *bytes.Buffer
+		var sink io.Writer = h
+		if keepContents && visit != nil && (typ == "commit" || typ == "tree") {
+			content = bytes.NewBuffer(make([]byte, 0, size))
+			sink = io.MultiWriter(h, content)
+		}
+		n, err := io.Copy(sink, io.LimitReader(z, int64(size)+1))
 		closeErr := z.Close()
 		if err != nil || closeErr != nil || n != int64(size) {
 			return nil, fmt.Errorf("audit dependency object size mismatch")
 		}
 		oid := hex.EncodeToString(h.Sum(nil))
 		ids = append(ids, oid)
-		if sizes != nil {
-			sizes[oid] = int64(size)
+		if visit != nil {
+			object := auditPackObject{kind: typ, size: int64(size), entry: pack[start : len(pack)-r.Len()]}
+			if content != nil {
+				object.content = content.Bytes()
+			}
+			visit(oid, object)
 		}
 	}
 	if r.Len() != 20 && r.Len() != 32 {
@@ -359,35 +384,11 @@ func importAuditPack(gitdir string, pack []byte, e Event) error {
 	return err
 }
 
-// verifyAuditPack checks pack against e in a private temporary repository
-// and installs nothing. Its Git commands run with gitPrivateEnvironment:
-// inherited routing variables would, inside a receive hook, point the
-// temporary repository at the push quarantine, lend it ambient objects and
-// refuse its initialization, and ambient configuration or a template could
-// give it another object store. It is initialized without a template.
+// verifyAuditPack checks pack against e as verifyAuditPacks does and
+// installs nothing.
 func verifyAuditPack(pack []byte, e Event) error {
-	if err := validateAuditPack(pack); err != nil {
-		return err
-	}
-	temporary, err := os.MkdirTemp("", "hn-audit-objects-*")
-	if err != nil {
-		return err
-	}
-	defer os.RemoveAll(temporary)
-	format := "sha1"
-	if len(e.Audit.PolicyCommit) == 64 {
-		format = "sha256"
-	}
-	if _, err := gitPrivateInputAt(temporary, nil, "init", "--bare", "--quiet", "--template=", "--object-format="+format); err != nil {
-		return err
-	}
-	// Validate Git's object syntax without demanding complete parent history or
-	// unrelated members of policy/source path-proof trees. Required snapshot
-	// members and actual edge types are checked below before installation.
-	if _, err := gitPrivateInputAt(temporary, pack, "index-pack", "--stdin", "--fsck-objects", "--max-input-size=67108864"); err != nil {
-		return err
-	}
-	return validateAuditPackBinding(gitRepository{dir: temporary, isolated: true}, e, pack)
+	_, _, err := verifyAuditPacks([]auditPackFact{{Pack: pack, Event: e}})
+	return err
 }
 
 func auditCommitAvailable(gitdir, accepted, commit string) error {
@@ -721,14 +722,10 @@ func selectAuditWorkflow(revision string, events []StoredEvent) (*workflowSelect
 // and source path proofs. Commit parents are deliberately not traversed. Their
 // absence cannot authorize work; current ancestry is checked in the local anchor.
 func auditDependencyObjectIDsAt(gitdir string, e Event) ([]string, error) {
-	return auditDependencyObjectIDs(gitRepository{dir: gitdir}, e)
-}
-
-func auditDependencyObjectIDs(repository gitRepository, e Event) ([]string, error) {
 	f := e.Audit
 	objects := []string{}
 	addPath := func(commit, path string) error {
-		tree, err := repository.text("rev-parse", "--verify", commit+"^{tree}")
+		tree, err := gitTextAt(gitdir, "rev-parse", "--verify", commit+"^{tree}")
 		if err != nil {
 			return err
 		}
@@ -736,7 +733,7 @@ func auditDependencyObjectIDs(repository gitRepository, e Event) ([]string, erro
 		parts := strings.Split(path, "/")
 		for index := range parts {
 			selected := strings.Join(parts[:index+1], "/")
-			entry, err := repository.text("ls-tree", commit, "--", selected)
+			entry, err := gitTextAt(gitdir, "ls-tree", commit, "--", selected)
 			if err != nil {
 				return err
 			}
@@ -763,7 +760,7 @@ func auditDependencyObjectIDs(repository gitRepository, e Event) ([]string, erro
 		}
 	}
 	if f.CodeCommit != "" {
-		listed, err := repository.text("rev-list", "--objects", "--no-walk", f.CodeCommit)
+		listed, err := gitTextAt(gitdir, "rev-list", "--objects", "--no-walk", f.CodeCommit)
 		if err != nil {
 			return nil, err
 		}
@@ -781,16 +778,16 @@ func auditDependencyObjectIDs(repository gitRepository, e Event) ([]string, erro
 	return objects, nil
 }
 
-func validateAuditPackBinding(repository gitRepository, e Event, pack []byte) error {
-	actual, err := auditPackObjectIDs(pack, len(e.Audit.PolicyCommit))
+// validateAuditPackBinding compares the objects of the decoded pack s with
+// the exact closure e names, computed from s alone, as a private
+// repository holding only the pack would answer.
+func validateAuditPackBinding(s *auditSnapshot, e Event) error {
+	actual := s.ids
+	expected, err := auditSnapshotDependencies(s, e)
 	if err != nil {
 		return err
 	}
-	expected, err := auditDependencyObjectIDs(repository, e)
-	if err != nil {
-		return err
-	}
-	if err := validateAuditObjectShapesAt(repository, actual); err != nil {
+	if err := validateAuditObjectShapes(s, actual); err != nil {
 		return err
 	}
 	if !reflect.DeepEqual(actual, expected) {
@@ -829,10 +826,19 @@ func RecordAuditResult(requestID, policyRef string, id *Identity, result executi
 	return appendAudit(e, id, result.Log)
 }
 
-func validateAuditObjectShapesAt(repository gitRepository, objects []string) error {
-	types, contents, err := auditObjectsAt(repository, objects)
-	if err != nil {
-		return err
+// validateAuditObjectShapes checks objects against the types and contents
+// the pack parser decoded for s: the actual object types, never the type a
+// tree entry claims.
+func validateAuditObjectShapes(s *auditSnapshot, objects []string) error {
+	types := make(map[string]string, len(objects))
+	contents := map[string][]byte{}
+	for _, object := range objects {
+		decoded, ok := s.objects[object]
+		if !ok {
+			return fmt.Errorf("audit object %s unavailable", object)
+		}
+		types[object] = decoded.kind
+		contents[object] = decoded.content
 	}
 	for _, object := range objects {
 		typ := types[object]
@@ -882,8 +888,8 @@ func validateAuditObjectShapesAt(repository gitRepository, objects []string) err
 				default:
 					return fmt.Errorf("unsupported audit tree mode")
 				}
-				// Compare the raw entry mode against cat-file's independent type
-				// from the isolated pack; ls-tree normalizes modes and types.
+				// Compare the raw entry mode against the parser's independent
+				// type from the pack; ls-tree normalizes modes and types.
 				// Missing non-proof edges and gitlinks are intentional; exact
 				// dependency closure separately requires the full target snapshot.
 				if actual := types[oid]; actual != "" && actual != want {
@@ -896,64 +902,6 @@ func validateAuditObjectShapesAt(repository gitRepository, objects []string) err
 		}
 	}
 	return nil
-}
-
-// auditObjectsAt returns the type of each object and the contents of each
-// commit and tree, read with one batched type query and one batched
-// content query, so the number of Git processes does not grow with the
-// snapshot.
-func auditObjectsAt(repository gitRepository, objects []string) (map[string]string, map[string][]byte, error) {
-	types := make(map[string]string, len(objects))
-	contents := map[string][]byte{}
-	if len(objects) == 0 {
-		return types, contents, nil
-	}
-	listing, err := repository.input([]byte(strings.Join(objects, "\n")+"\n"), "cat-file", "--batch-check=%(objectname) %(objecttype)")
-	if err != nil {
-		return nil, nil, err
-	}
-	lines := strings.Split(strings.TrimSuffix(string(listing), "\n"), "\n")
-	if len(lines) != len(objects) {
-		return nil, nil, fmt.Errorf("audit object query answered %d of %d objects", len(lines), len(objects))
-	}
-	structural := []string{}
-	for index, line := range lines {
-		fields := strings.Fields(line)
-		if len(fields) != 2 || fields[0] != objects[index] || fields[1] == "missing" || fields[1] == "ambiguous" {
-			return nil, nil, fmt.Errorf("audit object %s unavailable", objects[index])
-		}
-		types[objects[index]] = fields[1]
-		if fields[1] == "commit" || fields[1] == "tree" {
-			structural = append(structural, objects[index])
-		}
-	}
-	if len(structural) == 0 {
-		return types, contents, nil
-	}
-	batch, err := repository.input([]byte(strings.Join(structural, "\n")+"\n"), "cat-file", "--batch")
-	if err != nil {
-		return nil, nil, err
-	}
-	for _, object := range structural {
-		end := bytes.IndexByte(batch, '\n')
-		if end < 0 {
-			return nil, nil, fmt.Errorf("truncated audit object batch")
-		}
-		fields := strings.Fields(string(batch[:end]))
-		if len(fields) != 3 || fields[0] != object || fields[1] != types[object] {
-			return nil, nil, fmt.Errorf("unexpected audit object batch header for %s", object)
-		}
-		size, err := strconv.Atoi(fields[2])
-		if err != nil || size < 0 || len(batch)-end-1 < size+1 || batch[end+1+size] != '\n' {
-			return nil, nil, fmt.Errorf("malformed audit object batch for %s", object)
-		}
-		contents[object] = batch[end+1 : end+1+size]
-		batch = batch[end+2+size:]
-	}
-	if len(batch) != 0 {
-		return nil, nil, fmt.Errorf("unexpected trailing audit object batch output")
-	}
-	return types, contents, nil
 }
 
 // measureAuditSnapshotDependenciesAt counts expanded snapshot objects against

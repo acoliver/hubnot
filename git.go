@@ -94,34 +94,6 @@ func gitPrivateInputAt(private string, input []byte, args ...string) ([]byte, er
 	return gitRun(private, gitPrivateEnvironment(private), input, args...)
 }
 
-// gitRepository names the Git directory a sequence of read commands
-// addresses. An isolated repository is a private temporary one whose
-// commands use gitPrivateInputAt; any other uses the inherited
-// environment, as gitOutputAt does.
-type gitRepository struct {
-	dir      string
-	isolated bool
-}
-
-func (repository gitRepository) output(args ...string) ([]byte, error) {
-	return repository.input(nil, args...)
-}
-
-func (repository gitRepository) input(input []byte, args ...string) ([]byte, error) {
-	if repository.isolated {
-		return gitPrivateInputAt(repository.dir, input, args...)
-	}
-	return gitInputAt(repository.dir, input, args...)
-}
-
-func (repository gitRepository) text(args ...string) (string, error) {
-	out, err := repository.output(args...)
-	if err != nil {
-		return "", err
-	}
-	return strings.TrimSpace(string(out)), nil
-}
-
 func gitRun(gitDir string, environment []string, input []byte, args ...string) ([]byte, error) {
 	if gitDir != "" {
 		args = append([]string{"--git-dir=" + gitDir}, args...)

@@ -927,9 +927,13 @@ reported:
 
 The server reads the hosted facts once per push and validates only the
 events the push appends, so the cost of a push grows with what it adds.
-The one exception is hosted audit facts: the read verifies each hosted
-`audit.pack` again, so verdict time also grows with the number of hosted
-audit facts and the size of their snapshots.
+The one exception is hosted audit facts: the read verifies every hosted
+`audit.pack` again, so verdict time also grows with the bytes of the hosted
+audit packs. The number of Git processes the read starts does not grow with
+the number of audit facts. The exact membership, closure and shape checks
+read the objects the pack parser decoded, identical packs are checked once,
+and Git's object syntax check indexes the hosted packs together in one
+temporary repository, with one `git index-pack` per 64 MiB of packs.
 
 The server's acceptance is never evidence. A client that fetches from this
 server validates every fact again before it uses it, and a signed fact is
@@ -947,9 +951,10 @@ and an `audit.result` holds its `log.txt` as well. The server checks them
 with the code `hn sync` uses when it imports the same chain:
 
 - The server parses `audit.pack` and hashes each object before Git reads it.
-  It then indexes the pack with `git index-pack --fsck-objects` in a private
-  temporary repository and compares its objects with the exact set the signed
-  fact names. Git sets `GIT_QUARANTINE_PATH`, `GIT_OBJECT_DIRECTORY` and
+  It compares the pack's objects with the exact set the signed fact names,
+  computed from the pack's own objects as a repository holding only the pack
+  would answer, and checks their syntax with `git index-pack --fsck-objects`
+  in a private temporary repository. Git sets `GIT_QUARANTINE_PATH`, `GIT_OBJECT_DIRECTORY` and
   `GIT_ALTERNATE_OBJECT_DIRECTORIES` for the `pre-receive` hook. The server
   removes them, and the other variables that point Git at another repository
   or object store, for every command in the temporary repository, so hosted
@@ -1941,7 +1946,7 @@ git diff --check
 | FR-004 | Managed authorized_keys | `TestServeKeysMergeGoldenCases`, `TestServeKeysWritePreservesAdministratorLines`, `TestServeAdminKeysMaintainAuthorizedKeys`, `TestServeSSHDRoundTrip` |
 | FR-005 | Forced-command dispatch | `TestParseServeRequestAcceptsEveryGrammarForm`, `TestParseServeRequestRefusesEverythingElse`, `TestServeSessionUnsupportedCommandsRefusedWithoutChanges`, `TestServeSessionUnsafeAndUnhostedPathsRefused` |
 | FR-006 | Push attribution | `TestServePushBranchOwnershipAndPushLog`, `TestBuildServeGitEnvironmentKeepsOnlyServerValues` |
-| FR-007 | Actor chain check | `TestServeFactsActorKeyMismatch`, `TestServeFactsAlteredEventIsInvalid`, `TestServeFactsActorChainRewrite`, `TestServeFactsDependencyMissing`, `TestValidationSeamsActorRangeValidation`, `TestServeAuditFactsPushReadAndSync`, `TestAuditPackVerificationIgnoresReceiveEnvironment`, `TestAuditVerificationKeepsConfigurationExclusions`, `TestAuditVerificationWritesOnlyItsTemporaryRepository`, `TestServeAuditTamperedAttachmentsRefusedByPushAndReaders` |
+| FR-007 | Actor chain check | `TestServeFactsActorKeyMismatch`, `TestServeFactsAlteredEventIsInvalid`, `TestServeFactsActorChainRewrite`, `TestServeFactsDependencyMissing`, `TestValidationSeamsActorRangeValidation`, `TestServeAuditFactsPushReadAndSync`, `TestAuditPackVerificationIgnoresReceiveEnvironment`, `TestAuditVerificationKeepsConfigurationExclusions`, `TestAuditVerificationWritesOnlyItsTemporaryRepository`, `TestAuditSnapshotClosureMatchesGit`, `TestServeAuditTamperedAttachmentsRefusedByPushAndReaders` |
 | FR-008 | Protected-branch check | `TestServeProtectedAcceptsGovernedDirectPush`, `TestServeProtectedNotReady`, `TestServeProtectedBlocked`, `TestServeProtectedDestinationPolicy`, `TestServeProtectedNotFastForwardAndStaleTip`, `TestServeAuditObservationalOnProtectedBranches` |
 | FR-009 | Tested commit only | `TestServeProtectedNotReady`, `TestServeAdvanceFastForwardsAndVerifies`, `TestServeAdvanceRefusesNotFastForward` |
 | FR-010 | Rules for other governed ref classes | `TestServeFactsProposalRefRules`, `TestServeFactsMemoryRefRules`, `TestServePushTagsAndReservedRefs`, `TestServeProtectedCreationAndDeletion` |
@@ -1958,9 +1963,9 @@ git diff --check
 | FR-021 | LFS quota | `TestServeLFSQuotaBoundary`, `TestServeLFSQuotaRecheckedBeforeStoring`, `TestServeLFSStoredObjectRetryStagesNothing`, `TestServeLFSStoredObjectOversizedRetryEndsSession`, `TestServeLFSDocumentedExample`, `TestServeLFSLockingUnsupported` |
 | FR-022 | Protected-update serialization | `TestServeSessionPushWaitsForLockAndFetchDoesNot`, `TestServeProtectedNotFastForwardAndStaleTip`, `TestServeAdvanceConcurrentMaintainers` |
 | FR-023 | Documentation with tested examples | `TestServeQualityDocumentedExamplesAreExecuted`, `TestServeQualityTraceabilityTestsExist`, `TestServeReasonsDocsTableMatchesCatalogue` |
-| NFR-001 | Push verdict time | `TestServeQualityPushVerdictTimeNFR001` |
+| NFR-001 | Push verdict time | `TestServeQualityPushVerdictTimeNFR001`, `TestIssueReadAuditHistoryProcessCount` |
 | NFR-002 | Bounded incoming data | `TestServeFactsBudgetsAreInclusive`, `TestServeFactsBudgetPriorityWithSeveralExceeded`, `TestServePushOverRefUpdateBudgetRejectsEveryRef`, `TestServeAuditBudgetsCountPacksAndExpandedObjects`, `TestServeAuditHostedCeilingsCountAuditAttachments` |
-| NFR-003 | Fail-closed handling | `TestServeSessionUnknownKeyRefused`, `TestServeStateValidationRefusesEachLayoutDefect`, `TestServeSessionUnsafeAndUnhostedPathsRefused`, `TestServeFactsAlteredEventIsInvalid`, `TestServeFactsDependencyMissing`, `TestServeProtectedPolicyInvalid`, `TestServeAuditTamperedAttachmentsRefusedByPushAndReaders` |
+| NFR-003 | Fail-closed handling | `TestServeSessionUnknownKeyRefused`, `TestServeStateValidationRefusesEachLayoutDefect`, `TestServeSessionUnsafeAndUnhostedPathsRefused`, `TestServeFactsAlteredEventIsInvalid`, `TestServeFactsDependencyMissing`, `TestServeProtectedPolicyInvalid`, `TestServeAuditTamperedAttachmentsRefusedByPushAndReaders`, `TestIssueReadAuditBatchKeepsPerPackChecks` |
 | NFR-004 | Least privilege | `TestServeQualityEnforcedWriteBoundary`, `TestServeQualityWrittenPathsAndModes`, `TestServeLFSEnforcedWriteBoundary`, `TestServeLFSWrittenPathsAndModes`, `TestServeAdminRefusesRoot`, `TestServeStateRootRefusalPrecedesEveryStateAccess` |
 | NFR-005 | Race safety | `TestServeAdvanceRaceNFR005` |
 | NFR-006 | Client independence | `TestServeAdvanceFastForwardsAndVerifies`, `TestServeReplicationPhaseZeroFlow`, `TestReplicationAllTrustedForgedMarkerGrantsNoTrust` |

@@ -417,52 +417,36 @@ func validateIssueReadEventTree(stored StoredEvent, raw []byte) error {
 	return nil
 }
 
-// issueReadVerifyAuditSnapshots checks each audit pack against its signed
-// fact in a private temporary repository, as loadStoredEventAt does, and
-// installs a pack only when the reading repository lacks one of its
-// objects. Accepted snapshots are usually present already, so a read of
-// verified history writes nothing; a hosted read inside a receive hook
-// would otherwise copy every hosted pack into each push's quarantine.
+// issueReadVerifyAuditSnapshots checks every audit pack of events against
+// its signed fact with verifyAuditPacks, the check loadStoredEventAt
+// makes, read-scoped: the whole read costs one private temporary
+// repository and Git processes in proportion to the verified pack bytes,
+// not one repository per fact. It then installs the snapshot objects the
+// reading repository lacks. Accepted snapshots are usually present
+// already, so a read of verified history writes nothing; a hosted read
+// inside a receive hook would otherwise copy every hosted snapshot into
+// each push's quarantine.
 func issueReadVerifyAuditSnapshots(events []StoredEvent) error {
 	var audits []StoredEvent
-	var packed [][]string
-	var names []string
+	var facts []auditPackFact
 	for _, stored := range events {
-		if !isAuditKind(stored.Event.Kind) {
-			continue
+		if isAuditKind(stored.Event.Kind) {
+			audits = append(audits, stored)
+			facts = append(facts, auditPackFact{Pack: stored.Attachments["audit.pack"], Event: stored.Event})
 		}
-		ids, err := auditPackObjectIDs(stored.Attachments["audit.pack"], len(stored.Event.Audit.PolicyCommit))
-		if err != nil {
-			return issueReadFailure("invalid_history", fmt.Errorf("audit %s attachments: %w", shortID(stored.ID), err))
-		}
-		audits = append(audits, stored)
-		packed = append(packed, ids)
-		names = append(names, ids...)
 	}
-	if len(audits) == 0 {
+	if len(facts) == 0 {
 		return nil
 	}
-	answers, err := serveBatchCheck("", names)
+	snapshots, failed, err := verifyAuditPacks(facts)
 	if err != nil {
+		if failed < 0 {
+			return issueReadFailure("repository_error", fmt.Errorf("audit snapshots: %w", err))
+		}
+		return issueReadFailure("invalid_history", fmt.Errorf("audit %s snapshot: %w", shortID(audits[failed].ID), err))
+	}
+	if err := installAuditObjects("", snapshots); err != nil {
 		return issueReadFailure("repository_error", err)
-	}
-	missing := make(map[string]bool)
-	for index, answer := range answers {
-		if !answer.Found {
-			missing[names[index]] = true
-		}
-	}
-	for index, stored := range audits {
-		pack := stored.Attachments["audit.pack"]
-		install := slices.ContainsFunc(packed[index], func(id string) bool { return missing[id] })
-		if install {
-			err = importAuditPack("", pack, stored.Event)
-		} else {
-			err = verifyAuditPack(pack, stored.Event)
-		}
-		if err != nil {
-			return issueReadFailure("invalid_history", fmt.Errorf("audit %s snapshot: %w", shortID(stored.ID), err))
-		}
 	}
 	return nil
 }
