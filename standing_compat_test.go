@@ -35,6 +35,14 @@ const standingCompatOlderCommit = "7a47e6952a427ad7e3a3766c221fd334d9331950"
 // pre-existing test audit (decision 01M5VSEHF9P9VRVTY68PD8DZ7D).
 const standingCompatFrozenCommit = "d881d9bcd0ade4fa1bce91061954a8582e8d9318"
 
+// standingCompatUpstreamCommits are upstream releases merged after the
+// snapshot. A test file that upstream changed is frozen at upstream's
+// version instead: it may differ from the snapshot only where it equals the
+// upstream file exactly.
+var standingCompatUpstreamCommits = []string{
+	"01a152cfbb822a7be9ccbc51dac34e3caa0cf925", // 0.0.2-dev and follow-up fixes
+}
+
 // standingCompatBuildTimeout bounds the older build, which competes with
 // the race suite for the host.
 const standingCompatBuildTimeout = 10 * time.Minute
@@ -806,7 +814,7 @@ func TestStandingCompatPreExistingTestsFrozen(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var added, changed []string
+	var added, changed, upstream []string
 	for _, line := range strings.Split(strings.TrimSpace(string(output)), "\n") {
 		if line == "" {
 			continue
@@ -815,10 +823,44 @@ func TestStandingCompatPreExistingTestsFrozen(t *testing.T) {
 			added = append(added, strings.TrimPrefix(line, "A\t"))
 			continue
 		}
+		if standingCompatMatchesUpstream(t, source, line) {
+			upstream = append(upstream, line)
+			continue
+		}
 		changed = append(changed, line)
+	}
+	if len(upstream) != 0 {
+		t.Logf("test files taken unchanged from upstream: %d", len(upstream))
 	}
 	if len(changed) != 0 {
 		t.Fatalf("test files present at %s were modified, deleted or renamed:\n%s", standingCompatFrozenCommit, strings.Join(changed, "\n"))
 	}
 	t.Logf("test files added since %s: %s", standingCompatFrozenCommit[:12], strings.Join(added, ", "))
+}
+
+// standingCompatMatchesUpstream reports whether every path in one
+// --name-status line is identical at HEAD and at some merged upstream
+// commit, including being absent from both.
+func standingCompatMatchesUpstream(t *testing.T, source, line string) bool {
+	t.Helper()
+	fields := strings.Split(line, "\t")
+	if len(fields) < 2 {
+		return false
+	}
+	for _, commit := range standingCompatUpstreamCommits {
+		if _, err := standingCompatSourceGit(t, source, "cat-file", "-e", commit+"^{commit}"); err != nil {
+			continue
+		}
+		same := true
+		for _, path := range fields[1:] {
+			if _, err := standingCompatSourceGit(t, source, "diff", "--quiet", commit, "HEAD", "--", path); err != nil {
+				same = false
+				break
+			}
+		}
+		if same {
+			return true
+		}
+	}
+	return false
 }
