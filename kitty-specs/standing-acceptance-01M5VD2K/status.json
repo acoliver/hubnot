@@ -565,6 +565,9 @@
       "last_event_id": "01M5ZY1PKRQ08T240CWGP6807K",
       "last_transition_at": "2026-10-28T00:20:04.856703+00:00",
       "model": "__resolved_model_absent__",
+      "notes": [
+        "WP19 (commit df7d085): T096 automergePublicationOnlyFact/automergeOwnRuleMergeFact select the publication-only rerun in cmdAutomerge before inspection.eligible() (standing rule, executing actor, own path-(b) rule merge fact under base policy, hn serve remote; otherwise existing refusals unchanged). T097 serveAdvancePublishOnly publishes, keeps the republish seam, confirms hosted branch contains fact commit; never signs, appends or pushes a branch. T098 automergeRemoteRepairTip: remote repair via mergeRemoteBound step 5 (WP15 step 5 already complete, mergeRemoteBound unchanged). T099 TestStandingServeRecovery{Interruptions(publish,push,record,republish),CompletedRun,Refusals,AcceptanceMergeRefused,HostedBranchLacksCommit,OwnRuleMergeFact} with logged fact counts and hosted main per row. T100 docs/serve-v0.md 'Rerunning a rule advancement'. Gate: gofmt -l clean; go vet ./... and go build ./... pass; go test -race -count=1 -timeout 150m -skip perf ./... ok (hubnot 2936s); perf test without -race ok (12.4s); focused race run ok. No pre-existing test modified. Lane kitty-specs cleanup committed (42289fb) as move-task directed."
+      ],
       "provider": "__resolved_provider_absent__",
       "role": "implementer",
       "shell_pid": 2677246,
