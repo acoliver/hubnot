@@ -12,7 +12,8 @@ import (
 )
 
 // standingEventLegacyEvent is the Event definition before rule claims
-// existed (d881d9b). The legacy audit decodes every payload into it and
+// existed (d881d9b, plus the Audit field from upstream 0.0.2-dev). The legacy
+// audit decodes every payload into it and
 // requires verifyEvent to report the same fields.
 type standingEventLegacyEvent struct {
 	Protocol     string   `json:"protocol"`
@@ -50,6 +51,7 @@ type standingEventLegacyEvent struct {
 	Operation string      `json:"operation,omitempty"`
 	Request   string      `json:"request,omitempty"`
 	Intent    string      `json:"intent,omitempty"`
+	Audit     *AuditFact  `json:"audit,omitempty"`
 }
 
 const (

@@ -5,6 +5,29 @@ experimental; alpha releases do not promise stable compatibility.
 
 ## Unreleased
 
+### Fixed
+
+- Migration sessions and internal project/archive/imported-record spools share
+  a path policy that handles verified macOS system temporary-directory aliases
+  while retaining rejection of arbitrary symlinks and unsafe private paths.
+  macOS regressions exercise literal aliases and child environments without
+  TMPDIR. Published `0.0.2-dev` packages retain the limitation in [#16](https://github.com/LynnColeArt/hubnot/issues/16).
+- Packager refusal fixtures build hostile committed trees directly with Git
+  plumbing, including file and directory case collisions, so the same assertions
+  exercise real inputs on case-insensitive filesystems.
+
+### Development
+
+- Linux/macOS PR checks run the repository-local filesystem, migration and
+  packager regression gates with normal temporary-directory environments.
+  These optional hosted checks add no runtime or provider dependency to Hubnot.
+
+## [0.0.2-dev](https://github.com/LynnColeArt/hubnot/releases/tag/v0.0.2-dev) — 2026-10-27
+
+Portable-collaboration alpha prerelease, built from
+`e80880abc792e2c386182e06027fc251b134c0d2`. The executable reports `0.0.2-dev`.
+**Mac runtime testing is still pending for both Intel and Apple Silicon.**
+
 ### Removed
 
 - Obsolete tracked `.nh/policy.json` and `.nh/pipelines/test.json` from the retired
@@ -15,18 +38,75 @@ experimental; alpha releases do not promise stable compatibility.
 
 - Test repository fixtures now resolve physical paths consistently with Git when
   temporary directories use aliases, including macOS `/var` and `/private/var`.
-  This is a test-only correction after the first release; published executable
-  bytes are unchanged. ([#10](https://github.com/LynnColeArt/hubnot/pull/10))
+  This correction changes tests only; existing `0.0.1-dev` assets remain
+  unchanged. ([#10](https://github.com/LynnColeArt/hubnot/pull/10))
 
-### Required for the next release
+### Added
 
-- Replace the Python release packager with tooling that uses **Go and Git alone**
-  and runs on Linux, macOS, and Windows. Release packaging must not require
-  Python or a Unix-only shell. This is a packaging portability requirement;
-  Windows executable distribution remains a separate scope decision.
-- Keep runtime, source-build, and archive-reproduction requirements explicit.
-  Running a prebuilt `hn` requires Git 2.x; ordinary source builds require Go
-  and Git. The published `0.0.1-dev` artifacts remain unchanged.
+- Portable project snapshots and bounded archives retain explicitly selected Git
+  history, exact signed native facts, attributed foreign communications and
+  retrieved attachment bytes. Saved guided/scripted `hn migrate` plans preview
+  capabilities and explicit loss decisions before guarded apply/resume. Imported
+  history does not install signers, activate policy or grant runner authority.
+- Tested migration profiles for GitHub, GitLab including self-hosted endpoints,
+  separate Forgejo and Gitea versions, Bitbucket Cloud source preservation, and
+  explicitly mapped Azure DevOps Boards work items/comments. Preservation does
+  not imply destination recreation; unavailable reads and removed APIs are
+  reported. Legacy explicit transfer commands retain their behavior.
+- `noforge` excludes all network adapters while retaining native collaboration,
+  local/archive migration, foreign inspection, and independent audits.
+  `nogithub` continues to exclude GitHub only.
+- Independent signed audit authorizations, revocations, requests and results,
+  with separate explicit local authority adoption and existing sandbox/unsafe-host
+  execution boundaries. Audit outcomes never supply or block merge evidence.
+  Deliberate linked follow-up issues deduplicate retries and later findings,
+  preserve operator edits and expose concurrent publisher limits. No scheduler
+  or automatic execution is introduced; native policy defaults remain unchanged.
+- Go/Git-only `hn-release` packages an exact committed revision into deterministic
+  Linux/macOS binary and source archives with normalized metadata, SHA-256
+  checksums and declared provenance. Native-only packages omit all adapters.
+  The packager cross-compiles for Windows/macOS; their packager-host runtime
+  qualification remains outstanding. Packaging never publishes or changes tags.
+  The immutable `0.0.1-dev` artifacts retain their original Python reproduction
+  requirements and GitHub-only native-only meaning.
+
+### Downloads
+
+| Platform | Standard | Native-only |
+| --- | --- | --- |
+| Linux AMD64 | [Download](https://github.com/LynnColeArt/hubnot/releases/download/v0.0.2-dev/hubnot_0.0.2-dev_linux_amd64.tar.gz) | [Download](https://github.com/LynnColeArt/hubnot/releases/download/v0.0.2-dev/hubnot_0.0.2-dev_linux_amd64_native-only.tar.gz) |
+| Linux ARM64 | [Download](https://github.com/LynnColeArt/hubnot/releases/download/v0.0.2-dev/hubnot_0.0.2-dev_linux_arm64.tar.gz) | [Download](https://github.com/LynnColeArt/hubnot/releases/download/v0.0.2-dev/hubnot_0.0.2-dev_linux_arm64_native-only.tar.gz) |
+| macOS Intel | [Download](https://github.com/LynnColeArt/hubnot/releases/download/v0.0.2-dev/hubnot_0.0.2-dev_darwin_amd64.tar.gz) | [Download](https://github.com/LynnColeArt/hubnot/releases/download/v0.0.2-dev/hubnot_0.0.2-dev_darwin_amd64_native-only.tar.gz) |
+| macOS Apple Silicon | [Download](https://github.com/LynnColeArt/hubnot/releases/download/v0.0.2-dev/hubnot_0.0.2-dev_darwin_arm64.tar.gz) | [Download](https://github.com/LynnColeArt/hubnot/releases/download/v0.0.2-dev/hubnot_0.0.2-dev_darwin_arm64_native-only.tar.gz) |
+
+[Source archive](https://github.com/LynnColeArt/hubnot/releases/download/v0.0.2-dev/hubnot_0.0.2-dev_source.tar.gz),
+[SHA256SUMS](https://github.com/LynnColeArt/hubnot/releases/download/v0.0.2-dev/SHA256SUMS)
+and [build provenance](https://github.com/LynnColeArt/hubnot/releases/download/v0.0.2-dev/PROVENANCE.json)
+accompany the binary packages. Native-only excludes every network provider
+adapter while retaining native commands and local/archive migration.
+
+### Verification and distribution limits
+
+- The release source passed the full race suite, independent mission review,
+  and final pre-merge vet/build/targeted race checks.
+- All eleven assets reproduced byte-for-byte with Go 1.26.4. Independent
+  inspection verified exact source files, archive contents and metadata,
+  executable architectures, static Linux linking, checksums and provenance.
+  All eleven published downloads match the verified local files.
+- Both Linux AMD64 and ARM64 standard/native-only binaries passed runtime smoke
+  checks with Git-only application PATH and no provider credentials, including
+  signed native issues, saved archive migration, exact native actor history
+  import and local continuation. No new full ARM64 Go-suite run is claimed.
+- Both macOS architectures were cross-compiled and inspected. **Mac runtime
+  testing is still pending for 0.0.2-dev**; previous Apple Silicon test results
+  apply only to the earlier release. The packages have no Apple Developer ID
+  signature or notarization.
+- Running prebuilt binaries requires Git 2.x. Source builds and the new release
+  tooling require Go and Git alone; Python is not required. macOS/Windows
+  packager-host execution remains unverified, and Windows CLI distribution
+  remains outside this release matrix.
+- Protected checks, automerge and independent audits remain optional and
+  disabled by default. No scheduler, service or background worker is installed.
 
 ## [0.0.1-dev](https://github.com/LynnColeArt/hubnot/releases/tag/v0.0.1-dev) — 2026-10-25
 

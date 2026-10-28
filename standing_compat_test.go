@@ -56,6 +56,12 @@ var standingCompatAdditiveLines = []struct {
 	{"policy show", regexp.MustCompile(`^  Counted reviewers: all trusted reviewers$`)},
 	{"policy check", regexp.MustCompile(`^  automerge rule \S+ acceptance: .+$`)},
 	{"policy check", regexp.MustCompile(`^  automerge rule \S+ reviewers (added|removed): .+$`)},
+	// Upstream 0.0.2-dev added audits after the older reference commit was
+	// built; these lines come from that release, not from this mission.
+	{"policy show", regexp.MustCompile(`^Audits: disabled$`)},
+	{"policy check", regexp.MustCompile(`^  audits enabled: .+$`)},
+	{"policy check", regexp.MustCompile(`^  audit scope: .+$`)},
+	{"policy check", regexp.MustCompile(`^  audit (rule owners|requesters|executors) (added|removed): .+$`)},
 }
 
 // standingCompatPlaceholders normalizes the values that differ between two
