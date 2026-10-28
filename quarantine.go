@@ -1044,16 +1044,7 @@ func validateQuarantinedEventTree(gitDir string, event StoredEvent) error {
 		}
 		names[name] = true
 	}
-	want := map[string]bool{"event.json": true, "signature": true}
-	if isAuditKind(event.Event.Kind) {
-		want["audit.pack"] = true
-		if event.Event.Kind == "audit.result" {
-			want["log.txt"] = true
-		}
-	}
-	if event.Event.Kind == "run.result" {
-		want["log.txt"] = true
-	}
+	want := eventTreeMembers(event.Event.Kind)
 	if len(names) != len(want) {
 		return fmt.Errorf("event %s has unsupported attachment or missing signed material", event.ID)
 	}
@@ -1063,6 +1054,22 @@ func validateQuarantinedEventTree(gitDir string, event StoredEvent) error {
 		}
 	}
 	return nil
+}
+
+// eventTreeMembers is the exact set of regular files an event commit of
+// kind holds: event.json, signature and the kind's typed attachments.
+func eventTreeMembers(kind string) map[string]bool {
+	want := map[string]bool{"event.json": true, "signature": true}
+	if isAuditKind(kind) {
+		want["audit.pack"] = true
+		if kind == "audit.result" {
+			want["log.txt"] = true
+		}
+	}
+	if kind == "run.result" {
+		want["log.txt"] = true
+	}
+	return want
 }
 
 func acceptedProposalHeads() (map[string]string, map[string]string, error) {

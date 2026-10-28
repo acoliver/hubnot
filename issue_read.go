@@ -2,11 +2,14 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os/exec"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -283,6 +286,24 @@ func issueReadStoredEvents(commits []string, limits issueReadLimits) (result []S
 		}
 		return readIssueBatchObject(reader, limits, &used)
 	}
+	// readBounded reads a blob that the protocol caps at bound bytes; a
+	// larger one is invalid history whatever the read budget allows.
+	readBounded := func(path string, bound int64) ([]byte, error) {
+		if _, err := io.WriteString(input, path+"\n"); err != nil {
+			return nil, issueReadFailure("repository_error", err)
+		}
+		return readIssueBatchTyped(reader, "blob", bound, limits, &used)
+	}
+	// readTree reads an event commit's tree. The tree is checked and then
+	// dropped, so it is capped on its own and does not count against the
+	// byte budget, which the hosted fact ceilings mirror exactly.
+	readTree := func(commit string) ([]byte, error) {
+		if _, err := io.WriteString(input, commit+"^{tree}\n"); err != nil {
+			return nil, issueReadFailure("repository_error", err)
+		}
+		scratch := int64(0)
+		return readIssueBatchTyped(reader, "tree", issueReadEventTreeLimit, limits, &scratch)
+	}
 	events := make([]StoredEvent, 0, len(commits))
 	for _, commit := range commits {
 		payload, err := read(commit + ":event.json")
@@ -312,6 +333,35 @@ func issueReadStoredEvents(commits []string, limits issueReadLimits) (result []S
 			}
 			stored.Attachments["log.txt"] = log
 		}
+		if isAuditKind(event.Kind) {
+			// The same typed attachments loadStoredEventAt loads: the event
+			// tree holds exactly the declared members, and the attachments
+			// are bounded, present and bound to the signed fact.
+			tree, err := readTree(commit)
+			if err != nil {
+				return nil, err
+			}
+			if err := validateIssueReadEventTree(stored, tree); err != nil {
+				return nil, issueReadFailure("invalid_history", err)
+			}
+			for _, name := range slices.Sorted(maps.Keys(eventTreeMembers(event.Kind))) {
+				bound := int64(maxRunLogSize)
+				switch name {
+				case "event.json", "signature":
+					continue
+				case "audit.pack":
+					bound = maxAuditPack
+				}
+				attachment, err := readBounded(commit+":"+name, bound)
+				if err != nil {
+					return nil, err
+				}
+				stored.Attachments[name] = attachment
+			}
+			if err := validateAuditAttachments(event, stored.Attachments); err != nil {
+				return nil, issueReadFailure("invalid_history", fmt.Errorf("audit %s attachments: %w", shortID(id), err))
+			}
+		}
 		events = append(events, stored)
 	}
 	if err = input.Close(); err != nil {
@@ -327,21 +377,118 @@ func issueReadStoredEvents(commits []string, limits issueReadLimits) (result []S
 	if err != nil {
 		return nil, issueReadFailure("repository_error", fmt.Errorf("git cat-file: %s: %w", strings.TrimSpace(string(stderr.data)), err))
 	}
+	if err := issueReadVerifyAuditSnapshots(events); err != nil {
+		return nil, err
+	}
 	return events, nil
 }
 
+// issueReadEventTreeLimit bounds an audit event's tree. The largest valid
+// one has four entries with SHA-256 object IDs.
+const issueReadEventTreeLimit = 1024
+
+// validateIssueReadEventTree applies validateQuarantinedEventTree's rules
+// to the raw tree object of stored's commit.
+func validateIssueReadEventTree(stored StoredEvent, raw []byte) error {
+	oidBytes := len(stored.Commit) / 2
+	names := make(map[string]bool)
+	for len(raw) > 0 {
+		space := bytes.IndexByte(raw, ' ')
+		nul := bytes.IndexByte(raw, 0)
+		if space <= 0 || nul <= space || len(raw)-nul-1 < oidBytes {
+			return fmt.Errorf("event %s has malformed tree entry", stored.ID)
+		}
+		mode, name := string(raw[:space]), string(raw[space+1:nul])
+		raw = raw[nul+1+oidBytes:]
+		if mode != "100644" || name == "" || strings.Contains(name, "/") || names[name] {
+			return fmt.Errorf("event %s has unsupported tree entry %q", stored.ID, name)
+		}
+		names[name] = true
+	}
+	want := eventTreeMembers(stored.Event.Kind)
+	if len(names) != len(want) {
+		return fmt.Errorf("event %s has unsupported attachment or missing signed material", stored.ID)
+	}
+	for name := range want {
+		if !names[name] {
+			return fmt.Errorf("event %s is missing %s", stored.ID, name)
+		}
+	}
+	return nil
+}
+
+// issueReadVerifyAuditSnapshots checks each audit pack against its signed
+// fact in a private temporary repository, as loadStoredEventAt does, and
+// installs a pack only when the reading repository lacks one of its
+// objects. Accepted snapshots are usually present already, so a read of
+// verified history writes nothing; a hosted read inside a receive hook
+// would otherwise copy every hosted pack into each push's quarantine.
+func issueReadVerifyAuditSnapshots(events []StoredEvent) error {
+	var audits []StoredEvent
+	var packed [][]string
+	var names []string
+	for _, stored := range events {
+		if !isAuditKind(stored.Event.Kind) {
+			continue
+		}
+		ids, err := auditPackObjectIDs(stored.Attachments["audit.pack"], len(stored.Event.Audit.PolicyCommit))
+		if err != nil {
+			return issueReadFailure("invalid_history", fmt.Errorf("audit %s attachments: %w", shortID(stored.ID), err))
+		}
+		audits = append(audits, stored)
+		packed = append(packed, ids)
+		names = append(names, ids...)
+	}
+	if len(audits) == 0 {
+		return nil
+	}
+	answers, err := serveBatchCheck("", names)
+	if err != nil {
+		return issueReadFailure("repository_error", err)
+	}
+	missing := make(map[string]bool)
+	for index, answer := range answers {
+		if !answer.Found {
+			missing[names[index]] = true
+		}
+	}
+	for index, stored := range audits {
+		pack := stored.Attachments["audit.pack"]
+		install := slices.ContainsFunc(packed[index], func(id string) bool { return missing[id] })
+		if install {
+			err = importAuditPack("", pack, stored.Event)
+		} else {
+			err = verifyAuditPack(pack, stored.Event)
+		}
+		if err != nil {
+			return issueReadFailure("invalid_history", fmt.Errorf("audit %s snapshot: %w", shortID(stored.ID), err))
+		}
+	}
+	return nil
+}
+
 func readIssueBatchObject(reader *bufio.Reader, limits issueReadLimits, used *int64) ([]byte, error) {
+	return readIssueBatchTyped(reader, "blob", -1, limits, used)
+}
+
+// readIssueBatchTyped reads one batch answer, which must be an object of
+// type kind. A nonnegative bound is the protocol's cap on the object: a
+// larger one is invalid history. The read then counts against limits.
+func readIssueBatchTyped(reader *bufio.Reader, kind string, bound int64, limits issueReadLimits, used *int64) ([]byte, error) {
 	header, err := reader.ReadSlice('\n')
 	if err != nil || len(header) > 1024 {
 		return nil, issueReadFailure("invalid_history", fmt.Errorf("malformed or truncated batch header"))
 	}
 	fields := strings.Fields(string(header))
-	if len(fields) != 3 || !validGitOID(fields[0]) || fields[1] != "blob" {
+	if len(fields) != 3 || !validGitOID(fields[0]) || fields[1] != kind {
 		return nil, issueReadFailure("invalid_history", fmt.Errorf("missing object or invalid batch object header"))
 	}
 	size, err := strconv.ParseInt(fields[2], 10, 64)
 	if err != nil || size < 0 {
 		return nil, issueReadFailure("invalid_history", fmt.Errorf("invalid batch object size"))
+	}
+	if bound >= 0 && size > bound {
+		return nil, issueReadFailure("invalid_history", fmt.Errorf("%s object exceeds its %d-byte protocol bound", kind, bound))
 	}
 	if size > limits.object || *used > limits.total || size > limits.total-*used {
 		return nil, issueReadFailure("resource_limit", fmt.Errorf("issue object read exceeds byte budget"))

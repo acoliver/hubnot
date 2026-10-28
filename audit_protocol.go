@@ -829,23 +829,16 @@ func RecordAuditResult(requestID, policyRef string, id *Identity, result executi
 }
 
 func validateAuditObjectShapesAt(repository gitRepository, objects []string) error {
-	types := make(map[string]string, len(objects))
-	for _, object := range objects {
-		typ, err := repository.text("cat-file", "-t", object)
-		if err != nil {
-			return err
-		}
-		types[object] = typ
+	types, contents, err := auditObjectsAt(repository, objects)
+	if err != nil {
+		return err
 	}
 	for _, object := range objects {
 		typ := types[object]
 		switch typ {
 		case "blob":
 		case "commit":
-			raw, err := repository.text("cat-file", "commit", object)
-			if err != nil {
-				return err
-			}
+			raw := strings.TrimSpace(string(contents[object]))
 			lines := strings.Split(raw, "\n")
 			if len(lines) < 4 || !strings.HasPrefix(lines[0], "tree ") || types[strings.TrimPrefix(lines[0], "tree ")] != "tree" {
 				return fmt.Errorf("malformed audit commit")
@@ -863,10 +856,7 @@ func validateAuditObjectShapesAt(repository gitRepository, objects []string) err
 				}
 			}
 		case "tree":
-			raw, err := repository.output("cat-file", "tree", object)
-			if err != nil {
-				return err
-			}
+			raw := contents[object]
 			names := map[string]bool{}
 			for len(raw) > 0 {
 				space := bytes.IndexByte(raw, ' ')
@@ -905,6 +895,64 @@ func validateAuditObjectShapesAt(repository gitRepository, objects []string) err
 		}
 	}
 	return nil
+}
+
+// auditObjectsAt returns the type of each object and the contents of each
+// commit and tree, read with one batched type query and one batched
+// content query, so the number of Git processes does not grow with the
+// snapshot.
+func auditObjectsAt(repository gitRepository, objects []string) (map[string]string, map[string][]byte, error) {
+	types := make(map[string]string, len(objects))
+	contents := map[string][]byte{}
+	if len(objects) == 0 {
+		return types, contents, nil
+	}
+	listing, err := repository.input([]byte(strings.Join(objects, "\n")+"\n"), "cat-file", "--batch-check=%(objectname) %(objecttype)")
+	if err != nil {
+		return nil, nil, err
+	}
+	lines := strings.Split(strings.TrimSuffix(string(listing), "\n"), "\n")
+	if len(lines) != len(objects) {
+		return nil, nil, fmt.Errorf("audit object query answered %d of %d objects", len(lines), len(objects))
+	}
+	structural := []string{}
+	for index, line := range lines {
+		fields := strings.Fields(line)
+		if len(fields) != 2 || fields[0] != objects[index] || fields[1] == "missing" || fields[1] == "ambiguous" {
+			return nil, nil, fmt.Errorf("audit object %s unavailable", objects[index])
+		}
+		types[objects[index]] = fields[1]
+		if fields[1] == "commit" || fields[1] == "tree" {
+			structural = append(structural, objects[index])
+		}
+	}
+	if len(structural) == 0 {
+		return types, contents, nil
+	}
+	batch, err := repository.input([]byte(strings.Join(structural, "\n")+"\n"), "cat-file", "--batch")
+	if err != nil {
+		return nil, nil, err
+	}
+	for _, object := range structural {
+		end := bytes.IndexByte(batch, '\n')
+		if end < 0 {
+			return nil, nil, fmt.Errorf("truncated audit object batch")
+		}
+		fields := strings.Fields(string(batch[:end]))
+		if len(fields) != 3 || fields[0] != object || fields[1] != types[object] {
+			return nil, nil, fmt.Errorf("unexpected audit object batch header for %s", object)
+		}
+		size, err := strconv.Atoi(fields[2])
+		if err != nil || size < 0 || len(batch)-end-1 < size+1 || batch[end+1+size] != '\n' {
+			return nil, nil, fmt.Errorf("malformed audit object batch for %s", object)
+		}
+		contents[object] = batch[end+1 : end+1+size]
+		batch = batch[end+2+size:]
+	}
+	if len(batch) != 0 {
+		return nil, nil, fmt.Errorf("unexpected trailing audit object batch output")
+	}
+	return types, contents, nil
 }
 
 // measureAuditSnapshotDependenciesAt counts expanded snapshot objects against

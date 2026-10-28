@@ -1,9 +1,14 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
+	"io/fs"
+	"maps"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -267,5 +272,149 @@ func TestAuditPackVerificationIgnoresReceiveEnvironment(t *testing.T) {
 	}
 	if err := importAuditPack(dir, partial, auth.Event); err == nil {
 		t.Fatal("an alternate object database supplied the policy blob a signed audit pack omits")
+	}
+}
+
+// serveAuditVariant commits, on commit's parent, commit's tree with the
+// members in replace swapped for the given bytes, or removed for nil, in
+// the current repository, and returns the new commit. The signed
+// event.json and signature stay as they are.
+func serveAuditVariant(t *testing.T, commit string, replace map[string][]byte) string {
+	t.Helper()
+	entries := map[string]string{}
+	for _, line := range strings.Split(mustGitText(t, "ls-tree", commit), "\n") {
+		meta, name, _ := strings.Cut(line, "\t")
+		entries[name] = meta
+	}
+	for name, contents := range replace {
+		delete(entries, name)
+		if contents != nil {
+			entries[name] = "100644 blob " + mustGitTextFromInput(t, contents, "hash-object", "-w", "--stdin")
+		}
+	}
+	var tree strings.Builder
+	for _, name := range slices.Sorted(maps.Keys(entries)) {
+		tree.WriteString(entries[name] + "\t" + name + "\n")
+	}
+	id := mustGitTextFromInput(t, []byte(tree.String()), "mktree")
+	return mustGitText(t, "commit-tree", id, "-p", commit+"^", "-m", "tampered audit attachments")
+}
+
+// serveObjectFiles lists every file below the hosted object database, so a
+// rejected push can be shown to leave accepted storage byte-identical.
+func (f *servePushFixture) hostedObjectFiles() []string {
+	f.t.Helper()
+	var files []string
+	root := filepath.Join(f.hosted, "objects")
+	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !entry.IsDir() {
+			files = append(files, strings.TrimPrefix(path, root))
+		}
+		return nil
+	})
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	return files
+}
+
+// A corrupt, missing or swapped audit.pack and a tampered audit-result log
+// are refused by the receive hook, naming the result and the attachment
+// cause, by the batched reader and by loadStoredEventAt alike. The push
+// that carries a valid request together with the tampered result changes
+// no hosted ref and no file of the hosted object database, so the
+// request's snapshot is not hosted. Untampered, the same events are read
+// by the batched reader with the attachments loadStoredEventAt returns,
+// within its read budget, and the push is accepted. A damaged hosted audit
+// fact makes the server's own batched read refuse later fact updates.
+func TestServeAuditTamperedAttachmentsRefusedByPushAndReaders(t *testing.T) {
+	f := newServeAuditFixture(t)
+	serveAuditID(t, f.audit("A", "rule", "authorize", "check", "--source", "pipeline", "--at", f.Policy))
+	f.pushOwn("A")
+	request := serveAuditID(t, f.audit("A", "request", "--at", f.Target, "--rule", "check", "--intent", "tampered result"))
+	result := serveAuditID(t, f.audit("A", "execute", request, "--backend", "host", "--allow-unsafe-host-execution"))
+	ref := f.actorRef("A")
+	good := f.localHead("A", ref)
+	t.Chdir(f.work["A"])
+
+	reference, err := loadStoredEventAt("", good)
+	if err != nil {
+		t.Fatal(err)
+	}
+	batched, err := issueReadStoredEvents([]string{good}, defaultIssueReadLimits())
+	if err != nil || len(batched) != 1 {
+		t.Fatalf("batched read of the untampered result: %v", err)
+	}
+	if !reflect.DeepEqual(batched[0].Attachments, reference.Attachments) || len(reference.Attachments) != 2 {
+		t.Fatalf("batched attachments %q differ from loadStoredEventAt's %q", slices.Sorted(maps.Keys(batched[0].Attachments)), slices.Sorted(maps.Keys(reference.Attachments)))
+	}
+	pack := reference.Attachments["audit.pack"]
+	tight := defaultIssueReadLimits()
+	tight.object = int64(len(pack)) - 1
+	var readErr *IssueReadError
+	if _, err := issueReadStoredEvents([]string{good}, tight); !errors.As(err, &readErr) || readErr.Code != "resource_limit" {
+		t.Fatalf("an audit pack above the object read budget gave %v, want resource_limit", err)
+	}
+
+	ids, err := auditPackObjectIDs(pack, len(good))
+	if err != nil {
+		t.Fatal(err)
+	}
+	extra := mustGitTextFromInput(t, []byte("an object no signed snapshot names\n"), "hash-object", "-w", "--stdin")
+	swapped, err := gitInput([]byte(strings.Join(append(ids, extra), "\n")+"\n"), nil, "pack-objects", "--stdout", "--window=0", "--depth=0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	variants := map[string]map[string][]byte{
+		"corrupt pack":    {"audit.pack": []byte("not a pack")},
+		"missing pack":    {"audit.pack": nil},
+		"extra object":    {"audit.pack": swapped},
+		"tampered log":    {"log.txt": append(bytes.Clone(reference.Attachments["log.txt"]), "forged\n"...)},
+		"undeclared file": {"notes.txt": []byte("not a typed attachment\n")},
+	}
+	for _, name := range slices.Sorted(maps.Keys(variants)) {
+		bad := serveAuditVariant(t, good, variants[name])
+		if _, err := loadStoredEventAt("", bad); err == nil {
+			t.Fatalf("%s: loadStoredEventAt accepted the tampered result", name)
+		}
+		if _, err := issueReadStoredEvents([]string{bad}, defaultIssueReadLimits()); !errors.As(err, &readErr) || readErr.Code != "invalid_history" {
+			t.Fatalf("%s: batched reader gave %v, want invalid_history", name, err)
+		}
+		mustGit(t, "update-ref", ref, bad)
+		if _, _, err := collectIssueEvents(); err == nil {
+			t.Fatalf("%s: collectIssueEvents accepted the tampered result", name)
+		}
+		objects := f.hostedObjectFiles()
+		rejections := f.reject("A", map[string]string{ref: serveReasonActorChainInvalid}, "origin", ref+":"+ref)
+		requireServeIDs(t, rejections[0], result)
+		if !strings.Contains(rejections[0].Sentence, "attachments do not verify") {
+			t.Fatalf("%s: sentence %q does not name the attachment failure", name, rejections[0].Sentence)
+		}
+		if after := f.hostedObjectFiles(); !slices.Equal(after, objects) {
+			t.Fatalf("%s: the rejected push changed the hosted object database", name)
+		}
+		if f.hostedHas(f.Target) {
+			t.Fatalf("%s: the rejected request's snapshot reached accepted storage", name)
+		}
+		mustGit(t, "update-ref", ref, good)
+	}
+	if _, _, err := collectIssueEvents(); err != nil {
+		t.Fatalf("the restored chain does not read: %v", err)
+	}
+	f.pushOwn("A")
+
+	// Damage the hosted chain behind the verdict's back: the corrupt
+	// commit arrives on an ordinary branch and the administrator moves the
+	// actor ref. The server's batched read then refuses every fact update.
+	bad := serveAuditVariant(t, good, map[string][]byte{"audit.pack": []byte("not a pack")})
+	f.push("A", "origin", bad+":refs/heads/damage")
+	f.h.Serve("serve", "repo", "lock-exec", "r", "--", "git", "update-ref", ref, bad, good)
+	f.issue("B", "fact pushed over damaged hosted audits")
+	rejections := f.reject("B", map[string]string{f.actorRef("B"): serveReasonActorChainInvalid}, "origin", f.actorRef("B")+":"+f.actorRef("B"))
+	if rejections[0].Sentence != serveHostedFactsSentence {
+		t.Fatalf("sentence %q, want %q", rejections[0].Sentence, serveHostedFactsSentence)
 	}
 }

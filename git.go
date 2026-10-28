@@ -88,10 +88,14 @@ type gitRepository struct {
 }
 
 func (repository gitRepository) output(args ...string) ([]byte, error) {
+	return repository.input(nil, args...)
+}
+
+func (repository gitRepository) input(input []byte, args ...string) ([]byte, error) {
 	if repository.isolated {
-		return gitIsolatedInputAt(repository.dir, nil, args...)
+		return gitIsolatedInputAt(repository.dir, input, args...)
 	}
-	return gitOutputAt(repository.dir, args...)
+	return gitInputAt(repository.dir, input, args...)
 }
 
 func (repository gitRepository) text(args ...string) (string, error) {
