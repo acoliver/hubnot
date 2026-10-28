@@ -761,29 +761,13 @@ func checkServeProtectedTip(gitDir, ref string) error {
 	return nil
 }
 
-// serveAdminGitDropped are inherited variables that would point Git at
-// another repository, object store or configuration than the one an
-// administration command names.
-var serveAdminGitDropped = []string{
-	"GIT_ALTERNATE_OBJECT_DIRECTORIES=", "GIT_CEILING_DIRECTORIES=", "GIT_COMMON_DIR=", "GIT_CONFIG",
-	"GIT_DIR=", "GIT_DISCOVERY_ACROSS_FILESYSTEM=", "GIT_GRAFT_FILE=", "GIT_INDEX_FILE=", "GIT_NAMESPACE=",
-	"GIT_NO_REPLACE_OBJECTS=", "GIT_OBJECT_DIRECTORY=", "GIT_QUARANTINE_PATH=", "GIT_REPLACE_REF_BASE=",
-	"GIT_SHALLOW_FILE=", "GIT_TEMPLATE_DIR=", "GIT_WORK_TREE=",
-}
-
 // serveAdminGit runs git in directory with the system configuration ignored,
 // repository discovery stopped at directory and no inherited variable that
-// redirects it. Errors carry Git's standard error.
+// redirects it (gitRoutingVariables). Errors carry Git's standard error.
 func serveAdminGit(directory string, input []byte, args ...string) ([]byte, error) {
 	command := exec.Command("git", args...)
 	command.Dir = directory
-	environment := make([]string, 0, len(os.Environ())+2)
-	for _, entry := range os.Environ() {
-		if !slices.ContainsFunc(serveAdminGitDropped, func(prefix string) bool { return strings.HasPrefix(entry, prefix) }) {
-			environment = append(environment, entry)
-		}
-	}
-	command.Env = append(environment, "GIT_CONFIG_NOSYSTEM=1", "GIT_CEILING_DIRECTORIES="+filepath.Dir(directory))
+	command.Env = append(isolatedGitEnvironment(), "GIT_CONFIG_NOSYSTEM=1", "GIT_CEILING_DIRECTORIES="+filepath.Dir(directory))
 	command.Stdin = bytes.NewReader(input)
 	var stdout, stderr bytes.Buffer
 	command.Stdout = &stdout

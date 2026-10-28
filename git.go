@@ -44,12 +44,71 @@ func gitInputAt(gitDir string, input []byte, args ...string) ([]byte, error) {
 }
 
 func gitInputWithDirectory(gitDir string, input []byte, extraEnv []string, args ...string) ([]byte, error) {
+	return gitRun(gitDir, append(os.Environ(), extraEnv...), input, args...)
+}
+
+// gitRoutingVariables are inherited variables that would point Git at
+// another repository, object store or configuration than the one a command
+// names. Entries ending in "=" match one variable; GIT_CONFIG matches every
+// GIT_CONFIG* variable. Receive-pack sets several of them for its hooks,
+// including GIT_QUARANTINE_PATH, under which Git refuses ref updates.
+var gitRoutingVariables = []string{
+	"GIT_ALTERNATE_OBJECT_DIRECTORIES=", "GIT_CEILING_DIRECTORIES=", "GIT_COMMON_DIR=", "GIT_CONFIG",
+	"GIT_DIR=", "GIT_DISCOVERY_ACROSS_FILESYSTEM=", "GIT_GRAFT_FILE=", "GIT_INDEX_FILE=", "GIT_NAMESPACE=",
+	"GIT_NO_REPLACE_OBJECTS=", "GIT_OBJECT_DIRECTORY=", "GIT_QUARANTINE_PATH=", "GIT_REPLACE_REF_BASE=",
+	"GIT_SHALLOW_FILE=", "GIT_TEMPLATE_DIR=", "GIT_WORK_TREE=",
+}
+
+// isolatedGitEnvironment is the process environment without
+// gitRoutingVariables.
+func isolatedGitEnvironment() []string {
+	environment := make([]string, 0, len(os.Environ()))
+	for _, entry := range os.Environ() {
+		if !slices.ContainsFunc(gitRoutingVariables, func(prefix string) bool { return strings.HasPrefix(entry, prefix) }) {
+			environment = append(environment, entry)
+		}
+	}
+	return environment
+}
+
+// gitIsolatedInputAt runs git for a private temporary repository with
+// isolatedGitEnvironment, so the command neither reads nor writes an
+// inherited object store and an inherited quarantine cannot refuse it.
+func gitIsolatedInputAt(gitDir string, input []byte, args ...string) ([]byte, error) {
+	return gitRun(gitDir, isolatedGitEnvironment(), input, args...)
+}
+
+// gitRepository names the Git directory a sequence of read commands
+// addresses. An isolated repository is a private temporary one whose
+// commands use gitIsolatedInputAt; any other uses the inherited
+// environment, as gitOutputAt does.
+type gitRepository struct {
+	dir      string
+	isolated bool
+}
+
+func (repository gitRepository) output(args ...string) ([]byte, error) {
+	if repository.isolated {
+		return gitIsolatedInputAt(repository.dir, nil, args...)
+	}
+	return gitOutputAt(repository.dir, args...)
+}
+
+func (repository gitRepository) text(args ...string) (string, error) {
+	out, err := repository.output(args...)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+func gitRun(gitDir string, environment []string, input []byte, args ...string) ([]byte, error) {
 	if gitDir != "" {
 		args = append([]string{"--git-dir=" + gitDir}, args...)
 	}
 	cmd := exec.Command("git", args...)
 	cmd.Stdin = bytes.NewReader(input)
-	cmd.Env = append(os.Environ(), extraEnv...)
+	cmd.Env = environment
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr

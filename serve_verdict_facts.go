@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"math"
@@ -582,6 +583,21 @@ func serveActorEventName(gitDir, commit string) string {
 	return eventID(payload)
 }
 
+// serveEventSignatureVerifies reports whether commit's signature decodes
+// and verifies payload, the first steps of loadStoredEventAt.
+func serveEventSignatureVerifies(gitDir, commit string, payload []byte) bool {
+	encoded, err := gitOutputAt(gitDir, "show", commit+":signature")
+	if err != nil {
+		return false
+	}
+	signature, err := base64.RawStdEncoding.DecodeString(strings.TrimSpace(string(encoded)))
+	if err != nil {
+		return false
+	}
+	_, _, err = verifyEvent(payload, signature)
+	return err == nil
+}
+
 // serveFirstFailingActorEvent walks oldHead..newHead in order with the same
 // per-commit checks validateQuarantinedActorRange applies and returns the
 // first commit that fails one of them.
@@ -605,15 +621,20 @@ func serveFirstFailingActorEvent(gitDir, actor, oldHead, newHead string, prefix 
 			return serveActorFailure{ID: commit, Reason: "the commit has no readable event.json."}, true
 		}
 		id := eventID(payload)
+		if !serveEventSignatureVerifies(gitDir, commit, payload) {
+			return serveActorFailure{ID: id, Reason: "the event does not decode or its signature does not verify."}, true
+		}
+		// The signature verifies, so a failing load comes from the event's
+		// attachments or from the server, and the reason quotes the cause.
 		stored, err := loadStoredEventAt(gitDir, commit)
 		if err != nil {
-			return serveActorFailure{ID: id, Reason: "the event does not decode or its signature does not verify."}, true
+			return serveActorFailure{ID: id, Reason: "the event's attachments do not verify: " + serveDiagnostic(err, gitDir)}, true
 		}
 		if stored.Event.Actor != actor {
 			return serveActorFailure{ID: id, Reason: "the event is signed by actor " + stored.Event.Actor + " and the ref belongs to actor " + actor + "."}, true
 		}
 		if err := validateQuarantinedEventTree(gitDir, *stored); err != nil {
-			return serveActorFailure{ID: id, Reason: "the event commit must hold exactly event.json, signature and, for a run result, log.txt."}, true
+			return serveActorFailure{ID: id, Reason: "the event commit must hold exactly event.json, signature and the attachments of its kind: log.txt for a run result, audit.pack for an audit fact and both for an audit result."}, true
 		}
 		parents, err := gitTextAt(gitDir, "show", "-s", "--format=%P", commit)
 		if err != nil || parents != previousCommit {

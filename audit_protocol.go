@@ -350,6 +350,21 @@ func validateAuditAttachments(e Event, attachments map[string][]byte) error {
 // importAuditPack runs only in an already selected object database. Fetched
 // facts use the private quarantine database; no accepted ref is created here.
 func importAuditPack(gitdir string, pack []byte, e Event) error {
+	if err := verifyAuditPack(pack, e); err != nil {
+		return err
+	}
+	// Installation keeps the inherited environment, so inside a receive hook
+	// the objects land in the push quarantine and a rejected push keeps none.
+	_, err := gitInputAt(gitdir, pack, "index-pack", "--stdin", "--max-input-size=67108864")
+	return err
+}
+
+// verifyAuditPack checks pack against e in a private temporary repository
+// and installs nothing. Its Git commands drop the inherited routing
+// variables: inside a receive hook they would point the temporary
+// repository at the push quarantine, lend it ambient objects and refuse
+// its initialization.
+func verifyAuditPack(pack []byte, e Event) error {
 	if err := validateAuditPack(pack); err != nil {
 		return err
 	}
@@ -362,20 +377,16 @@ func importAuditPack(gitdir string, pack []byte, e Event) error {
 	if len(e.Audit.PolicyCommit) == 64 {
 		format = "sha256"
 	}
-	if _, err := gitOutput("init", "--bare", "--quiet", "--object-format="+format, temporary); err != nil {
+	if _, err := gitIsolatedInputAt("", nil, "init", "--bare", "--quiet", "--object-format="+format, temporary); err != nil {
 		return err
 	}
 	// Validate Git's object syntax without demanding complete parent history or
 	// unrelated members of policy/source path-proof trees. Required snapshot
 	// members and actual edge types are checked below before installation.
-	if _, err := gitInputAt(temporary, pack, "index-pack", "--stdin", "--fsck-objects", "--max-input-size=67108864"); err != nil {
+	if _, err := gitIsolatedInputAt(temporary, pack, "index-pack", "--stdin", "--fsck-objects", "--max-input-size=67108864"); err != nil {
 		return err
 	}
-	if err := validateAuditPackBinding(temporary, e, pack); err != nil {
-		return err
-	}
-	_, err = gitInputAt(gitdir, pack, "index-pack", "--stdin", "--max-input-size=67108864")
-	return err
+	return validateAuditPackBinding(gitRepository{dir: temporary, isolated: true}, e, pack)
 }
 
 func auditCommitAvailable(gitdir, accepted, commit string) error {
@@ -709,10 +720,14 @@ func selectAuditWorkflow(revision string, events []StoredEvent) (*workflowSelect
 // and source path proofs. Commit parents are deliberately not traversed. Their
 // absence cannot authorize work; current ancestry is checked in the local anchor.
 func auditDependencyObjectIDsAt(gitdir string, e Event) ([]string, error) {
+	return auditDependencyObjectIDs(gitRepository{dir: gitdir}, e)
+}
+
+func auditDependencyObjectIDs(repository gitRepository, e Event) ([]string, error) {
 	f := e.Audit
 	objects := []string{}
 	addPath := func(commit, path string) error {
-		tree, err := gitTextAt(gitdir, "rev-parse", "--verify", commit+"^{tree}")
+		tree, err := repository.text("rev-parse", "--verify", commit+"^{tree}")
 		if err != nil {
 			return err
 		}
@@ -720,7 +735,7 @@ func auditDependencyObjectIDsAt(gitdir string, e Event) ([]string, error) {
 		parts := strings.Split(path, "/")
 		for index := range parts {
 			selected := strings.Join(parts[:index+1], "/")
-			entry, err := gitTextAt(gitdir, "ls-tree", commit, "--", selected)
+			entry, err := repository.text("ls-tree", commit, "--", selected)
 			if err != nil {
 				return err
 			}
@@ -747,7 +762,7 @@ func auditDependencyObjectIDsAt(gitdir string, e Event) ([]string, error) {
 		}
 	}
 	if f.CodeCommit != "" {
-		listed, err := gitTextAt(gitdir, "rev-list", "--objects", "--no-walk", f.CodeCommit)
+		listed, err := repository.text("rev-list", "--objects", "--no-walk", f.CodeCommit)
 		if err != nil {
 			return nil, err
 		}
@@ -765,16 +780,16 @@ func auditDependencyObjectIDsAt(gitdir string, e Event) ([]string, error) {
 	return objects, nil
 }
 
-func validateAuditPackBinding(gitdir string, e Event, pack []byte) error {
+func validateAuditPackBinding(repository gitRepository, e Event, pack []byte) error {
 	actual, err := auditPackObjectIDs(pack, len(e.Audit.PolicyCommit))
 	if err != nil {
 		return err
 	}
-	expected, err := auditDependencyObjectIDsAt(gitdir, e)
+	expected, err := auditDependencyObjectIDs(repository, e)
 	if err != nil {
 		return err
 	}
-	if err := validateAuditObjectShapesAt(gitdir, actual); err != nil {
+	if err := validateAuditObjectShapesAt(repository, actual); err != nil {
 		return err
 	}
 	if !reflect.DeepEqual(actual, expected) {
@@ -813,10 +828,10 @@ func RecordAuditResult(requestID, policyRef string, id *Identity, result executi
 	return appendAudit(e, id, result.Log)
 }
 
-func validateAuditObjectShapesAt(gitdir string, objects []string) error {
+func validateAuditObjectShapesAt(repository gitRepository, objects []string) error {
 	types := make(map[string]string, len(objects))
 	for _, object := range objects {
-		typ, err := gitTextAt(gitdir, "cat-file", "-t", object)
+		typ, err := repository.text("cat-file", "-t", object)
 		if err != nil {
 			return err
 		}
@@ -827,7 +842,7 @@ func validateAuditObjectShapesAt(gitdir string, objects []string) error {
 		switch typ {
 		case "blob":
 		case "commit":
-			raw, err := gitTextAt(gitdir, "cat-file", "commit", object)
+			raw, err := repository.text("cat-file", "commit", object)
 			if err != nil {
 				return err
 			}
@@ -848,7 +863,7 @@ func validateAuditObjectShapesAt(gitdir string, objects []string) error {
 				}
 			}
 		case "tree":
-			raw, err := gitOutputAt(gitdir, "cat-file", "tree", object)
+			raw, err := repository.output("cat-file", "tree", object)
 			if err != nil {
 				return err
 			}
