@@ -1763,7 +1763,8 @@ func (s *standingFactServe) Refs() string {
 	return serveHarnessGit(s.h.t, s.gitDir(), "for-each-ref", "--format=%(refname) %(objectname)")
 }
 
-// refMap reads the refs below prefixes of the Git directory gitDir.
+// standingFactRefMap reads the refs below prefixes of the Git directory
+// gitDir.
 func standingFactRefMap(t *testing.T, gitDir string, prefixes ...string) map[string]string {
 	t.Helper()
 	refs := map[string]string{}
