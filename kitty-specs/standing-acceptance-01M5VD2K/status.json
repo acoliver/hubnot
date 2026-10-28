@@ -1,7 +1,7 @@
 {
-  "event_count": 122,
-  "last_event_id": "01M607H3GB6Q46Y2Q5R2ENQRBN",
-  "materialized_at": "2026-10-28T03:05:46.763959+00:00",
+  "event_count": 123,
+  "last_event_id": "01M607KK2MVB69AA0ZMWM7702Y",
+  "materialized_at": "2026-10-28T03:07:08.244879+00:00",
   "mission_number": "",
   "mission_slug": "standing-acceptance-01M5VD2K",
   "mission_type": "",
@@ -11,9 +11,9 @@
     "canceled": 0,
     "claimed": 0,
     "done": 0,
-    "for_review": 1,
+    "for_review": 0,
     "in_progress": 0,
-    "in_review": 0,
+    "in_review": 1,
     "planned": 1
   },
   "work_packages": {
@@ -516,17 +516,17 @@
       "agent_profile": "__resolved_profile_absent__",
       "agent_profile_version": "__resolved_profile_version_absent__",
       "force_count": 0,
-      "lane": "for_review",
-      "last_event_id": "01M607H3GB6Q46Y2Q5R2ENQRBN",
-      "last_transition_at": "2026-10-28T03:05:46.763959+00:00",
+      "lane": "in_review",
+      "last_event_id": "01M607KK2MVB69AA0ZMWM7702Y",
+      "last_transition_at": "2026-10-28T03:07:08.244879+00:00",
       "model": "__resolved_model_absent__",
       "notes": [
         "WP16 adds tests only to standing_fact_test.go (a2f975b, plus comment-only 65684a9). Four surfaces: local projection, replication import, shallow verifier with complete closure, and hn serve actor-chain check (signer pushes own actor ref with own key to a hosted repo mirrored from the bare remote by governed pushes). TestStandingFactMatrixAgreement: 68/68 rows (100%) agree, covering F01-F20 (all shapes of F19/F20) each refused with its contract check plus actor-chain-invalid naming the fact on serve with hosted refs unchanged, 20 matched controls accepted everywhere, F21/F22 missing-dependency table (serve dependency-missing naming the absent ID or commit), valid set US1/US4/US5-1/D1/FR-011/two pipelines, L01-L06, B1-B4, and TestStandingFactBoundary as a subtest. TestStandingFactMatrixChangedPathBound: 44,000-path candidate (8,844,000 bytes over the 8,388,608 bound) refused by preview, --execute and all four surfaces with the bound error. TestStandingFactMatrixExecutionAdmitted: 6 real-client rule merges (5 local, 1 via --remote to hn serve) admitted on all four surfaces. No surface disagreed, so no production file changed. Gate at a2f975b: gofmt clean, go vet and go build pass (rerun at 65684a9), race suite ok (hubnot 3475s), TestMemoryIndexTenThousandRecordsPerformanceAndRecovery ok without -race (11.5s). Logs under .scratch/wp/standing-acceptance-01M5VD2K/WP16."
       ],
       "provider": "__resolved_provider_absent__",
-      "role": "implementer",
-      "shell_pid": 2464957,
-      "shell_pid_created_at": "1793150529.73",
+      "role": "reviewer",
+      "shell_pid": 879728,
+      "shell_pid_created_at": "1793156826.03",
       "subtasks": {
         "T076": "done",
         "T077": "done",
