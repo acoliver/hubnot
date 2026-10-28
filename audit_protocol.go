@@ -360,10 +360,11 @@ func importAuditPack(gitdir string, pack []byte, e Event) error {
 }
 
 // verifyAuditPack checks pack against e in a private temporary repository
-// and installs nothing. Its Git commands drop the inherited routing
-// variables: inside a receive hook they would point the temporary
-// repository at the push quarantine, lend it ambient objects and refuse
-// its initialization.
+// and installs nothing. Its Git commands run with gitPrivateEnvironment:
+// inherited routing variables would, inside a receive hook, point the
+// temporary repository at the push quarantine, lend it ambient objects and
+// refuse its initialization, and ambient configuration or a template could
+// give it another object store. It is initialized without a template.
 func verifyAuditPack(pack []byte, e Event) error {
 	if err := validateAuditPack(pack); err != nil {
 		return err
@@ -377,13 +378,13 @@ func verifyAuditPack(pack []byte, e Event) error {
 	if len(e.Audit.PolicyCommit) == 64 {
 		format = "sha256"
 	}
-	if _, err := gitIsolatedInputAt("", nil, "init", "--bare", "--quiet", "--object-format="+format, temporary); err != nil {
+	if _, err := gitPrivateInputAt(temporary, nil, "init", "--bare", "--quiet", "--template=", "--object-format="+format); err != nil {
 		return err
 	}
 	// Validate Git's object syntax without demanding complete parent history or
 	// unrelated members of policy/source path-proof trees. Required snapshot
 	// members and actual edge types are checked below before installation.
-	if _, err := gitIsolatedInputAt(temporary, pack, "index-pack", "--stdin", "--fsck-objects", "--max-input-size=67108864"); err != nil {
+	if _, err := gitPrivateInputAt(temporary, pack, "index-pack", "--stdin", "--fsck-objects", "--max-input-size=67108864"); err != nil {
 		return err
 	}
 	return validateAuditPackBinding(gitRepository{dir: temporary, isolated: true}, e, pack)

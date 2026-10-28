@@ -953,9 +953,14 @@ with the code `hn sync` uses when it imports the same chain:
   `GIT_ALTERNATE_OBJECT_DIRECTORIES` for the `pre-receive` hook. The server
   removes them, and the other variables that point Git at another repository
   or object store, for every command in the temporary repository, so hosted
-  objects cannot supply an object the pack omits. Only a verified pack is
-  installed, and only into the push's quarantine, so a rejected push leaves
-  the hosted object database unchanged.
+  objects cannot supply an object the pack omits. Those commands also read
+  no system, global or environment configuration, whatever the server's
+  environment enables or excludes, and the temporary repository is created
+  without a template, so no `init.templateDir` or `GIT_TEMPLATE_DIR` can
+  link it to another object database. Verification writes only inside the
+  temporary repository and removes it. Only a verified pack is installed,
+  and only into the push's quarantine, so a rejected push leaves the hosted
+  object database unchanged.
 - An audit result's `log.txt` must match the signed `log` digest and stay
   within 1 MiB.
 - The rule predecessors, authorization, request and native workflow
@@ -1936,7 +1941,7 @@ git diff --check
 | FR-004 | Managed authorized_keys | `TestServeKeysMergeGoldenCases`, `TestServeKeysWritePreservesAdministratorLines`, `TestServeAdminKeysMaintainAuthorizedKeys`, `TestServeSSHDRoundTrip` |
 | FR-005 | Forced-command dispatch | `TestParseServeRequestAcceptsEveryGrammarForm`, `TestParseServeRequestRefusesEverythingElse`, `TestServeSessionUnsupportedCommandsRefusedWithoutChanges`, `TestServeSessionUnsafeAndUnhostedPathsRefused` |
 | FR-006 | Push attribution | `TestServePushBranchOwnershipAndPushLog`, `TestBuildServeGitEnvironmentKeepsOnlyServerValues` |
-| FR-007 | Actor chain check | `TestServeFactsActorKeyMismatch`, `TestServeFactsAlteredEventIsInvalid`, `TestServeFactsActorChainRewrite`, `TestServeFactsDependencyMissing`, `TestValidationSeamsActorRangeValidation`, `TestServeAuditFactsPushReadAndSync`, `TestAuditPackVerificationIgnoresReceiveEnvironment`, `TestServeAuditTamperedAttachmentsRefusedByPushAndReaders` |
+| FR-007 | Actor chain check | `TestServeFactsActorKeyMismatch`, `TestServeFactsAlteredEventIsInvalid`, `TestServeFactsActorChainRewrite`, `TestServeFactsDependencyMissing`, `TestValidationSeamsActorRangeValidation`, `TestServeAuditFactsPushReadAndSync`, `TestAuditPackVerificationIgnoresReceiveEnvironment`, `TestAuditVerificationKeepsConfigurationExclusions`, `TestAuditVerificationWritesOnlyItsTemporaryRepository`, `TestServeAuditTamperedAttachmentsRefusedByPushAndReaders` |
 | FR-008 | Protected-branch check | `TestServeProtectedAcceptsGovernedDirectPush`, `TestServeProtectedNotReady`, `TestServeProtectedBlocked`, `TestServeProtectedDestinationPolicy`, `TestServeProtectedNotFastForwardAndStaleTip`, `TestServeAuditObservationalOnProtectedBranches` |
 | FR-009 | Tested commit only | `TestServeProtectedNotReady`, `TestServeAdvanceFastForwardsAndVerifies`, `TestServeAdvanceRefusesNotFastForward` |
 | FR-010 | Rules for other governed ref classes | `TestServeFactsProposalRefRules`, `TestServeFactsMemoryRefRules`, `TestServePushTagsAndReservedRefs`, `TestServeProtectedCreationAndDeletion` |

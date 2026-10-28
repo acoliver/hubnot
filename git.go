@@ -71,16 +71,32 @@ func isolatedGitEnvironment() []string {
 	return environment
 }
 
-// gitIsolatedInputAt runs git for a private temporary repository with
-// isolatedGitEnvironment, so the command neither reads nor writes an
-// inherited object store and an inherited quarantine cannot refuse it.
-func gitIsolatedInputAt(gitDir string, input []byte, args ...string) ([]byte, error) {
-	return gitRun(gitDir, isolatedGitEnvironment(), input, args...)
+// gitPrivateEnvironment is isolatedGitEnvironment for commands in the
+// private temporary repository private, with every ambient configuration
+// source off as well. isolatedGitEnvironment drops all GIT_CONFIG*
+// variables, which also drops the caller's exclusions such as
+// GIT_CONFIG_NOSYSTEM and GIT_CONFIG_GLOBAL=/dev/null, so the exclusions
+// are set again here, for every caller: no system, global or
+// command-line configuration can name a template, an object store or an
+// include for the private repository. HOME and XDG_CONFIG_HOME name
+// private too, for Git before 2.32, which ignores GIT_CONFIG_GLOBAL;
+// private holds neither .gitconfig nor git/config.
+func gitPrivateEnvironment(private string) []string {
+	return append(isolatedGitEnvironment(), "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL="+os.DevNull, "HOME="+private, "XDG_CONFIG_HOME="+private)
+}
+
+// gitPrivateInputAt runs git for the private temporary repository private
+// with gitPrivateEnvironment, so the command neither reads nor writes an
+// inherited object store, an inherited quarantine cannot refuse it and
+// ambient configuration cannot redirect it. A repository it initializes
+// must be initialized with --template=, so no template is copied either.
+func gitPrivateInputAt(private string, input []byte, args ...string) ([]byte, error) {
+	return gitRun(private, gitPrivateEnvironment(private), input, args...)
 }
 
 // gitRepository names the Git directory a sequence of read commands
 // addresses. An isolated repository is a private temporary one whose
-// commands use gitIsolatedInputAt; any other uses the inherited
+// commands use gitPrivateInputAt; any other uses the inherited
 // environment, as gitOutputAt does.
 type gitRepository struct {
 	dir      string
@@ -93,7 +109,7 @@ func (repository gitRepository) output(args ...string) ([]byte, error) {
 
 func (repository gitRepository) input(input []byte, args ...string) ([]byte, error) {
 	if repository.isolated {
-		return gitIsolatedInputAt(repository.dir, input, args...)
+		return gitPrivateInputAt(repository.dir, input, args...)
 	}
 	return gitInputAt(repository.dir, input, args...)
 }
