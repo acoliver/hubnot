@@ -45,10 +45,10 @@ const (
 	serveRefUpdateMergeFanIn = 64
 	serveHookSpillPrefix     = ".hn-hook-refs-"
 
-	// Only hn-advance and hn-expected-tip exist, each at most once.
-	servePushOptionLimit = 2
+	// Only hn-advance, hn-expected-tip and hn-rule exist, each at most once.
+	servePushOptionLimit = 3
 
-	servePushOptionSentence = "push options other than hn-advance and hn-expected-tip are not supported."
+	servePushOptionSentence = "push options other than hn-advance, hn-expected-tip and hn-rule are not supported."
 )
 
 // serveHook is one hook invocation. cmdServeHook fills it from the
@@ -659,8 +659,8 @@ func serveLowerHexOfLength(value string, length int) bool {
 }
 
 // parseServePushOptions reads GIT_PUSH_OPTION_COUNT and GIT_PUSH_OPTION_<n>.
-// An absent count means no options. Every error rejects every ref update
-// with unsupported-command.
+// An absent count means no options, and hn-rule is valid only together with
+// hn-advance. Every error rejects every ref update with unsupported-command.
 func parseServePushOptions(environment []string, oidLength int) (servePushOptions, error) {
 	var options servePushOptions
 	countText, present := lookupServeEnvironment(environment, "GIT_PUSH_OPTION_COUNT")
@@ -702,9 +702,20 @@ func parseServePushOptions(environment []string, oidLength int) (servePushOption
 				return options, fmt.Errorf("%s value %q is not a full commit ID", option, argument)
 			}
 			options.ExpectedTip = argument
+		case servePushOptionRule:
+			if options.Rule != "" {
+				return options, fmt.Errorf("%s appears more than once", option)
+			}
+			if !validPipelineName(argument) {
+				return options, fmt.Errorf("%s value %q is not a valid rule name", option, argument)
+			}
+			options.Rule = argument
 		default:
 			return options, fmt.Errorf("push option %q is not supported", option)
 		}
+	}
+	if options.Rule != "" && options.Advance == "" {
+		return options, fmt.Errorf("%s requires %s", servePushOptionRule, servePushOptionAdvance)
 	}
 	return options, nil
 }

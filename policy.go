@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -544,7 +545,61 @@ func validateDecisionEvent(decision, proposal StoredEvent, byID map[string]Store
 	return nil
 }
 
+// validateMergeEvent judges one proposal.merged fact on its own validation
+// pass. Projection shares one memo across a pass through
+// validateMergeEventWith instead.
 func validateMergeEvent(merge, proposal StoredEvent, byID map[string]StoredEvent) error {
+	_, err := validateMergeEventWith(newRuleValidationMemo(localRuleObjectAccess()), merge, proposal, byID)
+	return err
+}
+
+// validateMergeEventWith is local projection's fact-admission surface: the
+// union rule of admitMergeFact over maintainerMergeCheck (path a) and the
+// local rule path (path b), whose object reads go through memo.
+func validateMergeEventWith(memo *ruleValidationMemo, merge, proposal StoredEvent, byID map[string]StoredEvent) (mergeAuthority, error) {
+	return admitMergeFact(merge,
+		func() error { return maintainerMergeCheck(merge, proposal, byID) },
+		func() error { return localRuleMergeCheck(memo, merge, proposal, byID) },
+	)
+}
+
+// localRuleMergeCheck is path (b) for local projection. A ruleFactError is
+// returned as is, so its message reads the same on every surface; a missing
+// input such as an absent commit refuses the fact and never evaluates it.
+// In a shallow clone an absent input is a ShallowDependencyGap with
+// replayable recovery (FR-014).
+func localRuleMergeCheck(memo *ruleValidationMemo, merge, proposal StoredEvent, byID map[string]StoredEvent) error {
+	if err := shallowRuleMergeGuard(merge, proposal); err != nil {
+		return err
+	}
+	err := validateRuleMergeFactWith(memo, merge, proposal, byID)
+	var factErr *ruleFactError
+	if err == nil || errors.As(err, &factErr) {
+		return err
+	}
+	return fmt.Errorf("merge %s: %w", merge.ID, err)
+}
+
+// localRuleObjectAccess reads path (b) inputs from the current repository.
+func localRuleObjectAccess() ruleObjectAccess {
+	return ruleObjectAccess{
+		PolicyAt: func(commit string) (PolicyDocument, string, error) {
+			policy, _, digest, err := loadPolicy(commit)
+			return policy, digest, err
+		},
+		ChangedPaths: func(base, head string) ([]string, error) {
+			return changedPathsAt("", base, head)
+		},
+		PipelineDigest: func(head, pipeline string) (string, error) {
+			_, _, digest, err := loadPipeline(head, pipeline)
+			return digest, err
+		},
+	}
+}
+
+// maintainerMergeCheck is path (a): the acceptance merge fact check that
+// predates rule merge facts, unchanged.
+func maintainerMergeCheck(merge, proposal StoredEvent, byID map[string]StoredEvent) error {
 	policy, _, digest, err := loadPolicy(proposal.Event.Base)
 	if err != nil {
 		return fmt.Errorf("merge %s: %w", shortID(merge.ID), err)
@@ -651,7 +706,36 @@ func cmdProposalStatus(query string) error {
 	}
 	fmt.Printf("Decision: %d/%d accepts; %d rejects\n", len(evaluation.AcceptDecisions), evaluation.Policy.Proposals.RequiredAccepts, len(evaluation.RejectDecisions))
 	fmt.Printf("Status:   %s\n", proposalStatus(evaluation))
+	printRuleMergeClaims(proposal, evaluation, events)
 	return nil
+}
+
+// printRuleMergeClaims prints one line per merge fact that carries a rule
+// claim, sorted by fact ID (FR-021). Projection already admitted every merge
+// fact, so one that fails the maintainer check was admitted as a rule merge;
+// one that passes it is a maintainer merge whose rule claim is unverified.
+func printRuleMergeClaims(proposal *StoredEvent, evaluation *ProposalEvaluation, events []StoredEvent) {
+	var claims []StoredEvent
+	for _, merge := range evaluation.MergeEvents {
+		if merge.Event.Rule != "" {
+			claims = append(claims, merge)
+		}
+	}
+	if len(claims) == 0 {
+		return
+	}
+	sortEventsByID(claims)
+	byID := make(map[string]StoredEvent, len(events))
+	for _, stored := range events {
+		byID[stored.ID] = stored
+	}
+	for _, merge := range claims {
+		if maintainerMergeCheck(merge, *proposal, byID) == nil {
+			fmt.Printf("Merged by maintainers in fact %s; its rule annotation \"%s\" is not verified\n", merge.ID, safeText(merge.Event.Rule))
+		} else {
+			fmt.Printf("Merged by rule %s, signed by %s in fact %s\n", safeText(merge.Event.Rule), merge.Event.Actor, merge.ID)
+		}
+	}
 }
 
 func sortedDecisionIDs(decisions []StoredEvent) []string {

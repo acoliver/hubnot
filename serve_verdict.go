@@ -64,10 +64,10 @@ func serveZeroOID(oid string) bool {
 	return oid != "" && strings.Trim(oid, "0") == ""
 }
 
-// servePushOptions holds the two push options the server accepts, each
+// servePushOptions holds the three push options the server accepts, each
 // empty when absent.
 type servePushOptions struct {
-	Advance, ExpectedTip string
+	Advance, ExpectedTip, Rule string
 }
 
 // classifyServeRef returns the class of ref, checking the classes in the

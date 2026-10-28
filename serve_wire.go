@@ -17,6 +17,7 @@ const (
 	serveMarkerContent      = "hn-serve/1\n" // 11 bytes
 	servePushOptionAdvance  = "hn-advance"
 	servePushOptionExpected = "hn-expected-tip"
+	servePushOptionRule     = "hn-rule"
 )
 
 // serveMarkerObjectID returns the blob ID of serveMarkerContent in the object

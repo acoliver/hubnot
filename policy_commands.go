@@ -401,8 +401,19 @@ func printOptionalPolicy(policy PolicyDocument) {
 		sort.Slice(rules, func(i, j int) bool { return rules[i].Name < rules[j].Name })
 		for _, r := range rules {
 			fmt.Printf("Rule %s; target branch %s:\n", r.Name, r.TargetBranch)
-			printActors("  Executing maintainers:", r.Actors)
+			if r.Acceptance.Standing() {
+				fmt.Println("  Acceptance: rule (standing acceptance; no maintainer acceptance per proposal)")
+				printActors("  Executing actors:", r.Actors)
+			} else {
+				fmt.Println("  Acceptance: maintainers (maintainer acceptance required)")
+				printActors("  Executing maintainers:", r.Actors)
+			}
 			printActors("  Proposal authors:", r.Authors)
+			if r.Reviewers.IsZero() {
+				fmt.Println("  Counted reviewers: all trusted reviewers")
+			} else {
+				printActors("  Counted reviewers:", r.Reviewers.Actors())
+			}
 			fmt.Println("  Allowed literal paths:")
 			for _, path := range sortedStrings(r.Paths) {
 				fmt.Printf("    %q\n", path)
@@ -456,6 +467,20 @@ func compareOptionalPolicies(base, proposed PolicyDocument) []policyChange {
 		changes = append(changes, actorChanges("automerge rule "+name+" authors", old.Authors, next.Authors)...)
 		added, removed := sortedDifference(sortedStrings(old.Paths), sortedStrings(next.Paths))
 		changes = append(changes, policyChange{Label: "automerge rule " + name + " paths added", Value: joinedOrNone(added)}, policyChange{Label: "automerge rule " + name + " paths removed", Value: joinedOrNone(removed)})
+		// "added" and "removed" describe the whole rule; an absent acceptance
+		// field compares as maintainers and absent reviewers as an empty list.
+		oldMode, nextMode := old.Acceptance.Mode(), next.Acceptance.Mode()
+		acceptance := "unchanged (" + oldMode + ")"
+		switch {
+		case !was:
+			acceptance = "added (" + nextMode + ")"
+		case !is:
+			acceptance = "removed (" + oldMode + ")"
+		case oldMode != nextMode:
+			acceptance = "changed (" + oldMode + " -> " + nextMode + ")"
+		}
+		changes = append(changes, policyChange{Label: "automerge rule " + name + " acceptance", Value: acceptance})
+		changes = append(changes, actorChanges("automerge rule "+name+" reviewers", old.Reviewers.Actors(), next.Reviewers.Actors())...)
 	}
 	return changes
 }

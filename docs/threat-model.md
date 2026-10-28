@@ -77,6 +77,26 @@ or new rich payload shapes. Rolling back a binary cannot remove already
 published signed facts, and this feature provides no implicit history rewrite
 or Beads migration. Preserve a compatible reader when retaining rich histories.
 
+Standing acceptance follows the same rule. Executables built before it, such
+as the reference build of commit `7a47e69`, reject a policy that contains
+`acceptance` or `reviewers` as an unknown field. That includes
+`"acceptance": "maintainers"`, which means the same as leaving the field out.
+Every client that works on a repository using either field therefore needs a
+newer executable. Older executables also reject every `proposal.merged` fact
+that is valid only through a standing rule. Such a fact lists no maintainer
+acceptance decisions and is usually signed by an actor who is not a
+maintainer, so the older maintainer check refuses it. A mixed team fails
+closed and cannot mistake standing acceptance for maintainer acceptance.
+
+Older and newer clients agree on every maintainer merge, including one whose
+payload also names a rule. The older client ignores the unknown `rule` key,
+and the newer client runs the maintainer check first and reports the rule
+name as an unverified annotation. Both clients also reach the same verdict on
+all history signed before standing acceptance. Rolling back a binary does not
+remove published rule merge facts, and a newer client keeps judging each of
+them against its own base policy. `TestStandingCompatOlderClient` builds the
+older client and checks each of these statements.
+
 ## Automation identity and historical observations
 
 Public identity JSON explicitly selects actor, name and public key; it never
@@ -198,26 +218,63 @@ itself. A new manual merge also requires revision after current-target policy
 or protected-baseline changes, including identical-policy target tightening
 hidden by restoring old base bytes in the candidate.
 
-Automerge permits only explicitly listed executing maintainers, authors, branch
-and allowed paths after existing current approval, CI and acceptance requirements
-hold. It does not create those facts. Named rules are data, not executable
-expressions or instructions. Policy amendments and protected changes remain
-manual even after review. An eligible preview does not grant its reader signing
-authority or carry authorization into a later execution.
+Automerge permits only a named rule's explicitly listed executing actors,
+authors, branch and allowed paths, and only after the current approval and CI
+requirements hold. It does not create those facts. Named rules are data, not
+executable expressions or instructions. A rule's acceptance mode decides where
+acceptance authority comes from. Under acceptance mode `maintainers`, the
+default, every executing actor must be a base-policy maintainer and every
+proposal still needs its current maintainer acceptances. Under acceptance mode
+`rule`, acceptance authority moves from per-proposal maintainer decisions to
+the maintainer-accepted policy amendment that adopted the rule. The executing
+actor gains authority over exactly that rule: it cannot publish a decision that
+counts, merge with `hn merge`, repair through `hn merge` or execute a rule that
+does not list it (`TestStandingAutomergeContainmentForbiddenCommands`,
+`TestStandingAutomergeRepairConstructedState`).
+
+Policy amendments and protected-check changes stay manual under both acceptance
+modes, even after review (`TestStandingAutomergeContainmentManualPath`). Policy
+validation refuses a standing rule whose paths cover `.hn` or overlap a
+protected-check path (`TestStandingPolicyFieldsRefusals`). A standing rule
+needs at least one independent approval: `proposals.requiredApprovals` must be
+at least 1, and the candidate author's own approval never counts, even when
+`allowAuthorApproval` is true (`TestRuleAcceptanceLiveAuthorApprovalByMode`).
+Every verifier re-derives the rule from the candidate's base policy, its base
+and head commits and the evidence the merge fact lists, and refuses the fact
+when any check fails (`TestStandingFactMatrixAgreement`). An eligible preview
+does not grant its reader signing authority or carry authorization into a later
+execution.
 
 Preview loads no signing key and changes no collaboration refs, target, index or
 private identity state. It refuses shallow and active partial/promisor clones
 before object evaluation, preventing lazy fetch or recovery writes in this
-command. The supported automatic path uses complete local Git data. Neither
-preview nor execution fetches, starts a daemon, executes a workflow, synchronizes
-or publishes; normal native operation does not need a provider or network
-service. Existing explicit local CI host execution remains separately unsafe
-and separately opted in per invocation.
+command. The supported automatic path uses complete local Git data. Preview,
+and execution without `--remote`, fetch no objects, start no daemon, execute
+no workflow, and neither synchronize nor publish; normal native operation does
+not need a provider or network service. When the rule's target branch tracks a
+remote, execution without `--remote` reads only that remote's
+`refs/hn/serve/v1` advertisement with `git ls-remote`. It refuses an upstream
+that is an `hn serve` remote, or one it cannot reach to tell, before it creates
+a merge commit or merge fact. Existing explicit local CI host execution remains
+separately unsafe and separately opted in per invocation.
 
-Execution rechecks current candidate/evidence and target, binds its actual
-signer, and advances the target using the signed-base expected-old ref lease.
-It refuses an unfinished Git operation, dirty index/worktree or an ignored-file
-collision. Automatic `commit-tree` creation does not invoke `pre-merge-commit`
+Execution with `--remote REMOTE` contacts the network and has side effects
+before and after the hosted advancement. It first checks that `REMOTE`
+identifies as an `hn serve` remote and that its replication selection imports
+every trusted actor. It then runs `hn sync REMOTE`, which imports the hosted
+facts and publishes the local actor chains. That publication happens even when
+the rule evaluation that follows the import refuses the advancement. After the
+second evaluation, the client asks the server to fast-forward the hosted target
+branch to the signed proposal head; no local merge commit is created. Once the
+server applies the update, the client records the merge fact and publishes it.
+A rerun after the rule merge fact exists takes the publication-only path, which
+publishes the existing fact and confirms the hosted branch without advancing it
+(`docs/serve-v0.md`, "Automerge rules" and "Rerunning a rule advancement").
+
+Local execution, without `--remote`, rechecks current candidate/evidence and
+target, binds its actual signer, and advances the local target using the
+signed-base expected-old ref lease. It refuses an unfinished Git operation,
+dirty index/worktree or an ignored-file collision. Automatic `commit-tree` creation does not invoke `pre-merge-commit`
 or `pre-commit` hooks: required checks must be configured as native pipelines.
 Operator-controlled Git `reference-transaction` hooks remain outside proposal
 instructions and retain Git behavior.
@@ -229,6 +286,35 @@ Interrupted checkout/ref/event steps can leave inspectable work or a missing
 merge fact. Recovery observes the actual target, preserves local changes and
 uses the existing manual missing-event repair where applicable; uncertain
 outcomes do not authorize a second merge or destructive reset.
+
+### Residual risks of standing acceptance
+
+The maintainer accepted the following risk when standing acceptance was
+planned. A modified client of an executing actor, working against an ordinary
+remote, can leave a current change request or a trusted pipeline failure out
+of its view, merge the candidate and record a rule merge fact whose listed
+evidence satisfies the rule. That fact verifies. Verifiers judge a merge fact
+by its own signed content, the base policy, the candidate's code and the
+evidence it lists, and events outside that evidence do not change its validity
+(`TestRuleAcceptanceFactImmutable`). Signed facts on different actor chains
+have no delivery-order winner, so a verifier cannot tell whether the executing
+actor saw a veto in time. Acceptance merge facts are judged the same way, and a
+malicious maintainer can already record one while ignoring a change request.
+
+`hn serve` closes this gap for protected branches. When an advancement request
+names a rule, the server evaluates the rule itself against the facts it holds
+at that moment. A current trusted change request or trusted failure refuses the
+request with `protected-rule-veto`, and a current maintainer rejection refuses
+it with `protected-blocked` (`TestStandingServeVerdictVetoes`,
+`TestStandingServeVerdictRuleNotSatisfied`). Repositories that adopt standing
+rules should host their target branches on `hn serve` and protect them there.
+
+A case-variant directory such as `.HN/` is ordinary content. Git tree paths are
+case-sensitive, and Hubnot reads policy and pipeline definitions only from
+`.hn/policy.json` and `.hn/pipelines/`. Policy validation accepts a standing
+rule over `.HN/` and refuses one over `.hn/`, and a rule over `.HN/` gives no
+control over policy or pipelines
+(`TestStandingQualityCaseVariantDirectoryIsOrdinaryContent`).
 
 ## hn serve trust boundary
 
@@ -365,9 +451,11 @@ the whole push.
   (`TestServeFactsHostedFactCeilings`), and a push is limited to 10,000 ref
   updates and 4 MiB of ref update lines
   (`TestServePushOverRefUpdateBudgetRejectsEveryRef`).
-- **A closed push option set.** Only `hn-advance` and `hn-expected-tip` are
-  accepted, each at most once with a well-formed value; any other option
-  refuses the whole push with `unsupported-command` (`TestServePushOptions`).
+- **A closed push option set.** Only `hn-advance`, `hn-expected-tip` and
+  `hn-rule` are accepted, each at most once with a well-formed value, and
+  `hn-rule` only together with `hn-advance`; any other option refuses the
+  whole push with `unsupported-command` (`TestServePushOptions`,
+  `TestStandingServeWireRuleOptionShapeRefusals`).
 
 ### Governance of protected branches
 
@@ -380,13 +468,49 @@ destination policy no longer trusts does not count toward the destination
 check (`TestServeProtectedDestinationPolicy`,
 `TestValidationSeamsDestinationPolicySemantics`). A protected tip without a
 valid policy refuses every update until the administrator repairs it
-(`TestServeProtectedPolicyInvalid`).
+(`TestServeProtectedPolicyInvalid`). For an advancement request that names a
+standing rule, the server's own evaluation of that rule takes the place of the
+maintainer acceptances, and the destination policy must be the base policy, as
+the next paragraph describes.
+
+**Advancement under a standing rule.** An advancement request may name a rule
+with the `hn-rule` push option. For such a request the server evaluates the
+named rule itself, from the candidate's signed base policy and the facts it
+holds when the push arrives, including the vetoes among them: a current
+trusted change request or trusted failure refuses the request with
+`protected-rule-veto`, and a current maintainer rejection refuses it with
+`protected-blocked`. The requesting mapped actor must be one of the rule's
+executing actors, which replaces the maintainer requirement for that request;
+any other actor is refused with `advance-not-rule-executor`. When the
+destination policy differs from the base policy, the server refuses the
+request with `protected-destination-policy` and the candidate must be revised
+(`TestStandingServeVerdictAcceptsRuleAdvancement`,
+`TestStandingServeVerdictVetoes`, `TestStandingServeVerdictDestinationPolicy`).
+A direct push of a protected branch, and an advancement request that names no
+rule, still need maintainer acceptances
+(`TestStandingServeAdvanceForbiddenCommands`). The server still signs nothing.
+The executing actor's client signs the rule merge fact after the branch moves,
+and the server judges that fact like any other fact it receives
+(`TestStandingServeAdvanceUserStory4`).
+
+**Merge-fact validity.** Every verifier, the server's actor-chain check
+included, judges a `proposal.merged` fact with one union rule. The fact is
+valid through the unchanged maintainer check, or, when that check fails,
+through the rule check. A rule name on a fact that passes the maintainer check
+is an unverified annotation and grants nothing. No event that verified before
+standing acceptance stops verifying (`TestStandingFactMatrixAgreement`,
+`TestStandingCompatOlderClient`). Each landing state of the mission refused
+rule-only facts on every surface that did not yet implement the rule check, so
+no intermediate build admitted a fact it could not verify (decisions
+`01M5VSEHEVA82N9T64ZH1P1Q2A` and `01M5VSEHF5B1FM9TB52KWKQGWZ`;
+`TestStandingFactBoundary`).
 
 **Fast-forward only.** A protected branch moves only to a descendant of its
 current tip (`TestServeProtectedNotFastForwardAndStaleTip`). The server never
 creates a commit and never signs anything, so the commit on the branch is the
 exact commit CI tested, and the merge fact for an advancement is signed by
-the maintainer's client (`TestServeAdvanceFastForwardsAndVerifies`). The
+the client of the maintainer or executing actor that requested it
+(`TestServeAdvanceFastForwardsAndVerifies`). The
 protected list comes only from server configuration and is never read from
 pushed content.
 

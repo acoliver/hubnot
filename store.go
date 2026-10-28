@@ -314,6 +314,8 @@ func validateEventRelationships(events []StoredEvent) error {
 	for _, stored := range events {
 		byID[stored.ID] = stored
 	}
+	// One memo per pass, so rule merge facts share object reads (NFR-005).
+	memo := newRuleValidationMemo(localRuleObjectAccess())
 	for _, stored := range events {
 		event := stored.Event
 		switch event.Kind {
@@ -362,7 +364,7 @@ func validateEventRelationships(events []StoredEvent) error {
 			if err := validateProposalMergeBinding(stored, proposal); err != nil {
 				return err
 			}
-			if err := validateMergeEvent(stored, proposal, byID); err != nil {
+			if _, err := validateMergeEventWith(memo, stored, proposal, byID); err != nil {
 				return err
 			}
 		case "identity.accept":

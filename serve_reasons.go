@@ -9,8 +9,8 @@ import (
 
 // hn-serve/1 rejection vocabulary shared by the server hooks, the forced
 // command and the clients that read git push stderr. docs/protocol-v0.md
-// ("hn serve wire surface") documents every code; a test keeps that table
-// equal to serveReasonCatalogue.
+// ("hn serve wire surface") documents every code in two tables; tests keep
+// them equal to serveReasonCatalogue and serveRuleReasonCatalogue.
 
 const (
 	serveReasonUnknownKey                 = "unknown-key"
@@ -40,6 +40,14 @@ const (
 	serveReasonOverBudget                 = "over-budget"
 	serveReasonLFSQuota                   = "lfs-quota"
 	serveReasonLFSObjectMismatch          = "lfs-object-mismatch"
+)
+
+// Rule advancement codes. They live in serveRuleReasonCatalogue, which
+// docs/protocol-v0.md documents in its second reason table.
+const (
+	serveReasonAdvanceNotRuleExecutor    = "advance-not-rule-executor"
+	serveReasonProtectedRuleNotSatisfied = "protected-rule-not-satisfied"
+	serveReasonProtectedRuleVeto         = "protected-rule-veto"
 )
 
 // Evidence kinds for the missing= field, in their fixed emission order.
@@ -95,10 +103,23 @@ var serveReasonCatalogue = []serveReason{
 	{serveReasonLFSObjectMismatch, "Uploaded LFS content does not match its object ID or size", "retry the upload"},
 }
 
+// serveRuleReasonCatalogue holds the codes of protected advancement under a
+// named automerge rule. It shares no code with serveReasonCatalogue.
+var serveRuleReasonCatalogue = []serveReason{
+	{serveReasonAdvanceNotRuleExecutor, "The requester is not an executing actor of the named rule in the base policy", "ask an executing actor of the rule to run hn automerge --remote"},
+	{serveReasonProtectedRuleNotSatisfied, "The named rule does not exist, is not a standing rule, or the candidate does not satisfy it", "run hn automerge <candidate> --rule <rule>"},
+	{serveReasonProtectedRuleVeto, "A current trusted change request or trusted failure blocks the rule", "resolve the named events, then retry"},
+}
+
+// serveReasonLookup searches serveReasonCatalogue and then
+// serveRuleReasonCatalogue. Every validation of a code goes through it, so
+// the renderer, the line parser, the push log and the client accept both.
 func serveReasonLookup(code string) (serveReason, bool) {
-	for _, reason := range serveReasonCatalogue {
-		if reason.Code == code {
-			return reason, true
+	for _, catalogue := range [][]serveReason{serveReasonCatalogue, serveRuleReasonCatalogue} {
+		for _, reason := range catalogue {
+			if reason.Code == code {
+				return reason, true
+			}
 		}
 	}
 	return serveReason{}, false
@@ -157,7 +178,7 @@ func serveOrderedMissing(kinds []string) ([]string, error) {
 type serveRejection struct {
 	Ref      string   // full ref name, or "-" for session refusals
 	Actor    string   // full 64-hex actor, or "-" when the key is unknown
-	Code     string   // a serveReasonCatalogue code
+	Code     string   // a code serveReasonLookup knows
 	IDs      []string // full sha256: event IDs and full commit IDs
 	Missing  []string // subset of proposal, review, ci, acceptance
 	Budget   string   // only with over-budget and lfs-quota
