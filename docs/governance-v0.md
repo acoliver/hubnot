@@ -45,6 +45,25 @@ keys. Unknown JSON fields, duplicate or malformed actors, an empty maintainer
 list, unsatisfiable thresholds, invalid pipeline names, and unsupported policy
 versions are rejected. Policy files are limited to 1 MiB.
 
+## Roles that sound alike
+
+Three optional policy sections name actors who may ask for work or carry it
+out. They are independent: listing an actor in one grants nothing in the
+others.
+
+| Field | Who it lists | What the actor may do | Maintainers included |
+|---|---|---|---|
+| `pipelines.NAME.requesters` | CI requesters | Sign a `run.request` that counts for that pipeline | Yes, always |
+| `pipelines.NAME.trustedRunners` | CI runners | Sign a `run.result` that counts | No |
+| `automerge.rules[].actors` | Rule executors | Execute that automerge rule | No |
+| `audits.requesters` | Audit requesters | Request an audit (see [audits-v1.md](audits-v1.md)) | No |
+| `audits.executors` | Audit executors | Execute an audit and sign its result | No |
+| `audits.ruleOwners` | Audit rule owners | Authorize or revoke audit rules | No |
+
+Audit roles also require the operator's local authority adoption, and audit
+results never count as CI results or merge evidence. CI requesters and rule
+executors need no local adoption.
+
 ## Inspect policy
 
 ```sh
