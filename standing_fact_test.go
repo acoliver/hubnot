@@ -2,9 +2,14 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
+	"runtime"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -1572,4 +1577,1217 @@ func TestStandingFactShallowNoEmptyDiff(t *testing.T) {
 	if strings.Contains(output, emptyList) {
 		t.Fatalf("import judged an empty change list:\n%s", output)
 	}
+}
+
+// Four-surface fixture matrix (WP16: NFR-001, NFR-002, NFR-005, C-004,
+// FR-012, FR-015, FR-024, FR-025, US3-2).
+//
+// Every signed event is judged by the four fact-admission surfaces of
+// FR-012, always in this order: local projection in the signer's own clone,
+// replication import by a fresh full verifier, a shallow verifier holding
+// the complete closure of decision 01M5VSEHFV2K03JJY0NN6DFNAT, and the
+// hn serve actor-chain check, to which the signer pushes its actor ref with
+// its own key. The first three surfaces use the standing harness's bare
+// remote, as the per-surface tests above do; local and import publish with
+// raw Git, so no projection runs before the surface under test.
+//
+// The hosted repository of the serve surface holds what the bare remote
+// holds, and it gets there only through governed pushes: before each
+// judgment every role pushes its own chain from the bare remote with its
+// own key, and the proposal code refs follow, so the server has admitted
+// every fact it hosts before the judged push. Hosted actor chains are
+// append-only. When the matrix withdraws an accepted fact from the other
+// surfaces (a matched control), it retires that hosted repository, and the
+// next judgment mirrors into a new one on the same server.
+//
+// One serve account serves every harness of a test. Its HOME is created by
+// the parent test, and each harness binds its own seven actors there.
+
+// standingFactMatrixSurfaces is the column order of the matrix report.
+var standingFactMatrixSurfaces = []string{"local", "import", "shallow", "serve"}
+
+// standingFactMirrorOrder is the order roles push their chains to a hosted
+// repository: the author before the reviewers and requesters that cite its
+// candidates, the requesters before the runner. A push that still waits
+// for another chain is retried after the others.
+var standingFactMirrorOrder = []string{"A", "S", "M", "R", "T", "X", "E"}
+
+// standingFactSurface is one fact-admission surface of FR-012.
+type standingFactSurface interface {
+	Name() string
+	// Judge publishes or places the signer's chain ending at fact and
+	// returns whether the surface admits fact, with the surface's output.
+	// A surface that refuses fact must leave the refs it guards unchanged
+	// and promote nothing; Judge fails the test when it does not.
+	Judge(t *testing.T, fact standingHarnessSigned) (accepted bool, detail string)
+}
+
+// standingFactIsMerge reports whether fact is a proposal.merged event.
+func standingFactIsMerge(fact standingHarnessSigned) bool {
+	return bytes.Contains(fact.Payload, []byte(`"kind":"proposal.merged"`))
+}
+
+// standingFactPublishAt makes the remote's actor ref of role equal commit,
+// a commit of role's own chain, with Git alone.
+func standingFactPublishAt(h *standingHarness, role, commit string) {
+	h.t.Helper()
+	ref := actorRef(h.Actor(role))
+	h.git(role, "push", "-q", "-f", "origin", commit+":"+ref)
+}
+
+// standingFactProjects runs the projecting commands for fact in directory:
+// hn proposal status of its candidate for a merge fact, and hn log for every
+// fact. It reports whether every command succeeded and showed fact, and
+// requires the refs of directory to be unchanged.
+func standingFactProjects(t *testing.T, h *standingHarness, directory string, fact standingHarnessSigned, detail *strings.Builder) bool {
+	t.Helper()
+	before := runOperationalGit(t, directory, "for-each-ref", "--format=%(refname) %(objectname)")
+	admitted := true
+	if standingFactIsMerge(fact) {
+		output, status := h.RunIn(directory, "proposal", "status", fact.Candidate)
+		fmt.Fprintf(detail, "hn proposal status %s exited %d:\n%s", fact.Candidate, status, output)
+		admitted = status == 0 && strings.Contains(output, "Status:   merged")
+	}
+	output, status := h.RunIn(directory, "log")
+	fmt.Fprintf(detail, "hn log exited %d:\n%s", status, output)
+	admitted = admitted && status == 0 && strings.Contains(output, operationalShortID(fact.ID))
+	if after := runOperationalGit(t, directory, "for-each-ref", "--format=%(refname) %(objectname)"); after != before {
+		t.Errorf("projecting %s changed the refs of %s:\nbefore:\n%s\nafter:\n%s", fact.ID, directory, before, after)
+	}
+	return admitted
+}
+
+// standingFactLocalSurface is local projection: the fact on the signer's
+// own chain in the signer's full clone, synced with the fact set aside.
+type standingFactLocalSurface struct{ h *standingHarness }
+
+func (standingFactLocalSurface) Name() string { return "local" }
+
+func (s standingFactLocalSurface) Judge(t *testing.T, fact standingHarnessSigned) (bool, string) {
+	t.Helper()
+	h := s.h
+	var detail strings.Builder
+	// The sync imports every chain the fact may cite. It runs with the fact
+	// set aside, so it publishes nothing of it; it may fail for a
+	// missing-dependency row, whose own chain waits for absent code.
+	parent := standingFactParent(h, fact.Role, fact.Commit)
+	standingFactSetChain(h, fact.Role, parent)
+	if output, status := h.Run(fact.Role, "sync", "origin"); status != 0 {
+		fmt.Fprintf(&detail, "hn sync origin with the fact set aside exited %d:\n%s", status, output)
+	}
+	if head := standingFactChainHead(h, fact.Role); head != parent {
+		t.Fatalf("sync moved %s's chain from %s to %s", fact.Role, parent, head)
+	}
+	standingFactSetChain(h, fact.Role, fact.Commit)
+	return standingFactProjects(t, h, h.Work(fact.Role), fact, &detail), detail.String()
+}
+
+// standingFactImportSurface is replication import: the chain published with
+// raw Git and imported by a fresh full verifier with no identity.
+type standingFactImportSurface struct{ h *standingHarness }
+
+func (standingFactImportSurface) Name() string { return "import" }
+
+func (s standingFactImportSurface) Judge(t *testing.T, fact standingHarnessSigned) (bool, string) {
+	t.Helper()
+	h := s.h
+	standingFactPublishAt(h, fact.Role, fact.Commit)
+	verifier := h.Verifier()
+	output, status := h.RunIn(verifier, "sync", "origin")
+	var detail strings.Builder
+	fmt.Fprintf(&detail, "hn sync origin exited %d:\n%s", status, output)
+	promoted := standingFactAcceptedChain(h, verifier, fact.Role)
+	if promoted == "" || !strings.Contains(runOperationalGit(t, verifier, "rev-list", promoted), fact.Commit) {
+		return false, detail.String()
+	}
+	if !standingFactProjects(t, h, verifier, fact, &detail) {
+		t.Errorf("import promoted %s but does not project it:\n%s", fact.ID, detail.String())
+		return false, detail.String()
+	}
+	return true, detail.String()
+}
+
+// standingFactShallowSurface is shallow verification: the chain published
+// with raw Git and a depth-one verifier holding the complete closure.
+type standingFactShallowSurface struct{ h *standingHarness }
+
+func (standingFactShallowSurface) Name() string { return "shallow" }
+
+func (s standingFactShallowSurface) Judge(t *testing.T, fact standingHarnessSigned) (bool, string) {
+	t.Helper()
+	h := s.h
+	standingFactPublishAt(h, fact.Role, fact.Commit)
+	verifier := standingFactShallowVerifierWith(h, standingFactShallowArrangement{})
+	var detail strings.Builder
+	return standingFactProjects(t, h, verifier, fact, &detail), detail.String()
+}
+
+// standingFactServe is the hn serve surface of one standing harness: a
+// server account shared by the whole test, with a key bound to each of the
+// harness's actors, and the current hosted repository mirroring the bare
+// remote.
+type standingFactServe struct {
+	h       *standingHarness
+	server  *serveHarness
+	clients map[string]serveHarnessClientEnv
+	env     *standingFactMatrixEnv
+	repo    string // current hosted repository, "" when retired
+}
+
+func (*standingFactServe) Name() string { return "serve" }
+
+// newStandingFactServe binds a key to each actor of h on the shared server.
+func newStandingFactServe(h *standingHarness, env *standingFactMatrixEnv) *standingFactServe {
+	h.t.Helper()
+	s := &standingFactServe{
+		h:       h,
+		server:  &serveHarness{t: h.t, Binary: h.Binary(), Home: env.serveHome},
+		clients: map[string]serveHarnessClientEnv{},
+		env:     env,
+	}
+	for _, role := range standingHarnessRoles {
+		s.clients[role] = serveHarnessClient(h.t, s.server, serveHarnessAddKey(s.server, h.Actor(role)), nil)
+	}
+	return s
+}
+
+// gitDir is the current hosted repository's Git directory.
+func (s *standingFactServe) gitDir() string { return s.server.Layout().RepoGitDir(s.repo) }
+
+// URL is the clone URL of the current hosted repository.
+func (s *standingFactServe) URL() string { return serveHarnessCloneURL(s.repo) }
+
+// Refs is every ref of the current hosted repository with its value.
+func (s *standingFactServe) Refs() string {
+	s.h.t.Helper()
+	return serveHarnessGit(s.h.t, s.gitDir(), "for-each-ref", "--format=%(refname) %(objectname)")
+}
+
+// refMap reads the refs below prefixes of the Git directory gitDir.
+func standingFactRefMap(t *testing.T, gitDir string, prefixes ...string) map[string]string {
+	t.Helper()
+	refs := map[string]string{}
+	listed := runOperationalGit(t, "", append([]string{"--git-dir=" + gitDir, "for-each-ref", "--format=%(refname) %(objectname)"}, prefixes...)...)
+	for _, line := range strings.Split(listed, "\n") {
+		if fields := strings.Fields(line); len(fields) == 2 {
+			refs[fields[0]] = fields[1]
+		}
+	}
+	return refs
+}
+
+// push runs git push of refspecs from directory to the current hosted
+// repository with role's key and reports whether it was accepted.
+func (s *standingFactServe) push(role, directory string, refspecs ...string) (string, bool) {
+	s.h.t.Helper()
+	output, status := s.clients[role].exec(directory, "git", append([]string{"push", s.URL()}, refspecs...)...)
+	return output, status == 0
+}
+
+// hosted creates a new hosted repository from the bare remote's branches
+// when the current one is retired.
+func (s *standingFactServe) hosted() {
+	s.h.t.Helper()
+	if s.repo != "" {
+		return
+	}
+	s.env.repos++
+	s.repo = fmt.Sprintf("matrix-%d", s.env.repos)
+	s.server.Serve("serve", "repo", "create", s.repo, "--from", s.h.Remote())
+}
+
+// retire stops using the current hosted repository.
+func (s *standingFactServe) retire() { s.repo = "" }
+
+// mirror brings the current hosted repository up to the bare remote with
+// governed pushes: first the harness's scratch branches, which carry every
+// commit a candidate is based on, as a feature-branch push by A; then each
+// role's chain from the remote with that role's key, except role except,
+// whose chain goes up to exceptAt from its own clone; then every proposal
+// code ref the remote holds. A push that waits for another chain is retried
+// after the others; the test fails when a round makes no progress.
+func (s *standingFactServe) mirror(except, exceptAt string) {
+	t, h := s.h.t, s.h
+	t.Helper()
+	s.hosted()
+	hosted := standingFactRefMap(t, s.gitDir(), "refs/hn", "refs/heads/standing")
+	remote := standingFactRefMap(t, h.Remote(), "refs/hn/actors", "refs/hn/proposals", "refs/heads/standing")
+	var branches []string
+	for ref, value := range remote {
+		if strings.HasPrefix(ref, "refs/heads/standing/") && hosted[ref] != value {
+			branches = append(branches, value+":"+ref)
+		}
+	}
+	if len(branches) > 0 {
+		sort.Strings(branches)
+		if output, ok := s.push("A", h.Remote(), branches...); !ok {
+			t.Fatalf("cannot push scratch branches %v to hosted repository %s:\n%s", branches, s.repo, output)
+		}
+	}
+	type update struct{ role, directory, value, ref string }
+	var chains []update
+	for _, role := range standingFactMirrorOrder {
+		ref := actorRef(h.Actor(role))
+		value, directory := remote[ref], h.Remote()
+		if role == except {
+			value, directory = exceptAt, h.Work(role)
+		}
+		if value != "" && hosted[ref] != value {
+			chains = append(chains, update{role, directory, value, ref})
+		}
+	}
+	var proposals []string
+	for ref, value := range remote {
+		if strings.HasPrefix(ref, "refs/hn/proposals/") && hosted[ref] != value {
+			proposals = append(proposals, value+":"+ref)
+		}
+	}
+	sort.Strings(proposals)
+	failures := map[string]string{}
+	for len(chains)+len(proposals) > 0 {
+		progress := false
+		var waiting []update
+		for _, u := range chains {
+			output, ok := s.push(u.role, u.directory, u.value+":"+u.ref)
+			if ok {
+				progress = true
+				continue
+			}
+			failures[u.value+":"+u.ref] = output
+			waiting = append(waiting, u)
+			// Chains can cite each other both ways (M's decision cites T's
+			// result, which answers M's request), so the prefix before the
+			// waiting event goes first.
+			if prefix := s.admissiblePrefix(u.directory, u.value, u.ref, output); prefix != "" {
+				if _, ok := s.push(u.role, u.directory, prefix+":"+u.ref); ok {
+					progress = true
+				}
+			}
+		}
+		chains = waiting
+		if len(proposals) > 0 {
+			if output, ok := s.push("A", h.Remote(), proposals...); ok {
+				progress, proposals = true, nil
+			} else {
+				failures["proposal code refs"] = output
+				var left []string
+				for _, refspec := range proposals {
+					if output, ok := s.push("A", h.Remote(), refspec); ok {
+						progress = true
+					} else {
+						failures[refspec] = output
+						left = append(left, refspec)
+					}
+				}
+				proposals = left
+			}
+		}
+		if !progress {
+			break
+		}
+	}
+	if len(chains)+len(proposals) > 0 {
+		var report strings.Builder
+		for refspec, output := range failures {
+			fmt.Fprintf(&report, "%s:\n%s\n", refspec, output)
+		}
+		t.Fatalf("cannot mirror the bare remote into hosted repository %s; still waiting: %v %v\n%s", s.repo, chains, proposals, report.String())
+	}
+}
+
+// standingFactWaitingEvent finds the event a dependency-missing rejection
+// names as waiting.
+var standingFactWaitingEvent = regexp.MustCompile(`event (sha256:[0-9a-f]{64}) \([a-z.]+\) needs `)
+
+// admissiblePrefix returns the chain commit before the event a refused
+// push of value to ref waits for, when that prefix is not hosted yet, and
+// "" otherwise. Event commits carry the message "hn event <id>".
+func (s *standingFactServe) admissiblePrefix(directory, value, ref, output string) string {
+	t := s.h.t
+	t.Helper()
+	rejections, _ := extractServeRejections(output)
+	if len(rejections) != 1 || rejections[0].Code != serveReasonDependencyMissing {
+		return ""
+	}
+	match := standingFactWaitingEvent.FindStringSubmatch(rejections[0].Sentence)
+	if match == nil {
+		return ""
+	}
+	for _, line := range strings.Split(runOperationalGit(t, directory, "log", "--format=%H %P %s", value), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 4 || fields[len(fields)-1] != match[1] {
+			continue
+		}
+		parent := fields[1]
+		if len(fields) == 4 || parent == "hn" {
+			return ""
+		}
+		if standingFactRefMap(t, s.gitDir(), ref)[ref] == parent {
+			return ""
+		}
+		return parent
+	}
+	return ""
+}
+
+// Judge mirrors the bare remote with the signer's chain up to fact's
+// parent, then pushes the signer's actor ref at fact with the signer's own
+// key. A refused push must leave every hosted ref byte-identical (C-005).
+func (s *standingFactServe) Judge(t *testing.T, fact standingHarnessSigned) (bool, string) {
+	t.Helper()
+	h := s.h
+	ref := actorRef(h.Actor(fact.Role))
+	s.mirror(fact.Role, standingFactParent(h, fact.Role, fact.Commit))
+	before := s.Refs()
+	output, ok := s.push(fact.Role, h.Work(fact.Role), fact.Commit+":"+ref)
+	after := s.Refs()
+	if ok {
+		if hosted := standingFactRefMap(t, s.gitDir(), ref)[ref]; hosted != fact.Commit {
+			t.Errorf("accepted push left hosted %s at %q, want %s:\n%s", ref, hosted, fact.Commit, output)
+		}
+		return true, output
+	}
+	if after != before {
+		t.Errorf("refused push of %s changed hosted refs:\nbefore:\n%s\nafter:\n%s\n%s", fact.ID, before, after, output)
+	}
+	return false, output
+}
+
+// standingFactMatrixEnv is shared by every harness of one matrix test: the
+// built binary, the serve account's HOME, the hosted repository counter and
+// the report.
+type standingFactMatrixEnv struct {
+	binary    string
+	serveHome string
+	repos     int
+	report    standingFactReport
+}
+
+// newStandingFactMatrixEnv creates the serve account with the same skips as
+// newServeHarness.
+func newStandingFactMatrixEnv(t *testing.T, binary string) *standingFactMatrixEnv {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("hn serve requires a Unix host")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("hn serve refuses uid 0; run tests as an unprivileged user")
+	}
+	if _, err := checkServeExecutablePath(binary); err != nil {
+		t.Skipf("temporary directory is not usable as an hn install path: %v", err)
+	}
+	home := filepath.Join(t.TempDir(), "serve-home")
+	if err := os.Mkdir(home, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return &standingFactMatrixEnv{binary: binary, serveHome: home}
+}
+
+// standingFactMatrix judges facts of one standing harness on the four
+// surfaces and records each judgment in the shared report.
+type standingFactMatrix struct {
+	t        *testing.T
+	h        *standingHarness
+	serve    *standingFactServe
+	surfaces []standingFactSurface
+	report   *standingFactReport
+}
+
+// matrix builds a standing harness on policy for t with its serve surface.
+func (env *standingFactMatrixEnv) matrix(t *testing.T, policy standingHarnessPolicy) *standingFactMatrix {
+	t.Helper()
+	h := newStandingHarnessWithBinary(t, env.binary, policy)
+	serve := newStandingFactServe(h, env)
+	return &standingFactMatrix{
+		t: t, h: h, serve: serve, report: &env.report,
+		surfaces: []standingFactSurface{standingFactLocalSurface{h}, standingFactImportSurface{h}, standingFactShallowSurface{h}, serve},
+	}
+}
+
+// standingFactExpect is the verdict every surface must give one fact.
+type standingFactExpect struct {
+	Set, Row string
+	Accept   bool
+	// Keep leaves an accepted fact published, so later facts build on it.
+	// Otherwise the signer's chain is reset to the fact's parent on the
+	// clone and the remote afterwards, and a hosted repository that
+	// accepted it is retired.
+	Keep bool
+	// Refusal lists, per surface, text a refusal must contain.
+	Refusal map[string][]string
+	// Never is text no surface's output may contain.
+	Never []string
+	// ServeCode and ServeIDs are the one hn-serve/1 rejection a refusal
+	// must carry on the serve surface.
+	ServeCode string
+	ServeIDs  []string
+	// Semantic rows must reach rule derivation or the maintainer path on
+	// every surface, never a shallow dependency gap.
+	Semantic bool
+	// Check names the expected refusal in the report.
+	Check string
+}
+
+// standingFactRefusalEverywhere is a Refusal map with the same texts for
+// every surface.
+func standingFactRefusalEverywhere(texts ...string) map[string][]string {
+	refusal := map[string][]string{}
+	for _, surface := range standingFactMatrixSurfaces {
+		refusal[surface] = texts
+	}
+	return refusal
+}
+
+// judge runs fact through every surface in order, checks each verdict
+// against want, records the row and restores the chains as want.Keep says.
+// The signer's chain must end at fact.
+func (m *standingFactMatrix) judge(fact standingHarnessSigned, want standingFactExpect) {
+	t, h := m.t, m.h
+	t.Helper()
+	if head := standingFactChainHead(h, fact.Role); head != fact.Commit {
+		t.Fatalf("%s %s: %s's chain is at %s, want the judged fact's commit %s", want.Set, want.Row, fact.Role, head, fact.Commit)
+	}
+	parent := standingFactParent(h, fact.Role, fact.Commit)
+	row := standingFactReportRow{Set: want.Set, Row: want.Row, Want: "accept"}
+	if !want.Accept {
+		row.Want = "refuse: " + want.Check
+	}
+	agree, served := true, false
+	verdicts := map[bool]int{}
+	for _, surface := range m.surfaces {
+		started := time.Now()
+		accepted, detail := surface.Judge(t, fact)
+		verdicts[accepted]++
+		if surface.Name() == "serve" {
+			served = accepted
+		}
+		cell := standingFactSummary(accepted, detail)
+		if problem := standingFactCheckCell(h, fact, surface.Name(), accepted, detail, want); problem != "" {
+			agree = false
+			cell += " (MISMATCH)"
+			t.Errorf("%s %s (%s) on %s: %s\n%s", want.Set, want.Row, fact.ID, surface.Name(), problem, detail)
+		}
+		row.Cells = append(row.Cells, cell)
+		t.Logf("%s %s on %s: %s in %s%s", want.Set, want.Row, surface.Name(), cell, time.Since(started).Round(time.Millisecond),
+			standingFactEvidenceLine(accepted, detail, want.Refusal[surface.Name()]))
+	}
+	row.Agree, row.Unanimous = agree, len(verdicts) == 1
+	if !(want.Accept && want.Keep && agree) {
+		standingFactResetChain(h, fact.Role, parent)
+		if served {
+			m.serve.retire()
+		}
+	}
+	m.report.rows = append(m.report.rows, row)
+}
+
+// standingFactCheckCell returns why one surface's verdict breaks want, or
+// "" when it matches.
+func standingFactCheckCell(h *standingHarness, fact standingHarnessSigned, surface string, accepted bool, detail string, want standingFactExpect) string {
+	if accepted != want.Accept {
+		return fmt.Sprintf("accepted = %v, want %v", accepted, want.Accept)
+	}
+	for _, never := range want.Never {
+		if strings.Contains(detail, never) {
+			return fmt.Sprintf("output contains %q", never)
+		}
+	}
+	if accepted {
+		return ""
+	}
+	for _, text := range want.Refusal[surface] {
+		if !strings.Contains(detail, text) {
+			return fmt.Sprintf("refusal lacks %q", text)
+		}
+	}
+	if want.Semantic && strings.Contains(detail, "shallow dependency gap") {
+		return "a semantic row was refused through a shallow dependency gap"
+	}
+	if surface != "serve" {
+		return ""
+	}
+	rejections, lines := extractServeRejections(detail)
+	if len(rejections) != 1 || len(lines) != 2 {
+		return fmt.Sprintf("%d hn-serve/1 rejections in %d lines, want one pair", len(rejections), len(lines))
+	}
+	rejection := rejections[0]
+	if ref := actorRef(h.Actor(fact.Role)); rejection.Ref != ref || rejection.Actor != h.Actor(fact.Role) || rejection.Code != want.ServeCode {
+		return fmt.Sprintf("rejection %s %s %s, want %s %s %s", rejection.Ref, rejection.Actor, rejection.Code, ref, h.Actor(fact.Role), want.ServeCode)
+	}
+	if strings.Join(rejection.IDs, " ") != strings.Join(want.ServeIDs, " ") {
+		return fmt.Sprintf("rejection ids %q, want %q", rejection.IDs, want.ServeIDs)
+	}
+	return ""
+}
+
+// standingFactEvidenceLine is, for a refusal, the first output line that
+// holds the first expected refusal text, so the log shows each cell's
+// reason; empty for an acceptance.
+func standingFactEvidenceLine(accepted bool, detail string, refusal []string) string {
+	if accepted || len(refusal) == 0 {
+		return ""
+	}
+	for _, line := range strings.Split(detail, "\n") {
+		if strings.Contains(line, refusal[0]) {
+			line = strings.TrimSpace(line)
+			if len(line) > 400 {
+				line = line[:400] + "..."
+			}
+			return ":\n" + line
+		}
+	}
+	return ""
+}
+
+var (
+	standingFactCheckPattern = regexp.MustCompile(`rule merge sha256:[0-9a-f]{64} fails ([a-z-]+)`)
+	standingFactGapPattern   = regexp.MustCompile(`kind=([^;]+);`)
+)
+
+// standingFactSummary is a report cell: accept, or the refusal's serve code
+// and the check, path, gap or bound that refused.
+func standingFactSummary(accepted bool, detail string) string {
+	if accepted {
+		return "accept"
+	}
+	var parts []string
+	if rejections, _ := extractServeRejections(detail); len(rejections) > 0 {
+		parts = append(parts, rejections[0].Code)
+	}
+	switch match := standingFactCheckPattern.FindStringSubmatch(detail); {
+	case match != nil:
+		parts = append(parts, match[1])
+	case strings.Contains(detail, "is not authorized by"):
+		parts = append(parts, "maintainer path")
+	case standingFactGapPattern.MatchString(detail):
+		parts = append(parts, "gap "+standingFactGapPattern.FindStringSubmatch(detail)[1])
+	case strings.Contains(detail, "exceeds bound"):
+		parts = append(parts, "changed-path bound")
+	case strings.Contains(detail, standingHarnessUnknownRuleField):
+		parts = append(parts, "strict resource decoder")
+	case strings.Contains(detail, "missing dependency") || strings.Contains(detail, "which is not hosted"):
+		parts = append(parts, "missing dependency")
+	}
+	if len(parts) == 0 {
+		return "refuse"
+	}
+	return "refuse: " + strings.Join(parts, ", ")
+}
+
+// standingFactReportSets orders the sets of the report.
+var standingFactReportSets = []string{"invalid", "control", "missing", "valid", "legacy", "boundary", "bound", "executed"}
+
+// standingFactReportRow is one judged fact: the expected verdict and one
+// cell per surface in standingFactMatrixSurfaces order.
+type standingFactReportRow struct {
+	Set, Row, Want string
+	Cells          []string
+	// Agree: every cell matches the expected verdict and reason.
+	// Unanimous: the four surfaces gave the same accept or reject verdict.
+	Agree, Unanimous bool
+}
+
+type standingFactReport struct{ rows []standingFactReportRow }
+
+// log prints the matrix sorted by set and row, so runs diff cleanly, and
+// returns the number of rows on which all four surfaces agree with the
+// expected verdict.
+func (r *standingFactReport) log(t *testing.T) (agreeing, total int) {
+	t.Helper()
+	order := map[string]int{}
+	for index, set := range standingFactReportSets {
+		order[set] = index
+	}
+	rows := append([]standingFactReportRow(nil), r.rows...)
+	sort.SliceStable(rows, func(i, j int) bool {
+		if order[rows[i].Set] != order[rows[j].Set] {
+			return order[rows[i].Set] < order[rows[j].Set]
+		}
+		return rows[i].Row < rows[j].Row
+	})
+	var b strings.Builder
+	header := append([]string{"set", "row", "expected"}, standingFactMatrixSurfaces...)
+	fmt.Fprintf(&b, "%-9s %-18s %-34s %-34s %-34s %-34s %s\n", standingFactCells(header)...)
+	for _, row := range rows {
+		cells := append([]string{row.Set, row.Row, row.Want}, row.Cells...)
+		fmt.Fprintf(&b, "%-9s %-18s %-34s %-34s %-34s %-34s %s\n", standingFactCells(cells)...)
+		if row.Agree && row.Unanimous {
+			agreeing++
+		}
+	}
+	total = len(rows)
+	rate := 0.0
+	if total > 0 {
+		rate = 100 * float64(agreeing) / float64(total)
+	}
+	t.Logf("four-surface matrix:\n%s", b.String())
+	t.Logf("agreement: %d of %d rows (%.1f%%) give the expected verdict on all four surfaces", agreeing, total, rate)
+	return agreeing, total
+}
+
+// standingFactCells converts report cells for fmt.
+func standingFactCells(values []string) []any {
+	converted := make([]any, len(values))
+	for index, value := range values {
+		converted[index] = value
+	}
+	return converted
+}
+
+// standingFactDefectExpect is the verdict of one shape of defect on every
+// surface (NFR-001, US3-2). Semantic rows name the fact and its check, or
+// the maintainer-path refusal for F19 and F20, and hn serve rejects them
+// with actor-chain-invalid naming the fact. F21 and F22 form the
+// missing-dependency table: every surface names the absent ID or commit,
+// and hn serve rejects them with dependency-missing.
+func standingFactDefectExpect(h *standingHarness, defect standingHarnessDefect, c standingHarnessCase, fact standingHarnessSigned, row string) standingFactExpect {
+	want := standingFactExpect{
+		Set: "invalid", Row: row, Check: defect.Expected,
+		Never: []string{standingFactInterimShallow(fact.ID), "the candidate has no changed paths"},
+	}
+	switch defect.Expected {
+	case standingHarnessMaintainerPath:
+		local := standingFactRefusal(defect, fact.ID)
+		replication := standingFactImportRefusal(h, defect, c, fact.ID)
+		want.Refusal = map[string][]string{"local": {local}, "shallow": {local}, "import": {replication}, "serve": {replication}}
+		want.ServeCode, want.ServeIDs, want.Semantic = serveReasonActorChainInvalid, []string{fact.ID}, true
+	case standingHarnessMissingDependency:
+		// The signer's own full clone has no dependency state: for F21 its
+		// projection reaches check 8, which requires every evidence ID to
+		// be present; for F22 its sync leaves the author's chain waiting for
+		// the absent code, so the candidate itself is missing locally and
+		// projection refuses the fact without it.
+		want.Set = "missing"
+		absent, kind, owner, reason := c.Approval.ID, shallowSelectedFact, "", "evidence is absent"
+		local := []string{"rule merge " + fact.ID + " fails " + ruleCheckEvidenceItem + ": evidence " + absent + " is unavailable"}
+		if defect.ID == "F22" {
+			absent, kind, owner, reason = c.Candidate.Head, shallowProposalCodeRef, c.Candidate.ID, "rule merge head commit is absent"
+			local = []string{"missing dependency " + c.Candidate.ID + ": proposal code ref is absent",
+				"merge " + operationalShortID(fact.ID) + " does not match an available proposal"}
+		}
+		want.Check = "missing " + shortID(absent)
+		want.Refusal = map[string][]string{
+			"local":   local,
+			"import":  {"event " + fact.ID + " (proposal.merged) missing dependency " + absent + ": " + reason},
+			"shallow": {standingFactShallowGap(kind, absent, owner)},
+			"serve":   {"event " + fact.ID + " (proposal.merged) needs " + absent + ", which is not hosted and not in this push."},
+		}
+		want.ServeCode, want.ServeIDs = serveReasonDependencyMissing, []string{absent}
+	default:
+		want.Refusal = standingFactRefusalEverywhere("rule merge " + fact.ID + " fails " + defect.Expected)
+		want.ServeCode, want.ServeIDs, want.Semantic = serveReasonActorChainInvalid, []string{fact.ID}, true
+	}
+	return want
+}
+
+// defect runs one fixture row on the four surfaces. A semantic row's
+// matched valid control runs first with the same arrangement and must be
+// accepted everywhere (decisions 01M5VSEHFV2K03JJY0NN6DFNAT and
+// 01M5VWE2Q3AVA8NPGRCSKBFW5M); it is then withdrawn, so every shape of the
+// defect is judged on the clean history the control saw.
+func (m *standingFactMatrix) defect(defect standingHarnessDefect) {
+	h, t := m.h, m.t
+	t.Helper()
+	started := time.Now()
+	c := defect.Prepare()
+	if defect.Control != nil {
+		control := defect.Control(c)
+		m.judge(control, standingFactExpect{Set: "control", Row: defect.ID + " control", Accept: true,
+			Never: []string{"shallow dependency gap"}})
+	}
+	clean := standingFactChainHead(h, defect.Signer)
+	signed := defect.Build(c)
+	if len(signed) == 0 {
+		t.Fatalf("%s signed nothing", defect.ID)
+	}
+	installs := standingFactShapes(h, clean, c, signed)
+	for index, install := range installs {
+		fact := install()
+		if fact.Candidate != c.Candidate.ID {
+			t.Fatalf("%s shape %d cites %s, want %s", defect.ID, index+1, fact.Candidate, c.Candidate.ID)
+		}
+		row := defect.ID
+		if len(installs) > 1 {
+			row = fmt.Sprintf("%s shape %d", defect.ID, index+1)
+		}
+		m.judge(fact, standingFactDefectExpect(h, defect, c, fact, row))
+	}
+	t.Logf("%s: %d shape(s) on four surfaces in %s", defect.ID, len(installs), time.Since(started).Round(time.Millisecond))
+}
+
+// standingFactMergeCommit makes, in role's clone, the two-parent merge of
+// c's head into its base that a local rule merge records as its commit,
+// and returns it. role's main stays where it was.
+func standingFactMergeCommit(h *standingHarness, role string, c standingHarnessCase) string {
+	h.t.Helper()
+	h.git(role, "fetch", "-q", "origin")
+	h.git(role, "checkout", "-q", "--detach", c.Candidate.Base)
+	h.git(role, "merge", "-q", "--no-ff", "--no-edit", c.Candidate.Head)
+	merge := h.git(role, "rev-parse", "HEAD")
+	h.git(role, "checkout", "-q", "main")
+	return merge
+}
+
+// standingFactRequestersBase commits, on main, the default policy with A
+// listed as a requester of pipeline test (decision D1).
+func standingFactRequestersBase(h *standingHarness) string {
+	h.t.Helper()
+	policy := h.Policy()
+	policy.Requesters = []string{"A"}
+	return h.PolicyCommit(h.Base(), policy)
+}
+
+// standingFactMaintainerActorBase commits, on main, the default policy with
+// the maintainer M listed as an executing actor of rule ordinary (FR-011).
+func standingFactMaintainerActorBase(h *standingHarness) string {
+	h.t.Helper()
+	policy := h.Policy()
+	policy.Rules[0].Actors = []string{"E", "M"}
+	return h.PolicyCommit(h.Base(), policy)
+}
+
+// standingFactLintPipeline is the second pipeline of the two-pipeline
+// policy, defined like pipeline test and run by the same runner.
+const standingFactLintPipeline = "lint"
+
+// standingFactTwoPipelineBase commits, on main, the default policy with a
+// second required pipeline and its definition.
+func standingFactTwoPipelineBase(h *standingHarness) string {
+	h.t.Helper()
+	var document map[string]any
+	if err := json.Unmarshal([]byte(h.Policy().JSON(h.actors)), &document); err != nil {
+		h.t.Fatal(err)
+	}
+	pipelines := document["pipelines"].(map[string]any)
+	pipelines[standingFactLintPipeline] = pipelines[standingHarnessPipeline]
+	encoded, err := json.MarshalIndent(document, "", "  ")
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	return h.Commit("M", h.Base(), map[string]string{
+		serveGovernedPolicyPath:                               string(encoded) + "\n",
+		".hn/pipelines/" + standingFactLintPipeline + ".json": serveGovernedPipelineJSON(h.t, h.ciFlag),
+	})
+}
+
+// standingFactLintResult has M request pipeline lint for c and T run it.
+func standingFactLintResult(h *standingHarness, c standingHarnessCase) operationalEvent {
+	h.t.Helper()
+	request := h.act("M", "run.request", true, "run", "request", c.Candidate.ID, standingFactLintPipeline)
+	result := h.RunCI(request.ID)
+	if outcome := h.fact("T", result.ID).Outcome; outcome != "passed" {
+		h.t.Fatalf("lint result %s is %q, want passed", result.ID, outcome)
+	}
+	return result
+}
+
+// standingFactUS51Case opens a candidate that S approves first, which rule
+// ordinary does not count, and then R (US5-1 after gpt approves).
+func standingFactUS51Case(h *standingHarness) standingHarnessCase {
+	h.t.Helper()
+	c := h.openCase("A", h.Base(), nil)
+	h.Approve("S", c.Candidate.ID)
+	h.completeCase(&c)
+	return c
+}
+
+// standingFactRequesterCase opens a candidate on base whose only result
+// answers the run of A, a listed requester (D1).
+func standingFactRequesterCase(h *standingHarness, base string) standingHarnessCase {
+	h.t.Helper()
+	c := h.openCase("A", base, nil)
+	c.Approval = h.Approve("R", c.Candidate.ID)
+	c.Request = h.RequestCI("A", c.Candidate.ID)
+	c.Result = h.RunCI(c.Request.ID)
+	h.cases[c.Candidate.ID] = c
+	return c
+}
+
+// validSet judges the valid fixture set of T078, signed in-process, on the
+// four surfaces. Each fact stays published, so the next builds on it.
+func (m *standingFactMatrix) validSet() {
+	h := m.h
+	h.t.Helper()
+	keep := func(row string, fact standingHarnessSigned) {
+		m.judge(fact, standingFactExpect{Set: "valid", Row: row, Accept: true, Keep: true})
+	}
+
+	us1 := h.Case(h.ReadyCandidate(standingAutomergeFiles).ID)
+	merge := standingFactMergeCommit(h, "E", us1)
+	keep("US1 merge commit", h.SignFactFor("E", us1, func(event *Event) { event.Commit = merge }))
+
+	us4 := h.Case(h.ReadyCandidate(nil).ID)
+	keep("US4 commit = head", h.SignFactFor("E", us4, nil))
+
+	keep("US5-1 reviewers", h.SignFactFor("E", standingFactUS51Case(h), nil))
+
+	keep("D1 requester", h.SignFactFor("E", standingFactRequesterCase(h, standingFactRequestersBase(h)), nil))
+
+	fr011 := h.readyCase("A", standingFactMaintainerActorBase(h), nil)
+	keep("FR-011 maintainer", h.SignFactFor("M", fr011, nil))
+
+	two := h.readyCase("A", standingFactTwoPipelineBase(h), nil)
+	lint := standingFactLintResult(h, two)
+	keep("two pipelines", h.SignFactFor("E", two, func(event *Event) { event.Evidence = append(event.Evidence, lint.ID) }))
+}
+
+// legacySet judges L01 to L06 (C-004, US3-7), each event of a fixture on
+// its own: the declared verdict on every surface, with L06 refused by the
+// strict resource decoder as before.
+func (m *standingFactMatrix) legacySet() {
+	h := m.h
+	h.t.Helper()
+	for _, fixture := range standingHarnessLegacyFixtures(h) {
+		signed := fixture.Build()
+		for index, item := range signed {
+			row := fixture.ID
+			if len(signed) > 1 {
+				row = fmt.Sprintf("%s event %d", fixture.ID, index+1)
+			}
+			standingFactSetChain(h, item.Role, item.Commit)
+			want := standingFactExpect{Set: "legacy", Row: row, Accept: true, Keep: true}
+			switch fixture.Verdict {
+			case standingHarnessValid, standingHarnessValidMaintainer, standingHarnessAnnotatedMaintainer:
+			case standingHarnessRefusedAsBefore:
+				want = standingFactExpect{Set: "legacy", Row: row, Check: "strict resource decoder",
+					Refusal: map[string][]string{
+						"local": {standingHarnessUnknownRuleField}, "import": {standingHarnessUnknownRuleField},
+						"shallow": {standingHarnessUnknownRuleField}, "serve": {item.ID},
+					},
+					ServeCode: serveReasonActorChainInvalid, ServeIDs: []string{item.ID}}
+			default:
+				h.t.Fatalf("%s has unexpected verdict %q", fixture.ID, fixture.Verdict)
+			}
+			m.judge(item, want)
+		}
+	}
+}
+
+// boundarySet judges B1 to B4 (FR-025, final state): every surface now
+// implements path (b), so each fixture's WithRulePath verdict holds on all
+// four. B4 is F01 signed by E.
+func (m *standingFactMatrix) boundarySet() {
+	h := m.h
+	h.t.Helper()
+	for _, fixture := range standingHarnessBoundaryFixtures(h) {
+		signed := fixture.Build()
+		if len(signed) != 1 || signed[0].Role != fixture.Signer {
+			h.t.Fatalf("%s signed %d facts, want one by %s", fixture.ID, len(signed), fixture.Signer)
+		}
+		fact := signed[0]
+		want := standingFactExpect{Set: "boundary", Row: fixture.ID, Accept: standingFactAccepted(fixture.WithRulePath), Keep: true}
+		if !want.Accept {
+			want.Check = ruleCheckRuleExists
+			want.Refusal = standingFactRefusalEverywhere("rule merge " + fact.ID + " fails " + ruleCheckRuleExists)
+			want.ServeCode, want.ServeIDs, want.Semantic = serveReasonActorChainInvalid, []string{fact.ID}, true
+		}
+		m.judge(fact, want)
+	}
+}
+
+// standingFactRequireRows fails the test unless the report has a row whose
+// label starts with each of ids in set.
+func standingFactRequireRows(t *testing.T, report *standingFactReport, set string, ids ...string) {
+	t.Helper()
+	for _, id := range ids {
+		found := false
+		for _, row := range report.rows {
+			if row.Set == set && (row.Row == id || strings.HasPrefix(row.Row, id+" ")) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("the matrix report has no %s row %s", set, id)
+		}
+	}
+}
+
+// standingFactRequireAgreement logs the report and requires every row to
+// give the expected verdict on all four surfaces (NFR-002: 100%).
+func standingFactRequireAgreement(t *testing.T, report *standingFactReport) {
+	t.Helper()
+	agreeing, total := report.log(t)
+	if total == 0 || agreeing != total {
+		t.Errorf("the four surfaces agree with the expected verdict on %d of %d rows, want all of them", agreeing, total)
+	}
+}
+
+// T076 to T078 (NFR-001, NFR-002, C-004, US3-2, FR-025): every defect
+// fixture F01 to F22, each semantic row's matched control, the valid set,
+// the legacy history L01 to L06 and the boundary fixtures B1 to B4, judged
+// on local projection, replication import, shallow verification and the
+// hn serve actor-chain check. All four surfaces must give each fixture its
+// expected verdict and reason; the logged matrix is the evidence.
+//
+// Cost decision: as in TestStandingFactLocalDefects, the fact-only rows
+// share one harness and every row that builds its own candidates gets a
+// fresh one. One hn serve account serves every harness.
+func TestStandingFactMatrixAgreement(t *testing.T) {
+	if testing.Short() {
+		t.Skip("the four-surface matrix builds about thirty candidates and pushes every fact to hn serve; run without -short")
+	}
+	started := time.Now()
+	// T078 step 5: the boundary table marks the three test surfaces as
+	// implementing path (b); the hn serve check runs the import code.
+	for _, surface := range []string{"local", "import", "shallow"} {
+		if !standingFactRulePathSurfaces[surface] {
+			t.Errorf("standingFactRulePathSurfaces[%q] is false, want true", surface)
+		}
+	}
+	if strings.Join(standingFactSurfaces, ",") != "local,import,shallow" || len(standingFactRulePathSurfaces) != 3 {
+		t.Errorf("boundary surfaces %v with table %v, want local, import and shallow", standingFactSurfaces, standingFactRulePathSurfaces)
+	}
+
+	binary := buildOperationalBinary(t)
+	env := newStandingFactMatrixEnv(t, binary)
+	factOnly := map[string]bool{"F01": true, "F03": true, "F04": true, "F13": true, "F14": true, "F19": true, "F20": true}
+	t.Run("invalid-fact-only-rows", func(t *testing.T) {
+		m := env.matrix(t, standingHarnessDefaultPolicy())
+		defects := standingHarnessDefects(m.h, m.h.ReadyCandidate(nil))
+		for _, id := range standingHarnessDefectIDs {
+			if factOnly[id] {
+				m.defect(defects[id])
+			}
+		}
+	})
+	for _, id := range standingHarnessDefectIDs {
+		if factOnly[id] {
+			continue
+		}
+		t.Run("invalid-"+id, func(t *testing.T) {
+			m := env.matrix(t, standingHarnessDefaultPolicy())
+			defect, exists := standingHarnessDefects(m.h, m.h.ReadyCandidate(nil))[id]
+			if !exists {
+				t.Fatalf("defect table lacks %s", id)
+			}
+			m.defect(defect)
+		})
+	}
+	t.Run("valid", func(t *testing.T) { env.matrix(t, standingHarnessDefaultPolicy()).validSet() })
+	t.Run("legacy", func(t *testing.T) { env.matrix(t, standingHarnessLegacyPolicy()).legacySet() })
+	t.Run("boundary", func(t *testing.T) { env.matrix(t, standingHarnessDefaultPolicy()).boundarySet() })
+	// T078 step 5: the three-surface boundary test, in its final state.
+	t.Run("TestStandingFactBoundary", TestStandingFactBoundary)
+
+	semantic := standingHarnessDefectIDs[:20]
+	standingFactRequireRows(t, &env.report, "invalid", semantic...)
+	standingFactRequireRows(t, &env.report, "control", semantic...)
+	standingFactRequireRows(t, &env.report, "missing", "F21", "F22")
+	standingFactRequireRows(t, &env.report, "valid", "US1", "US4", "US5-1", "D1", "FR-011", "two")
+	standingFactRequireRows(t, &env.report, "legacy", "L01", "L02", "L03", "L04", "L05", "L06")
+	standingFactRequireRows(t, &env.report, "boundary", "B1", "B2", "B3", "B4")
+	standingFactRequireAgreement(t, &env.report)
+	t.Logf("the four-surface matrix took %s with %d hosted repositories", time.Since(started).Round(time.Millisecond), env.repos)
+}
+
+// standingFactBoundEntries long paths under src/, all naming one blob, give
+// one candidate a changed-path list of about 8.8 MB, over the 8 MiB bound.
+const (
+	standingFactBoundEntries    = 44000
+	standingFactBoundNameLength = 196
+)
+
+// standingFactBoundCase builds, in A's clone with git mktree alone, a head
+// on the base that adds standingFactBoundEntries files under src/, opens it
+// as a candidate and gathers R's approval and T's passing result.
+func standingFactBoundCase(h *standingHarness) standingHarnessCase {
+	t := h.t
+	t.Helper()
+	work := h.Work("A")
+	h.git("A", "fetch", "-q", "origin")
+	blob := standingHarnessGitInput(t, work, []byte("bounded change\n"), nil, "hash-object", "-w", "--stdin")
+	var listing bytes.Buffer
+	listing.WriteString(h.git("A", "ls-tree", h.Base()+":src") + "\n")
+	pad := strings.Repeat("p", standingFactBoundNameLength-7)
+	for index := 0; index < standingFactBoundEntries; index++ {
+		fmt.Fprintf(&listing, "100644 blob %s\t%s-%06d\n", blob, pad, index)
+	}
+	src := standingHarnessGitInput(t, work, listing.Bytes(), nil, "mktree")
+	var root strings.Builder
+	for _, line := range strings.Split(h.git("A", "ls-tree", h.Base()), "\n") {
+		if strings.HasSuffix(line, "\tsrc") {
+			line = "040000 tree " + src + "\tsrc"
+		}
+		root.WriteString(line + "\n")
+	}
+	tree := standingHarnessGitInput(t, work, []byte(root.String()), nil, "mktree")
+	head := standingHarnessGitInput(t, work, nil, nil, "commit-tree", tree, "-p", h.Base(), "-m", "standing changed-path bound")
+	branch := "refs/heads/standing/scratch-bound"
+	h.git("A", "push", "-q", "origin", head+":"+branch)
+	h.scratch[head] = branch
+	c := standingHarnessCase{Base: h.Base(), Author: "A", Candidate: h.Open("A", h.Base(), head)}
+	h.completeCase(&c)
+	return c
+}
+
+// T079 (NFR-005): a candidate whose changed-path output exceeds the 8 MiB
+// bound is refused by preview and execution with the existing bound error,
+// with no merge and no fact, and a hand-signed rule merge fact for it is
+// refused with the bound error by every surface. None judges a truncated
+// change list.
+func TestStandingFactMatrixChangedPathBound(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds a candidate with a changed-path list over 8 MiB and pushes it to hn serve; run without -short")
+	}
+	started := time.Now()
+	env := newStandingFactMatrixEnv(t, buildOperationalBinary(t))
+	m := env.matrix(t, standingHarnessDefaultPolicy())
+	h := m.h
+	c := standingFactBoundCase(h)
+	size := len(runOperationalGitBytes(t, h.Remote(), "diff-tree", "--no-commit-id", "--no-renames", "-r", "--name-only", "-z",
+		c.Candidate.Base, c.Candidate.Head, "--"))
+	t.Logf("candidate %s: %d changed paths, %d bytes of git diff-tree --name-only -z output, bound %d bytes; built in %s",
+		c.Candidate.ID, standingFactBoundEntries, size, maxChangedPathsBytes, time.Since(started).Round(time.Millisecond))
+	if size <= maxChangedPathsBytes {
+		t.Fatalf("changed-path output is %d bytes, want more than %d", size, maxChangedPathsBytes)
+	}
+	bound := fmt.Sprintf("policy Git output exceeds bound (%d bytes)", maxChangedPathsBytes)
+
+	// Step 2: preview and execution in E's clone.
+	h.hn("E", "sync", "origin")
+	h.Checkout("E", "main", h.Base())
+	refs, events := h.Refs("E"), len(h.Events("E"))
+	for _, args := range [][]string{
+		{"automerge", c.Candidate.ID, "--rule", "ordinary"},
+		{"automerge", c.Candidate.ID, "--rule", "ordinary", "--execute"},
+	} {
+		output, status := h.Run("E", args...)
+		t.Logf("hn %s exited %d:\n%s", strings.Join(args, " "), status, output)
+		if status == 0 || !strings.Contains(output, "inspect changed paths: "+bound) {
+			t.Fatalf("hn %s exited %d, want the refusal %q:\n%s", strings.Join(args, " "), status, bound, output)
+		}
+		if strings.Contains(output, "Merged proposal") || strings.Contains(output, "changed-paths") {
+			t.Fatalf("hn %s judged a change list:\n%s", strings.Join(args, " "), output)
+		}
+	}
+	if after := h.Refs("E"); after != refs {
+		t.Fatalf("refused automerge changed E's refs:\nbefore:\n%s\nafter:\n%s", refs, after)
+	}
+	if after := len(h.Events("E")); after != events {
+		t.Fatalf("refused automerge appended %d event(s) to E's chain", after-events)
+	}
+
+	// Step 3: a hand-signed rule merge fact for the candidate.
+	fact := h.SignFactFor("E", c, nil)
+	m.judge(fact, standingFactExpect{
+		Set: "bound", Row: "NFR-005", Check: "changed-path bound",
+		Refusal:   standingFactRefusalEverywhere(fact.ID, bound),
+		Never:     []string{"fails " + ruleCheckChangedPaths, "the candidate has no changed paths"},
+		ServeCode: serveReasonActorChainInvalid, ServeIDs: []string{fact.ID},
+	})
+	standingFactRequireAgreement(t, &env.report)
+	t.Logf("the changed-path bound fixture took %s", time.Since(started).Round(time.Millisecond))
+}
+
+// standingFactChainFact is the head of role's chain as a judged fact,
+// which must be fact.
+func standingFactChainFact(h *standingHarness, role string, fact standingHarnessFact) standingHarnessSigned {
+	h.t.Helper()
+	commit := standingFactChainHead(h, role)
+	payload := runOperationalGitBytes(h.t, h.Work(role), "show", commit+":event.json")
+	if id := operationalDigest(payload); id != fact.ID {
+		h.t.Fatalf("%s's chain ends at %s, want fact %s", role, id, fact.ID)
+	}
+	return standingHarnessSigned{ID: fact.ID, Role: role, Commit: commit, Candidate: fact.Subject, Payload: payload}
+}
+
+// standingFactHostedRemote is the remote name of the current hosted
+// repository in a role's clone.
+const standingFactHostedRemote = "hosted"
+
+// automergeRemote runs the real client's remote rule advancement in role's
+// clone against a fresh mirror of the bare remote: hn automerge candidate
+// --rule ordinary --execute --remote hosted, after the all-trusted
+// selection and an import. It requires the hosted main at the head and
+// role's chain, on the server too, to end at one rule merge fact with
+// commit equal to the head, and returns that fact. The hosted repository is
+// retired afterwards, so the fact is judged on a fresh one.
+func (s *standingFactServe) automergeRemote(role string, c standingHarnessCase) standingHarnessFact {
+	h, t := s.h, s.h.t
+	t.Helper()
+	s.retire()
+	s.mirror("", "")
+	client, work := s.clients[role], h.Work(role)
+	if strings.Contains("\n"+h.git(role, "remote")+"\n", "\n"+standingFactHostedRemote+"\n") {
+		h.git(role, "remote", "set-url", standingFactHostedRemote, s.URL())
+	} else {
+		h.git(role, "remote", "add", standingFactHostedRemote, s.URL())
+	}
+	h.Checkout(role, "main", h.Base())
+	client.Hn(work, "replication", "select", standingFactHostedRemote, "--all-trusted")
+	client.Hn(work, "sync", standingFactHostedRemote)
+	before := len(h.Events(role))
+	output, status := client.exec(work, h.Binary(), "automerge", c.Candidate.ID, "--rule", "ordinary", "--execute", "--remote", standingFactHostedRemote)
+	t.Logf("hn automerge %s --rule ordinary --execute --remote %s exited %d:\n%s", c.Candidate.ID, standingFactHostedRemote, status, output)
+	if status != 0 {
+		t.Fatalf("remote rule advancement exited %d:\n%s", status, output)
+	}
+	appended := h.Events(role)[before:]
+	if len(appended) != 1 || appended[0].Kind != "proposal.merged" {
+		t.Fatalf("remote rule advancement appended %#v, want one proposal.merged", appended)
+	}
+	fact := h.fact(role, appended[0].ID)
+	evidence := c.Evidence()
+	sort.Strings(evidence)
+	if fact.Rule != "ordinary" || fact.Subject != c.Candidate.ID || fact.Head != c.Candidate.Head || fact.Commit != c.Candidate.Head ||
+		strings.Join(fact.Evidence, ",") != strings.Join(evidence, ",") {
+		t.Fatalf("remote rule merge fact %+v, want rule ordinary with commit = head = %s citing %v", fact, c.Candidate.Head, evidence)
+	}
+	hosted := standingFactRefMap(t, s.gitDir(), "refs/heads/main", actorRef(h.Actor(role)))
+	if hosted["refs/heads/main"] != c.Candidate.Head || hosted[actorRef(h.Actor(role))] != standingFactChainHead(h, role) {
+		t.Fatalf("hosted refs %v, want main at %s and %s's chain at %s", hosted, c.Candidate.Head, role, standingFactChainHead(h, role))
+	}
+	s.retire()
+	return fact
+}
+
+// T080: every scenario of the valid set run through the real client, hn
+// automerge --execute locally or with --remote against hn serve, records a
+// fact that all four surfaces admit. The pre-sign self-check of WP11 and
+// the four verifiers agree on facts the client actually writes.
+func TestStandingFactMatrixExecutionAdmitted(t *testing.T) {
+	if testing.Short() {
+		t.Skip("runs six rule merges through the real client and judges each on four surfaces; run without -short")
+	}
+	started := time.Now()
+	env := newStandingFactMatrixEnv(t, buildOperationalBinary(t))
+	m := env.matrix(t, standingHarnessDefaultPolicy())
+	h := m.h
+	admitted := func(row, role string, fact standingHarnessFact) {
+		t.Helper()
+		m.judge(standingFactChainFact(h, role, fact), standingFactExpect{Set: "executed", Row: row, Accept: true, Keep: true})
+	}
+	local := func(row, role, target string, c standingHarnessCase, evidence ...string) {
+		t.Helper()
+		h.hn(role, "sync", "origin")
+		run := standingAutomergeExecute(h, role, target, c.Candidate.ID, "ordinary")
+		admitted(row, role, requireStandingRuleMerge(h, role, run, c.Candidate, "ordinary", evidence...))
+	}
+
+	us1 := h.Case(h.ReadyCandidate(standingAutomergeFiles).ID)
+	local("US1 local merge", "E", h.Base(), us1, us1.Evidence()...)
+
+	us4 := h.Case(h.ReadyCandidate(nil).ID)
+	admitted("US4 remote", "E", m.serve.automergeRemote("E", us4))
+
+	us51 := standingFactUS51Case(h)
+	local("US5-1 reviewers", "E", h.Base(), us51, us51.Evidence()...)
+
+	requesters := standingFactRequestersBase(h)
+	d1 := standingFactRequesterCase(h, requesters)
+	local("D1 requester", "E", requesters, d1, d1.Evidence()...)
+
+	twoBase := standingFactTwoPipelineBase(h)
+	two := h.readyCase("A", twoBase, nil)
+	lint := standingFactLintResult(h, two)
+	local("two pipelines", "E", twoBase, two, append(two.Evidence(), lint.ID)...)
+
+	maintainerBase := standingFactMaintainerActorBase(h)
+	fr011 := h.readyCase("A", maintainerBase, nil)
+	local("FR-011 maintainer", "M", maintainerBase, fr011, fr011.Evidence()...)
+
+	standingFactRequireRows(t, &env.report, "executed", "US1", "US4", "US5-1", "D1", "two", "FR-011")
+	standingFactRequireAgreement(t, &env.report)
+	t.Logf("six client rule merges judged on four surfaces in %s", time.Since(started).Round(time.Millisecond))
 }
