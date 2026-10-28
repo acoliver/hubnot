@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"runtime"
 	"sort"
@@ -1589,7 +1590,10 @@ func TestStandingFactShallowNoEmptyDiff(t *testing.T) {
 // hn serve actor-chain check, to which the signer pushes its actor ref with
 // its own key. The first three surfaces use the standing harness's bare
 // remote, as the per-surface tests above do; local and import publish with
-// raw Git, so no projection runs before the surface under test.
+// raw Git, so no projection runs before the surface under test. Import and
+// shallow both judge the signer's selection through a real hn sync origin
+// from an accepted chain that does not hold the fact, and a refusal must
+// leave that accepted chain exactly where it was (zero promotion).
 //
 // The hosted repository of the serve surface holds what the bare remote
 // holds, and it gets there only through governed pushes: before each
@@ -1682,22 +1686,102 @@ func (s standingFactLocalSurface) Judge(t *testing.T, fact standingHarnessSigned
 	return standingFactProjects(t, h, h.Work(fact.Role), fact, &detail), detail.String()
 }
 
+// standingFactPublishChain makes the remote's actor ref of role equal
+// commit with Git alone, deleting it when commit is empty (the judged fact
+// is the first event of role's chain).
+func standingFactPublishChain(h *standingHarness, role, commit string) {
+	h.t.Helper()
+	if commit != "" {
+		standingFactPublishAt(h, role, commit)
+		return
+	}
+	if standingFactRemoteChain(h, role) != "" {
+		h.git(role, "push", "-q", "origin", "--delete", actorRef(h.Actor(role)))
+	}
+}
+
+// standingFactAcceptedRefs is every accepted replication ref of verifier
+// with its value: the actor chains and proposal code refs hn sync promoted.
+func standingFactAcceptedRefs(t *testing.T, verifier string) map[string]string {
+	t.Helper()
+	return standingFactRefMap(t, filepath.Join(verifier, ".git"), "refs/hn/remotes")
+}
+
+// standingFactSyncAdmits runs hn sync origin in verifier, whose remote's
+// actor ref of fact's signer is at fact, and judges the signer's selection
+// by the accepted refs (FR-012, NFR-001, C-005). The selection is admitted
+// when its accepted actor ref moves to fact's commit exactly; then sync
+// must succeed without a failed signer selection. It is refused when the
+// accepted actor ref keeps its value from before the sync; then sync must
+// exit non-zero and report the signer's selection as failed. Any other
+// value promotes part of the refused chain and fails the test. Every other
+// role's accepted chain must equal the remote's afterwards, so
+// independently valid selections still promote, except that roles in
+// waiting, whose chains wait for an absent dependency, keep their values
+// too.
+func standingFactSyncAdmits(t *testing.T, h *standingHarness, verifier string, fact standingHarnessSigned, waiting []string, detail *strings.Builder) bool {
+	t.Helper()
+	ref := acceptedActorRef("origin", h.Actor(fact.Role))
+	before := standingFactAcceptedRefs(t, verifier)
+	if before[ref] == fact.Commit {
+		t.Fatalf("the verifier holds %s's judged fact %s as accepted before hn sync origin", fact.Role, fact.ID)
+	}
+	output, status := h.RunIn(verifier, "sync", "origin")
+	fmt.Fprintf(detail, "hn sync origin exited %d:\n%s", status, output)
+	after := standingFactAcceptedRefs(t, verifier)
+	for _, role := range standingHarnessRoles {
+		if role == fact.Role {
+			continue
+		}
+		other := acceptedActorRef("origin", h.Actor(role))
+		want := standingFactRemoteChain(h, role)
+		if standingFactListed(role, waiting) {
+			if reported := "Replication " + replicationActor + " " + h.Actor(role) + ": failed ("; want != before[other] && !strings.Contains(output, reported) {
+				t.Errorf("hn sync origin judging %s does not report %s's waiting selection with %q:\n%s", fact.ID, role, reported, output)
+			}
+			want = before[other]
+		}
+		if after[other] != want {
+			t.Errorf("hn sync origin judging %s left %s's accepted chain at %q, want %q:\n%s", fact.ID, role, after[other], want, output)
+		}
+	}
+	failed := "Replication " + replicationActor + " " + h.Actor(fact.Role) + ": failed ("
+	switch after[ref] {
+	case fact.Commit:
+		if status != 0 || strings.Contains(output, failed) {
+			t.Errorf("hn sync origin promoted %s but exited %d or reported its selection failed:\n%s", fact.ID, status, output)
+		}
+		return true
+	case before[ref]:
+		if status == 0 || !strings.Contains(output, failed) {
+			t.Errorf("hn sync origin refused %s but exited %d without %q:\n%s", fact.ID, status, failed, output)
+		}
+		return false
+	default:
+		t.Errorf("hn sync origin moved %s's accepted chain from %q to %s, neither its value before nor fact %s's commit %s: part of the refused chain was promoted:\n%s",
+			fact.Role, before[ref], after[ref], fact.ID, fact.Commit, output)
+		fmt.Fprintf(detail, "PARTIAL PROMOTION of %s's chain to %s\n", fact.Role, after[ref])
+		return false
+	}
+}
+
 // standingFactImportSurface is replication import: the chain published with
-// raw Git and imported by a fresh full verifier with no identity.
-type standingFactImportSurface struct{ h *standingHarness }
+// raw Git and imported by a fresh full verifier with no identity, which
+// holds no accepted ref before its first sync.
+type standingFactImportSurface struct{ m *standingFactMatrix }
 
 func (standingFactImportSurface) Name() string { return "import" }
 
 func (s standingFactImportSurface) Judge(t *testing.T, fact standingHarnessSigned) (bool, string) {
 	t.Helper()
-	h := s.h
+	h := s.m.h
 	standingFactPublishAt(h, fact.Role, fact.Commit)
 	verifier := h.Verifier()
-	output, status := h.RunIn(verifier, "sync", "origin")
+	if accepted := standingFactAcceptedRefs(t, verifier); len(accepted) != 0 {
+		t.Fatalf("the fresh verifier holds accepted refs before its first sync: %v", accepted)
+	}
 	var detail strings.Builder
-	fmt.Fprintf(&detail, "hn sync origin exited %d:\n%s", status, output)
-	promoted := standingFactAcceptedChain(h, verifier, fact.Role)
-	if promoted == "" || !strings.Contains(runOperationalGit(t, verifier, "rev-list", promoted), fact.Commit) {
+	if !standingFactSyncAdmits(t, h, verifier, fact, s.m.want.Waiting, &detail) {
 		return false, detail.String()
 	}
 	if !standingFactProjects(t, h, verifier, fact, &detail) {
@@ -1707,19 +1791,68 @@ func (s standingFactImportSurface) Judge(t *testing.T, fact standingHarnessSigne
 	return true, detail.String()
 }
 
-// standingFactShallowSurface is shallow verification: the chain published
-// with raw Git and a depth-one verifier holding the complete closure.
-type standingFactShallowSurface struct{ h *standingHarness }
+// standingFactShallowProjection separates, in a shallow cell's output, the
+// shallow sync judgment from the projection judgment of the hydrated
+// verifier.
+const standingFactShallowProjection = "\n--- projection in a shallow verifier hydrated with the judged chain ---\n"
+
+// standingFactShallowSurface is shallow verification with the complete
+// closure of decision 01M5VSEHFV2K03JJY0NN6DFNAT, judged twice. Shallow
+// import: a depth-one verifier selecting --all holds every chain in full,
+// with the signer's accepted chain at the judged fact's parent, and every
+// proposal code ref and scratch branch at depth one; the remote then moves
+// the signer's chain to the fact and the verifier runs hn sync origin,
+// followed, when it promotes the fact, by hn proposal status and hn log.
+// Shallow projection: a second verifier with the same closure that holds
+// the judged chain as accepted runs the projecting commands, so a refused
+// semantic row shows the derivation check a shallow verifier reaches with
+// the fact in place, never a dependency gap. Both judgments must agree.
+type standingFactShallowSurface struct{ m *standingFactMatrix }
 
 func (standingFactShallowSurface) Name() string { return "shallow" }
 
 func (s standingFactShallowSurface) Judge(t *testing.T, fact standingHarnessSigned) (bool, string) {
 	t.Helper()
-	h := s.h
+	h := s.m.h
+	ref := acceptedActorRef("origin", h.Actor(fact.Role))
+	parent := standingFactParent(h, fact.Role, fact.Commit)
+	standingFactPublishChain(h, fact.Role, parent)
+	importer := standingFactShallowVerifierWith(h, standingFactShallowArrangement{})
+	before := standingFactAcceptedRefs(t, importer)
+	if before[ref] != parent {
+		t.Fatalf("the shallow verifier holds %s's accepted chain at %q, want the judged fact's parent %q", fact.Role, before[ref], parent)
+	}
 	standingFactPublishAt(h, fact.Role, fact.Commit)
-	verifier := standingFactShallowVerifierWith(h, standingFactShallowArrangement{})
-	var detail strings.Builder
-	return standingFactProjects(t, h, verifier, fact, &detail), detail.String()
+
+	var synced strings.Builder
+	imported := standingFactSyncAdmits(t, h, importer, fact, s.m.want.Waiting, &synced)
+	after := standingFactAcceptedRefs(t, importer)
+	if imported {
+		before[ref] = fact.Commit
+		imported = standingFactProjects(t, h, importer, fact, &synced)
+		if !imported {
+			t.Errorf("shallow sync promoted %s but does not project it:\n%s", fact.ID, synced.String())
+		}
+	}
+	if !reflect.DeepEqual(after, before) {
+		t.Errorf("shallow sync judging %s changed accepted refs beyond the judged chain:\nwant:\n%v\ngot:\n%v\n%s", fact.ID, before, after, synced.String())
+	}
+
+	hydrated := standingFactShallowVerifierWith(h, standingFactShallowArrangement{})
+	var projected strings.Builder
+	projects := standingFactProjects(t, h, hydrated, fact, &projected)
+	detail := synced.String() + standingFactShallowProjection + projected.String()
+	if imported != projects {
+		t.Errorf("shallow sync admits %s: %v; shallow projection admits it: %v\n%s", fact.ID, imported, projects, detail)
+	}
+	return imported && projects, detail
+}
+
+// standingFactShallowParts splits a shallow cell's output into its sync and
+// projection judgments.
+func standingFactShallowParts(detail string) (synced, projected string) {
+	synced, projected, _ = strings.Cut(detail, standingFactShallowProjection)
+	return synced, projected
 }
 
 // standingFactServe is the hn serve surface of one standing harness: a
@@ -1992,6 +2125,8 @@ type standingFactMatrix struct {
 	serve    *standingFactServe
 	surfaces []standingFactSurface
 	report   *standingFactReport
+	// want is the expectation of the fact being judged.
+	want standingFactExpect
 }
 
 // matrix builds a standing harness on policy for t with its serve surface.
@@ -1999,10 +2134,9 @@ func (env *standingFactMatrixEnv) matrix(t *testing.T, policy standingHarnessPol
 	t.Helper()
 	h := newStandingHarnessWithBinary(t, env.binary, policy)
 	serve := newStandingFactServe(h, env)
-	return &standingFactMatrix{
-		t: t, h: h, serve: serve, report: &env.report,
-		surfaces: []standingFactSurface{standingFactLocalSurface{h}, standingFactImportSurface{h}, standingFactShallowSurface{h}, serve},
-	}
+	m := &standingFactMatrix{t: t, h: h, serve: serve, report: &env.report}
+	m.surfaces = []standingFactSurface{standingFactLocalSurface{h}, standingFactImportSurface{m}, standingFactShallowSurface{m}, serve}
+	return m
 }
 
 // standingFactExpect is the verdict every surface must give one fact.
@@ -2014,10 +2148,15 @@ type standingFactExpect struct {
 	// clone and the remote afterwards, and a hosted repository that
 	// accepted it is retired.
 	Keep bool
-	// Refusal lists, per surface, text a refusal must contain.
+	// Refusal lists, per surface, text a refusal must contain. On the
+	// shallow surface, "shallow" applies to the projection judgment and
+	// "shallow sync" to the shallow import, which defaults to "import".
 	Refusal map[string][]string
 	// Never is text no surface's output may contain.
 	Never []string
+	// Waiting lists roles other than the signer whose chains wait for an
+	// absent dependency, so no sync promotes anything of them either.
+	Waiting []string
 	// ServeCode and ServeIDs are the one hn-serve/1 rejection a refusal
 	// must carry on the serve surface.
 	ServeCode string
@@ -2048,6 +2187,7 @@ func (m *standingFactMatrix) judge(fact standingHarnessSigned, want standingFact
 	if head := standingFactChainHead(h, fact.Role); head != fact.Commit {
 		t.Fatalf("%s %s: %s's chain is at %s, want the judged fact's commit %s", want.Set, want.Row, fact.Role, head, fact.Commit)
 	}
+	m.want = want
 	parent := standingFactParent(h, fact.Role, fact.Commit)
 	row := standingFactReportRow{Set: want.Set, Row: want.Row, Want: "accept"}
 	if !want.Accept {
@@ -2062,15 +2202,23 @@ func (m *standingFactMatrix) judge(fact standingHarnessSigned, want standingFact
 		if surface.Name() == "serve" {
 			served = accepted
 		}
-		cell := standingFactSummary(accepted, detail)
-		if problem := standingFactCheckCell(h, fact, surface.Name(), accepted, detail, want); problem != "" {
+		parts := standingFactRefusalParts(surface.Name(), detail, want)
+		var summaries, evidence []string
+		for _, part := range parts {
+			if summary := standingFactSummary(accepted, part.Output); len(summaries) == 0 || summary != summaries[0] {
+				summaries = append(summaries, summary)
+			}
+			evidence = append(evidence, standingFactEvidenceLine(accepted, part.Output, part.Refusal))
+		}
+		cell := strings.Join(summaries, " | ")
+		if problem := standingFactCheckCell(h, fact, surface.Name(), accepted, detail, parts, want); problem != "" {
 			agree = false
 			cell += " (MISMATCH)"
 			t.Errorf("%s %s (%s) on %s: %s\n%s", want.Set, want.Row, fact.ID, surface.Name(), problem, detail)
 		}
 		row.Cells = append(row.Cells, cell)
 		t.Logf("%s %s on %s: %s in %s%s", want.Set, want.Row, surface.Name(), cell, time.Since(started).Round(time.Millisecond),
-			standingFactEvidenceLine(accepted, detail, want.Refusal[surface.Name()]))
+			strings.Join(evidence, ""))
 	}
 	row.Agree, row.Unanimous = agree, len(verdicts) == 1
 	if !(want.Accept && want.Keep && agree) {
@@ -2082,13 +2230,36 @@ func (m *standingFactMatrix) judge(fact standingHarnessSigned, want standingFact
 	m.report.rows = append(m.report.rows, row)
 }
 
+// standingFactPart is one judgment in a surface's output with the texts
+// its refusal must contain.
+type standingFactPart struct {
+	Name, Output string
+	Refusal      []string
+}
+
+// standingFactRefusalParts splits a surface's output into its judgments:
+// one for local, import and serve, and for shallow the shallow sync, held
+// to want.Refusal["shallow sync"] or else the import texts, followed by the
+// hydrated projection, held to want.Refusal["shallow"].
+func standingFactRefusalParts(surface, detail string, want standingFactExpect) []standingFactPart {
+	if surface != "shallow" {
+		return []standingFactPart{{surface, detail, want.Refusal[surface]}}
+	}
+	synced, projected := standingFactShallowParts(detail)
+	refusal, exists := want.Refusal["shallow sync"]
+	if !exists {
+		refusal = want.Refusal["import"]
+	}
+	return []standingFactPart{{"shallow sync", synced, refusal}, {"shallow projection", projected, want.Refusal["shallow"]}}
+}
+
 // standingFactCheckCell returns why one surface's verdict breaks want, or
 // "" when it matches.
-func standingFactCheckCell(h *standingHarness, fact standingHarnessSigned, surface string, accepted bool, detail string, want standingFactExpect) string {
+func standingFactCheckCell(h *standingHarness, fact standingHarnessSigned, surface string, accepted bool, detail string, parts []standingFactPart, want standingFactExpect) string {
 	if accepted != want.Accept {
 		return fmt.Sprintf("accepted = %v, want %v", accepted, want.Accept)
 	}
-	for _, never := range want.Never {
+	for _, never := range append([]string{"PARTIAL PROMOTION"}, want.Never...) {
 		if strings.Contains(detail, never) {
 			return fmt.Sprintf("output contains %q", never)
 		}
@@ -2096,9 +2267,14 @@ func standingFactCheckCell(h *standingHarness, fact standingHarnessSigned, surfa
 	if accepted {
 		return ""
 	}
-	for _, text := range want.Refusal[surface] {
-		if !strings.Contains(detail, text) {
-			return fmt.Sprintf("refusal lacks %q", text)
+	for _, part := range parts {
+		if len(part.Refusal) == 0 {
+			return fmt.Sprintf("no refusal text is expected of %s", part.Name)
+		}
+		for _, text := range part.Refusal {
+			if !strings.Contains(part.Output, text) {
+				return fmt.Sprintf("%s refusal lacks %q", part.Name, text)
+			}
 		}
 	}
 	if want.Semantic && strings.Contains(detail, "shallow dependency gap") {
@@ -2176,7 +2352,7 @@ func standingFactSummary(accepted bool, detail string) string {
 }
 
 // standingFactReportSets orders the sets of the report.
-var standingFactReportSets = []string{"invalid", "control", "missing", "valid", "legacy", "boundary", "bound", "executed"}
+var standingFactReportSets = []string{"invalid", "control", "missing", "valid", "immutable", "legacy", "boundary", "bound", "executed"}
 
 // standingFactReportRow is one judged fact: the expected verdict and one
 // cell per surface in standingFactMatrixSurfaces order.
@@ -2208,10 +2384,10 @@ func (r *standingFactReport) log(t *testing.T) (agreeing, total int) {
 	})
 	var b strings.Builder
 	header := append([]string{"set", "row", "expected"}, standingFactMatrixSurfaces...)
-	fmt.Fprintf(&b, "%-9s %-18s %-34s %-34s %-34s %-34s %s\n", standingFactCells(header)...)
+	fmt.Fprintf(&b, "%-9s %-24s %-34s %-34s %-34s %-34s %s\n", standingFactCells(header)...)
 	for _, row := range rows {
 		cells := append([]string{row.Set, row.Row, row.Want}, row.Cells...)
-		fmt.Fprintf(&b, "%-9s %-18s %-34s %-34s %-34s %-34s %s\n", standingFactCells(cells)...)
+		fmt.Fprintf(&b, "%-9s %-24s %-34s %-34s %-34s %-34s %s\n", standingFactCells(cells)...)
 		if row.Agree && row.Unanimous {
 			agreeing++
 		}
@@ -2265,6 +2441,10 @@ func standingFactDefectExpect(h *standingHarness, defect standingHarnessDefect, 
 			absent, kind, owner, reason = c.Candidate.Head, shallowProposalCodeRef, c.Candidate.ID, "rule merge head commit is absent"
 			local = []string{"missing dependency " + c.Candidate.ID + ": proposal code ref is absent",
 				"merge " + operationalShortID(fact.ID) + " does not match an available proposal"}
+			// The author's chain opens the withdrawn candidate, and the
+			// chains of M, R and T cite it, so a sync that lacks the
+			// author's chain promotes none of them either.
+			want.Waiting = []string{c.Author, "M", "R", "T"}
 		}
 		want.Check = "missing " + shortID(absent)
 		want.Refusal = map[string][]string{
@@ -2486,6 +2666,93 @@ func (m *standingFactMatrix) boundarySet() {
 	}
 }
 
+// standingFactLaterVeto is one current event outside a valid rule merge
+// fact's evidence, published after the fact was signed, that blocks a fresh
+// rule evaluation of the fact's candidate with Blockers (FR-015).
+type standingFactLaterVeto struct {
+	Row      string
+	Publish  func(c standingHarnessCase) operationalEvent
+	Blockers []string
+}
+
+// immutableSet judges FR-015 on the four surfaces. For each later veto, E
+// signs a valid rule merge fact for a fresh ready candidate, and only then
+// is the veto published: a maintainer rejection, the counted reviewer's
+// change request that withdraws its approval, and the trusted runner's
+// failing rerun of the cited request. With the fact set aside, a fresh
+// preview of the candidate in E's clone is blocked by the veto, so the
+// current events refuse a new rule merge; with the fact restored, every
+// surface, with the veto hosted, imported and in the shallow closure,
+// admits the fact. The fact's ID, payload and evidence are the ones E
+// signed before the veto, and the evidence never names the veto.
+func (m *standingFactMatrix) immutableSet() {
+	h, t := m.h, m.t
+	t.Helper()
+	vetoes := []standingFactLaterVeto{
+		{"FR-015 rejection", func(c standingHarnessCase) operationalEvent {
+			return h.Reject("M", c.Candidate.ID, "Rejected after the rule merge by the standing matrix.")
+		}, []string{"proposal has a current maintainer rejection"}},
+		{"FR-015 change request", func(c standingHarnessCase) operationalEvent {
+			return h.RequestChanges("R", c.Candidate.ID)
+		}, []string{standingAutomergeThreshold0of1, standingAutomergeChangeRequest}},
+		{"FR-015 trusted failure", func(c standingHarnessCase) operationalEvent {
+			h.FailCI()
+			defer h.PassCI()
+			rerun := h.act("T", "run.result", true, "run", "execute", c.Request.ID,
+				"--backend", "host", "--allow-unsafe-host-execution", "--rerun")
+			if outcome := h.fact("T", rerun.ID).Outcome; outcome != "failed" {
+				t.Fatalf("rerun %s of request %s is %q, want failed", rerun.ID, c.Request.ID, outcome)
+			}
+			return rerun
+		}, []string{standingAutomergeNoPass, `pipeline "test" has a current trusted failure`}},
+	}
+	for _, veto := range vetoes {
+		c := h.Case(h.ReadyCandidate(nil).ID)
+		fact := h.SignFactFor("E", c, nil)
+		signed := standingHarnessReadFact(t, fact.Payload)
+		evidence := append([]string(nil), signed.Evidence...)
+		sort.Strings(evidence)
+		cited := c.Evidence()
+		sort.Strings(cited)
+		if strings.Join(evidence, ",") != strings.Join(cited, ",") {
+			t.Fatalf("%s: fact %s cites %v, want the qualifying evidence %v", veto.Row, fact.ID, signed.Evidence, cited)
+		}
+		event := veto.Publish(c)
+		if standingFactListed(event.ID, signed.Evidence) {
+			t.Fatalf("%s: fact %s cites the later veto %s", veto.Row, fact.ID, event.ID)
+		}
+
+		// The same current events block a fresh rule evaluation.
+		parent := standingFactParent(h, "E", fact.Commit)
+		standingFactSetChain(h, "E", parent)
+		output, status := standingAutomergePreview(h, "E", c.Base, c.Candidate.ID, "ordinary")
+		t.Logf("%s: with fact %s set aside and veto %s published, hn automerge %s --rule ordinary exited %d:\n%s",
+			veto.Row, fact.ID, event.ID, c.Candidate.ID, status, output)
+		requireStandingAutomergeBlockedBy(t, output, status, veto.Blockers...)
+		if head := standingFactChainHead(h, "E"); head != parent {
+			t.Fatalf("%s: the preview moved E's chain from %s to %s", veto.Row, parent, head)
+		}
+		standingFactSetChain(h, "E", fact.Commit)
+
+		m.judge(fact, standingFactExpect{Set: "immutable", Row: veto.Row, Accept: true, Keep: true})
+
+		// The admitted fact is the one E signed before the veto.
+		for _, place := range []struct{ name, directory, value string }{
+			{"E's clone", h.Work("E"), standingFactChainHead(h, "E")},
+			{"the remote", h.Remote(), standingFactRemoteChain(h, "E")},
+			{"the hosted repository", m.serve.gitDir(), standingFactRefMap(t, m.serve.gitDir(), actorRef(h.Actor("E")))[actorRef(h.Actor("E"))]},
+		} {
+			if place.value != fact.Commit {
+				t.Fatalf("%s: %s holds E's chain at %q, want fact %s's commit %s", veto.Row, place.name, place.value, fact.ID, fact.Commit)
+			}
+			payload := runOperationalGitBytes(t, place.directory, "show", place.value+":event.json")
+			if !bytes.Equal(payload, fact.Payload) {
+				t.Fatalf("%s: %s holds a different payload for fact %s:\n%s", veto.Row, place.name, fact.ID, payload)
+			}
+		}
+	}
+}
+
 // standingFactRequireRows fails the test unless the report has a row whose
 // label starts with each of ids in set.
 func standingFactRequireRows(t *testing.T, report *standingFactReport, set string, ids ...string) {
@@ -2514,10 +2781,11 @@ func standingFactRequireAgreement(t *testing.T, report *standingFactReport) {
 	}
 }
 
-// T076 to T078 (NFR-001, NFR-002, C-004, US3-2, FR-025): every defect
-// fixture F01 to F22, each semantic row's matched control, the valid set,
-// the legacy history L01 to L06 and the boundary fixtures B1 to B4, judged
-// on local projection, replication import, shallow verification and the
+// T076 to T078 (NFR-001, NFR-002, C-004, US3-2, FR-015, FR-025): every
+// defect fixture F01 to F22, each semantic row's matched control, the valid
+// set, the valid facts under later vetoes outside their evidence, the
+// legacy history L01 to L06 and the boundary fixtures B1 to B4, judged on
+// local projection, replication import, shallow verification and the
 // hn serve actor-chain check. All four surfaces must give each fixture its
 // expected verdict and reason; the logged matrix is the evidence.
 //
@@ -2566,6 +2834,7 @@ func TestStandingFactMatrixAgreement(t *testing.T) {
 		})
 	}
 	t.Run("valid", func(t *testing.T) { env.matrix(t, standingHarnessDefaultPolicy()).validSet() })
+	t.Run("immutable", func(t *testing.T) { env.matrix(t, standingHarnessDefaultPolicy()).immutableSet() })
 	t.Run("legacy", func(t *testing.T) { env.matrix(t, standingHarnessLegacyPolicy()).legacySet() })
 	t.Run("boundary", func(t *testing.T) { env.matrix(t, standingHarnessDefaultPolicy()).boundarySet() })
 	// T078 step 5: the three-surface boundary test, in its final state.
@@ -2576,6 +2845,7 @@ func TestStandingFactMatrixAgreement(t *testing.T) {
 	standingFactRequireRows(t, &env.report, "control", semantic...)
 	standingFactRequireRows(t, &env.report, "missing", "F21", "F22")
 	standingFactRequireRows(t, &env.report, "valid", "US1", "US4", "US5-1", "D1", "FR-011", "two")
+	standingFactRequireRows(t, &env.report, "immutable", "FR-015 rejection", "FR-015 change request", "FR-015 trusted failure")
 	standingFactRequireRows(t, &env.report, "legacy", "L01", "L02", "L03", "L04", "L05", "L06")
 	standingFactRequireRows(t, &env.report, "boundary", "B1", "B2", "B3", "B4")
 	standingFactRequireAgreement(t, &env.report)
