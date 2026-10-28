@@ -1,13 +1,3 @@
----
-affected_files: []
-cycle_number: 1
-mission_slug: standing-acceptance-01M5VD2K
-reproduction_command:
-reviewed_at: '2026-10-28T04:07:53Z'
-reviewer_agent: user
-wp_id: WP16
----
-
 # WP16 review: changes requested
 
 Reviewed implementation commits `a2f975b36a220076eba4c71885b4ec743008acff` and `65684a9bd59b1ca20c1739b96f75a61d32f65bca` at lane head `dd2356feda41bc0a097cbde6d54a8320df1c6006`.
