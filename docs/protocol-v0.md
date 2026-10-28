@@ -260,9 +260,10 @@ the exact review and run-result event IDs that satisfy policy. Rejections
 require an explanation.
 
 A `proposal.merged` event binds the candidate, proposed head, resulting Git
-commit, base-policy digest, and acceptance-decision IDs. It is emitted after
-Git creates the merge commit; branch publication remains a separate ordinary
-Git action.
+commit, base-policy digest, and evidence IDs: acceptance decisions for a
+maintainer merge, or approvals and run results for a rule merge. It is
+emitted after Git creates the merge commit, or after `hn serve` fast-forwards
+the branch; branch publication remains a separate ordinary Git action.
 
 Every verifier applies one union rule to a `proposal.merged` fact. The fact is
 valid when it passes the existing maintainer check, whatever else it carries.
@@ -282,6 +283,34 @@ run-result IDs: at most one approval per counting reviewer and one result per
 trusted runner per pipeline. Any other item, including a `proposal.decision`,
 fails the rule check. `commit` is either a two-parent merge commit or the head
 itself after an `hn serve` fast-forward.
+
+The fact below is what the executing actor `integrator` records under rule
+`ordinary` after a local merge of a candidate with one counted approval and
+one passing result. Values in angle brackets, the sequence and the timestamp
+differ between repositories.
+
+<!-- example: standing-rule-merge-fact -->
+```json
+{
+  "protocol": "hn/0",
+  "kind": "proposal.merged",
+  "actor": "<executor fingerprint>",
+  "actorName": "integrator",
+  "publicKey": "<base64 ed25519 key>",
+  "sequence": 12,
+  "timestamp": "2026-10-26T09:14:03.120Z",
+  "previous": "sha256:<previous event>",
+  "subject": "sha256:<candidate>",
+  "head": "<candidate head commit>",
+  "commit": "<result commit>",
+  "policy": "sha256:<base policy digest>",
+  "evidence": ["sha256:<approval>", "sha256:<passing run result>"],
+  "rule": "ordinary"
+}
+```
+
+`evidence` is sorted. An acceptance merge fact has the same keys without
+`rule`, and its `evidence` lists acceptance decisions.
 
 Verifiers recognize a rule claim on `proposal.merged` only in this shape:
 
@@ -388,10 +417,12 @@ as the two parents. An expected-old ref transaction guards the actual advance
 and a final evidence/target check. This path uses `git commit-tree`, so ordinary
 `pre-merge-commit` and `pre-commit` hooks are not invoked; required check authority
 comes from native policy and pipeline evidence. Operator `reference-transaction`
-hooks remain Git behavior. The resulting `proposal.merged` is the existing
-signed fact binding candidate, head, result commit, base policy and exact
-acceptance IDs. Missing-event repair uses ordinary `hn merge`; collaboration
-and branch publication remain explicit separate actions.
+hooks remain Git behavior. Under acceptance mode `maintainers`, the resulting
+`proposal.merged` is the existing signed fact binding candidate, head, result
+commit, base policy and exact acceptance IDs, and missing-event repair uses
+ordinary `hn merge`. Under acceptance mode `rule`, it is a rule merge fact, and
+repair reruns the same `hn automerge` command. Collaboration and branch
+publication remain explicit separate actions.
 
 ## Synchronization
 

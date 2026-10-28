@@ -205,7 +205,9 @@ A `proposal.merged` fact names the candidate's signed `head` and a resulting
 Validation is the same for both shapes. Hubnot checks that the fact binds the
 candidate's immutable head, that a base-policy maintainer signed it against
 the base policy digest, and that it cites enough current acceptance decisions.
-It does not inspect the ancestry of `commit`. `hn merge PROPOSAL` without
+A fact that fails this check is valid only as a rule merge fact, through the
+rule check that [Executing a standing rule](#executing-a-standing-rule) and
+the protocol describe. Neither check inspects the ancestry of `commit`. `hn merge PROPOSAL` without
 `--remote` keeps producing the second shape.
 
 ## Merge and conflict recovery
@@ -871,3 +873,109 @@ Rule ordinary; target branch main:
 Pipelines:
   (none)
 ```
+
+## Standing acceptance traceability
+
+This section maps every functional requirement, non-functional requirement,
+success criterion and user-story scenario of the standing acceptance
+specification, `kitty-specs/standing-acceptance-01M5VD2K/spec.md`, to the tests
+that prove it. `TestStandingQualityTraceability` reads the IDs from the
+specification when it runs. It fails when an ID has no row or more than one
+row, when a row has an ID the specification does not define, when a row names
+no test, and when a named test is not declared in a root `*_test.go` file.
+The full regression gate of NFR-007 also runs `gofmt -l`, `go vet ./...`,
+`go build ./...`, `go test -race ./...` and `git diff --check`.
+
+### Requirements
+
+| ID | Requirement | Tests |
+|----|----|----|
+| FR-001 | Acceptance mode field | `TestStandingPolicyFieldsRefusals`, `TestStandingPolicyFieldsAcceptedValues`, `TestStandingPolicyFieldsFoldedKeyCaseIsStillValidated` |
+| FR-002 | Non-maintainer executing actors | `TestStandingPolicyFieldsRefusals`, `TestStandingPolicyFieldsAcceptedValues`, `TestStandingPolicyFieldsLegacyRuleKeepsCheckOrder` |
+| FR-003 | Path safety for standing acceptance | `TestStandingPolicyFieldsRefusals`, `TestStandingPolicyFieldsSelectorOverlap`, `TestStandingPolicyDocumentedRefusals`, `TestStandingQualityCaseVariantDirectoryIsOrdinaryContent` |
+| FR-004 | Minimum independent review | `TestStandingPolicyFieldsRefusals`, `TestStandingPolicyDocumentedRefusals` |
+| FR-005 | Rule reviewers | `TestStandingPolicyFieldsRefusals`, `TestRuleAcceptanceLiveRuleReviewersRestrictCounting`, `TestRuleAcceptanceLiveChangeRequestVetoes`, `TestStandingAutomergePreviewRuleReviewers` |
+| FR-006 | Author approval under standing acceptance | `TestRuleAcceptanceLiveAuthorApprovalByMode`, `TestStandingAutomergePreviewRuleReviewers` |
+| FR-007 | Policy inspection | `TestStandingPolicyInspectionShow`, `TestStandingPolicyInspectionCheck`, `TestStandingPolicyDocumentedRule`, `TestStandingPolicyFieldsPolicyCheckRefusals` |
+| FR-008 | Preview | `TestStandingAutomergePreviewStandingRule`, `TestStandingAutomergeDocumentedPreview`, `TestStandingAutomergePreviewMaintainersRuleOptOut` |
+| FR-009 | Execution without per-proposal acceptance | `TestStandingAutomergeExecuteUserStory1`, `TestStandingAutomergeContainmentBlockersAtExecution`, `TestStandingAutomergeContainmentRepositoryState`, `TestStandingServeAdvanceUserStory4` |
+| FR-010 | Rule merge fact | `TestStandingEventCanonicalClaimRoundTrip`, `TestStandingEventNonCanonicalRuleIsNoClaim`, `TestStandingEventSigningRefusesNonCanonicalRule`, `TestStandingEventEncodingUnchangedWithoutRule`, `TestStandingAutomergeExecuteUserStory1`, `TestStandingQualityDocumentedRuleMergeFact` |
+| FR-011 | Rule merge signer | `TestRuleAcceptanceFactDefects`, `TestStandingFactLocalDefects`, `TestStandingAutomergeExecuteMaintainerAndSecondRule` |
+| FR-012 | Re-derivation by every verifier | `TestRuleAcceptanceFactDefects`, `TestRuleAcceptanceFactCheckOrder`, `TestRuleAcceptanceLiveRequestAndResultQualification`, `TestStandingFactLocalDefects`, `TestStandingFactImportDefects`, `TestStandingFactShallowDefects`, `TestStandingFactMatrixAgreement` |
+| FR-013 | Evidence availability | `TestStandingFactImportWithheldApproval`, `TestStandingFactShallowMissingDependencies`, `TestStandingFactShallowMaintainerMergesUnchanged` |
+| FR-014 | Missing code objects | `TestStandingFactLocalValidRuleMerge`, `TestStandingFactImportObjectAccess`, `TestStandingFactImportAbsentCommit`, `TestStandingFactShallowNoEmptyDiff`, `TestStandingFactShallowRecovery` |
+| FR-015 | Scope of fact validation | `TestRuleAcceptanceFactImmutable`, `TestStandingFactMatrixAgreement` |
+| FR-016 | hn serve advancement under a rule | `TestStandingServeVerdictAcceptsRuleAdvancement`, `TestStandingServeVerdictVetoes`, `TestStandingServeVerdictRuleNotSatisfied`, `TestStandingServeWireRuleCatalogue`, `TestStandingServeWireRuleCodesRoundTrip` |
+| FR-017 | Target policy must equal base policy | `TestStandingAutomergePreviewPolicyChanges`, `TestStandingServeVerdictDestinationPolicy` |
+| FR-018 | Direct protected pushes unchanged | `TestStandingServeVerdictAcceptsRuleAdvancement`, `TestStandingServeAdvanceForbiddenCommands` |
+| FR-019 | Bounded executing-actor authority | `TestStandingAutomergeContainmentForbiddenCommands`, `TestStandingAutomergeRepairConstructedState`, `TestStandingServeAdvanceForbiddenCommands`, `TestStandingServeRecoveryRefusals` |
+| FR-020 | Recovery of an interrupted rule merge | `TestStandingAutomergeRepairInterruptedRun`, `TestStandingAutomergeRepairConstructedState`, `TestStandingAutomergeRepairRerunHints`, `TestStandingServeRecoveryInterruptions`, `TestStandingServeRecoveryCompletedRun`, `TestStandingServeRecoveryRefusals`, `TestStandingServeRecoveryAcceptanceMergeRefused`, `TestStandingServeRecoveryHostedBranchLacksCommit` |
+| FR-021 | Status names the rule | `TestStandingAutomergeExecuteUserStory1`, `TestStandingAutomergeExecuteStatusOfMaintainerMerges` |
+| FR-022 | Compatibility | `TestStandingCompatOlderClient`, `TestStandingEventLegacyVerdictsUnchanged`, `TestStandingPolicyFieldsLegacyEncodingIsUnchanged` |
+| FR-023 | Documentation with tested examples | `TestServeQualityDocumentedExamplesAreExecuted`, `TestStandingQualityDocumentedRuleMergeFact`, `TestStandingAutomergeDocumentedPreview`, `TestStandingAutomergeDocumentedExecute`, `TestStandingPolicyDocumentedRefusals`, `TestStandingPolicyDocumentedRule`, `TestStandingServeDocumentedAdvance`, `TestStandingServeDocumentedVeto`, `TestStandingServeWireRuleReasonDocsTable`, `TestStandingQualityDocsStyle` |
+| FR-024 | Union validity of merge facts | `TestRuleAcceptanceAdmitMergeFact`, `TestRuleAcceptanceAdmitMergeFactWithValidator`, `TestStandingFactLocalRuleClaimOnMaintainerMerge`, `TestStandingFactMatrixAgreement` |
+| FR-025 | Fail-closed activation | `TestStandingFactBoundary`, `TestStandingServeWireRuleRefusedBeforeVerdict`, `TestStandingHarnessLegacyAndBoundaryFixtures` |
+| NFR-001 | Fail-closed verification | `TestStandingFactMatrixAgreement`, `TestStandingFactLocalDefects`, `TestStandingFactImportDefects`, `TestStandingFactShallowDefects` |
+| NFR-002 | Verdict agreement | `TestStandingFactMatrixAgreement`, `TestStandingAutomergeAgreementPreviewExecute`, `TestStandingServeAdvanceAgreementPreviewServer`, `TestStandingServeAdvanceAuthorizationAndTransport` |
+| NFR-003 | Executing-actor containment | `TestStandingAutomergeContainmentForbiddenCommands`, `TestStandingServeAdvanceForbiddenCommands`, `TestStandingServeRecoveryRefusals` |
+| NFR-004 | Opt-out compatibility | `TestStandingCompatOlderClient`, `TestStandingCompatPreExistingTestsFrozen`, `TestStandingAutomergePreviewMaintainersRuleOptOut` |
+| NFR-005 | Bounded validation work | `TestRuleAcceptanceFactMemo`, `TestStandingFactLocalMemoSharedAcrossFacts`, `TestStandingFactMatrixChangedPathBound` |
+| NFR-006 | Import cost | `TestStandingQualityImportTimeNFR006` |
+| NFR-007 | Regression gate | `TestStandingQualityRootSourcesAreGofmtFormatted`, `TestStandingCompatPreExistingTestsFrozen` |
+
+### Success criteria
+
+| ID | Success criterion | Tests |
+|----|----|----|
+| SC-001 | Every acceptance scenario passes through the public CLIs, locally and through `hn serve` | `TestStandingQualityTraceability`, `TestStandingAutomergeExecuteUserStory1`, `TestStandingServeAdvanceUserStory4` |
+| SC-002 | An ordinary change merges with zero maintainer-signed events for it | `TestStandingAutomergeExecuteWithoutMaintainer`, `TestStandingServeAdvanceUserStory4` |
+| SC-003 | No forged or insufficient rule merge fact is accepted | `TestStandingFactMatrixAgreement`, `TestStandingFactMatrixChangedPathBound` |
+| SC-004 | A fresh verifier reproduces every rule merge verdict | `TestStandingFactMatrixExecutionAdmitted`, `TestStandingAutomergeExecuteUserStory1`, `TestStandingServeAdvanceUserStory4` |
+| SC-005 | No policy amendment or protected-check change merges by rule | `TestStandingAutomergeContainmentManualPath`, `TestStandingFactLocalDefects`, `TestStandingFactMatrixAgreement` |
+| SC-006 | Every requirement maps to tests and the full gate passes | `TestStandingQualityTraceability`, `TestStandingQualityTraceabilityCheckRejectsGaps` |
+
+### User-story scenarios
+
+| ID | Scenario | Tests |
+|----|----|----|
+| US1-1 | The executing actor merges with no maintainer decision | `TestStandingAutomergeExecuteUserStory1`, `TestStandingAutomergeDocumentedExecute` |
+| US1-2 | A clone with no identity verifies the rule merge | `TestStandingAutomergeExecuteUserStory1`, `TestStandingFactImportValidRuleMerge` |
+| US1-3 | The same evidence under acceptance mode `maintainers` is refused | `TestStandingAutomergeExecuteUserStory1`, `TestStandingAutomergePreviewStandingRule` |
+| US1-4 | The keyless preview shows the standing rule | `TestStandingAutomergePreviewStandingRule`, `TestStandingAutomergeDocumentedPreview` |
+| US2-1 | `hn policy check` lists the added standing rule | `TestStandingPolicyInspectionCheck`, `TestStandingPolicyDocumentedRule` |
+| US2-2 | The amendment takes the manual path | `TestStandingAutomergeContainmentManualPath`, `TestStandingHarnessAdoption` |
+| US2-3 | A candidate cannot use a rule its own head adds | `TestStandingAutomergePreviewPolicyChanges`, `TestStandingAutomergeContainmentManualPath` |
+| US2-4 | A standing rule cannot list `.hn` paths | `TestStandingPolicyFieldsRefusals`, `TestStandingPolicyDocumentedRefusals` |
+| US2-5 | A standing rule cannot overlap a protected path | `TestStandingPolicyFieldsRefusals`, `TestStandingPolicyFieldsSelectorOverlap` |
+| US2-6 | Malformed acceptance and reviewers fields are refused | `TestStandingPolicyFieldsRefusals`, `TestStandingPolicyFieldsPolicyCheckRefusals`, `TestStandingPolicyDocumentedRefusals` |
+| US3-1 | Import refuses each defective fact | `TestStandingFactImportDefects` |
+| US3-2 | `hn serve` refuses each defective fact | `TestStandingFactMatrixAgreement` |
+| US3-3 | Local projection refuses each defective fact | `TestStandingFactLocalDefects` |
+| US3-4 | Shallow verification requires the fact's inputs | `TestStandingFactShallowDefects`, `TestStandingFactShallowMissingDependencies`, `TestStandingFactShallowRecovery` |
+| US3-5 | An absent evidence ID is a missing dependency | `TestStandingFactImportWithheldApproval` |
+| US3-6 | A maintainer merge with a rule claim is a maintainer merge | `TestStandingFactLocalRuleClaimOnMaintainerMerge`, `TestStandingFactBoundary`, `TestStandingAutomergeExecuteStatusOfMaintainerMerges` |
+| US3-7 | Legacy history keeps its verdicts | `TestStandingFactLocalLegacyHistory`, `TestStandingFactImportLegacyHistory`, `TestStandingFactShallowLegacyHistory`, `TestStandingEventLegacyVerdictsUnchanged`, `TestStandingFactMatrixAgreement` |
+| US4-1 | The executing actor advances a protected branch | `TestStandingServeAdvanceUserStory4`, `TestStandingServeVerdictAcceptsRuleAdvancement`, `TestStandingServeDocumentedAdvance` |
+| US4-2 | A new clone verifies the hosted rule merge | `TestStandingServeAdvanceUserStory4` |
+| US4-3 | A late veto refuses the advancement | `TestStandingServeVerdictVetoes`, `TestStandingServeAdvanceVeto`, `TestStandingServeDocumentedVeto` |
+| US4-4 | A direct push still needs maintainer acceptance | `TestStandingServeVerdictAcceptsRuleAdvancement`, `TestStandingServeAdvanceForbiddenCommands` |
+| US4-5 | An actor outside the rule is refused | `TestStandingServeVerdictAcceptsRuleAdvancement`, `TestStandingServeAdvanceAuthorizationAndTransport` |
+| US4-6 | A changed destination policy is refused | `TestStandingServeVerdictDestinationPolicy` |
+| US4-7 | A rerun records a missing fact once | `TestStandingServeRecoveryInterruptions`, `TestStandingServeAdvanceInterruptedAfterPublish` |
+| US4-8 | A rerun publishes a recorded fact without a second advancement | `TestStandingServeRecoveryInterruptions`, `TestStandingServeRecoveryCompletedRun` |
+| US5-1 | Only the rule's reviewers count | `TestStandingAutomergePreviewRuleReviewers`, `TestRuleAcceptanceLiveRuleReviewersRestrictCounting`, `TestStandingFactMatrixExecutionAdmitted` |
+| US5-2 | A change request from any trusted reviewer blocks | `TestStandingAutomergePreviewRuleReviewers`, `TestRuleAcceptanceLiveChangeRequestVetoes` |
+| US5-3 | The author's own approval never counts | `TestStandingAutomergePreviewRuleReviewers`, `TestRuleAcceptanceLiveAuthorApprovalByMode` |
+| US5-4 | A maintainers-mode rule with reviewers records an acceptance merge fact | `TestStandingQualityMaintainersModeReviewersExecution`, `TestStandingAutomergePreviewRuleReviewers`, `TestRuleAcceptanceLiveMaintainersModeWithReviewers` |
+| US6-1 | A maintainer rejection refuses execution | `TestStandingAutomergePreviewVetoesAndBlockers`, `TestStandingAutomergeContainmentBlockersAtExecution`, `TestStandingServeVerdictRuleNotSatisfied` |
+| US6-2 | Change requests, failures and missing results refuse execution | `TestStandingAutomergePreviewVetoesAndBlockers`, `TestStandingAutomergeContainmentBlockersAtExecution`, `TestStandingServeVerdictVetoes` |
+| US6-3 | An author or path outside the rule refuses execution | `TestStandingAutomergePreviewVetoesAndBlockers`, `TestStandingAutomergeContainmentBlockersAtExecution` |
+| US6-4 | Policy and protected-check changes take the manual path | `TestStandingAutomergeContainmentManualPath` |
+| US6-5 | Repository state refusals still apply | `TestStandingAutomergeContainmentRepositoryState` |
+| US6-6 | The executing actor gains no other authority | `TestStandingAutomergeContainmentForbiddenCommands`, `TestStandingServeAdvanceForbiddenCommands` |
+| US6-7 | A result answering an unlisted requester does not count | `TestStandingAutomergePreviewVetoesAndBlockers`, `TestRuleAcceptanceLiveRequesterAuthorization` |
+| US7-1 | Repositories that do not opt in are unchanged | `TestStandingCompatOlderClient`, `TestStandingAutomergePreviewMaintainersRuleOptOut` |
+| US7-2 | An older client rejects the new policy fields | `TestStandingCompatOlderClient` |
+| US7-3 | An older client rejects rule-only facts | `TestStandingCompatOlderClient` |
+| US7-4 | Both clients accept a maintainer merge with a rule claim | `TestStandingCompatOlderClient` |
+| US7-5 | Both clients accept legacy history | `TestStandingCompatOlderClient` |
