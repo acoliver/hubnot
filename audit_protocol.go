@@ -966,8 +966,20 @@ func measureAuditSnapshotDependenciesAt(gitdir, acceptedGitdir, root, acceptedRo
 			return m, err
 		}
 	}
+	commits, err := gitTextAt(gitdir, "rev-list", "--reverse", root)
+	if err != nil {
+		return m, err
+	}
+	return measureAuditCommitPacksAt(gitdir, strings.Fields(commits), previous, budgets, selection, m)
+}
+
+// measureAuditCommitPacksAt adds to m, in commit order, each expanded object
+// of the commits' audit packs that previous does not hold, once. Client
+// replication passes a whole selected history and hn serve the commits a
+// push appends, each with the previously accepted history's objects.
+func measureAuditCommitPacksAt(gitdir string, commits []string, previous map[string]int64, budgets ReplicationBudgets, selection string, m ReplicationMeasurements) (ReplicationMeasurements, error) {
 	sizes := map[string]int64{}
-	err := auditHistoryPackSizesAt(gitdir, root, sizes, func(id string, size int64) error {
+	err := auditCommitPackSizesAt(gitdir, commits, sizes, func(id string, size int64) error {
 		if _, exists := previous[id]; exists {
 			return nil
 		}
@@ -989,7 +1001,11 @@ func auditHistoryPackSizesAt(gitdir, root string, sizes map[string]int64, add fu
 	if err != nil {
 		return err
 	}
-	for _, commit := range strings.Fields(commits) {
+	return auditCommitPackSizesAt(gitdir, strings.Fields(commits), sizes, add)
+}
+
+func auditCommitPackSizesAt(gitdir string, commits []string, sizes map[string]int64, add func(string, int64) error) error {
+	for _, commit := range commits {
 		size, err := gitTextAt(gitdir, "cat-file", "-s", commit+":audit.pack")
 		if err != nil {
 			continue
@@ -1002,19 +1018,28 @@ func auditHistoryPackSizesAt(gitdir, root string, sizes map[string]int64, add fu
 		if err != nil {
 			return err
 		}
-		current := map[string]int64{}
-		if _, err := auditPackObjectIDsAndSizes(pack, len(commit), current); err != nil {
+		if err := auditPackSizes(pack, len(commit), sizes, add); err != nil {
 			return err
 		}
-		for id, size := range current {
-			if _, seen := sizes[id]; seen {
-				continue
-			}
-			sizes[id] = size
-			if add != nil {
-				if err := add(id, size); err != nil {
-					return err
-				}
+	}
+	return nil
+}
+
+// auditPackSizes records in sizes the expanded size of each object of pack
+// that it does not hold yet, calling add for each such object.
+func auditPackSizes(pack []byte, oidLength int, sizes map[string]int64, add func(string, int64) error) error {
+	current := map[string]int64{}
+	if _, err := auditPackObjectIDsAndSizes(pack, oidLength, current); err != nil {
+		return err
+	}
+	for id, size := range current {
+		if _, seen := sizes[id]; seen {
+			continue
+		}
+		sizes[id] = size
+		if add != nil {
+			if err := add(id, size); err != nil {
+				return err
 			}
 		}
 	}

@@ -104,7 +104,9 @@ const (
 	// serveHostedFactEventsCeiling is the client reader's event limit.
 	serveHostedFactEventsCeiling = 100_000
 	// serveHostedFactBytesCeiling is the client reader's aggregate byte
-	// limit: event.json, signature and run log bytes of all hosted events.
+	// limit: event.json, signature and attachment bytes of all hosted
+	// events. The attachments are run logs, audit packs and audit result
+	// logs.
 	serveHostedFactBytesCeiling = 256 << 20
 
 	serveHostedFactEventsBudget = "hosted-fact-events"
@@ -133,7 +135,8 @@ func (ceilings serveHostedFactCeilings) readLimits() issueReadLimits {
 }
 
 // serveFactUsage is what the hosted fact reader spends on a set of events:
-// one event each, and the bytes of each event.json, signature and run log.
+// one event each, and the bytes of each event.json, signature and typed
+// attachment: a run log, an audit pack or an audit result log.
 type serveFactUsage struct {
 	Events, Bytes int64
 }
@@ -143,9 +146,9 @@ func (usage serveFactUsage) plus(other serveFactUsage) serveFactUsage {
 }
 
 // hostedFactUsage measures the hosted events the way the reader counts
-// them. event.json and the run log are in memory already; the signature is
-// stored base64-encoded and its blob may hold surrounding whitespace, so
-// the batched object query gives the exact blob sizes.
+// them. event.json and the attachments are in memory already; the
+// signature is stored base64-encoded and its blob may hold surrounding
+// whitespace, so the batched object query gives the exact blob sizes.
 func (ctx *serveVerdictContext) hostedFactUsage() (serveFactUsage, error) {
 	hosted, err := ctx.HostedEvents()
 	if err != nil {
@@ -157,14 +160,18 @@ func (ctx *serveVerdictContext) hostedFactUsage() (serveFactUsage, error) {
 	}
 	usage := serveFactUsage{Events: int64(len(hosted))}
 	for _, event := range hosted {
-		usage.Bytes += int64(len(event.Payload)+len(event.Attachments["log.txt"])) + objects[event.Commit].SignatureBytes
+		usage.Bytes += int64(len(event.Payload)) + objects[event.Commit].SignatureBytes
+		for _, attachment := range event.Attachments {
+			usage.Bytes += int64(len(attachment))
+		}
 	}
 	return usage, nil
 }
 
 // serveHostedEventObjects is what one hosted event commit reaches besides
-// itself: the object IDs of its tree, event.json, signature and, for a run
-// result, log.txt, and the stored size of its signature blob.
+// itself: the object IDs of its tree, event.json, signature and, when
+// present, log.txt and audit.pack, and the stored size of its signature
+// blob.
 type serveHostedEventObjects struct {
 	IDs            []string
 	SignatureBytes int64
@@ -190,7 +197,7 @@ func (ctx *serveVerdictContext) hostedEventObjects() (map[string]serveHostedEven
 // decoded content: a signature blob may hold whitespace the reader trims,
 // and any of these blobs can recur later, for example as a run log.
 func serveEventObjects(gitDir string, events []StoredEvent) (map[string]serveHostedEventObjects, error) {
-	paths := []string{"^{tree}", ":event.json", ":signature", ":log.txt"}
+	paths := []string{"^{tree}", ":event.json", ":signature", ":log.txt", ":audit.pack"}
 	input := make([]string, 0, len(paths)*len(events))
 	for _, event := range events {
 		for _, path := range paths {
@@ -207,7 +214,7 @@ func serveEventObjects(gitDir string, events []StoredEvent) (map[string]serveHos
 		for offset, path := range paths {
 			answer := answers[index*len(paths)+offset]
 			if !answer.Found {
-				if path == ":log.txt" {
+				if path == ":log.txt" || path == ":audit.pack" {
 					continue
 				}
 				return nil, fmt.Errorf("hosted %s%s is missing", event.Commit, path)
@@ -279,12 +286,12 @@ func serveBlobSizes(gitDir string, paths []string) ([]int64, error) {
 
 // serveAppendedFactUsage measures the appended commits the way the reader
 // will count them once they are hosted. event.json and signature must be
-// present; log.txt counts wherever it is, which chain validation later
-// allows only for a run result.
+// present; log.txt and audit.pack count wherever they are, which chain
+// validation later allows only for the kinds that carry them.
 func serveAppendedFactUsage(gitDir string, commits []string) (serveFactUsage, error) {
-	paths := make([]string, 0, 3*len(commits))
+	paths := make([]string, 0, 4*len(commits))
 	for _, commit := range commits {
-		paths = append(paths, commit+":event.json", commit+":signature", commit+":log.txt")
+		paths = append(paths, commit+":event.json", commit+":signature", commit+":log.txt", commit+":audit.pack")
 	}
 	sizes, err := serveBlobSizes(gitDir, paths)
 	if err != nil {
@@ -293,7 +300,7 @@ func serveAppendedFactUsage(gitDir string, commits []string) (serveFactUsage, er
 	usage := serveFactUsage{Events: int64(len(commits))}
 	for index, size := range sizes {
 		if size < 0 {
-			if strings.HasSuffix(paths[index], ":log.txt") {
+			if strings.HasSuffix(paths[index], ":log.txt") || strings.HasSuffix(paths[index], ":audit.pack") {
 				continue
 			}
 			return serveFactUsage{}, fmt.Errorf("%s is not a blob", paths[index])
@@ -656,6 +663,13 @@ func serveFirstFailingActorEvent(gitDir, actor, oldHead, newHead string, prefix 
 // its objects and its attachments; only oldHead..newHead is walked. It
 // measures sizes and counts and verifies no signature.
 //
+// Audit facts carry audit.pack, which expands to snapshot objects outside
+// the chain's graph. As the client does, each expanded object of an
+// appended pack counts once, before any pack is unpacked, unless a hosted
+// event of the chain already carries it in its pack; the hosted packs are
+// in memory from the batched read. audit.pack and an audit result's
+// log.txt count as attachments.
+//
 // The objects counted are those reachable from newHead and not from
 // oldHead. git rev-list --not excludes every hosted commit but only the
 // trees and blobs of oldHead itself, so every object an earlier hosted
@@ -671,7 +685,8 @@ func serveFirstFailingActorEvent(gitDir, actor, oldHead, newHead string, prefix 
 // stops early only on events and objects, which come first in that order,
 // and otherwise measures every byte dimension before it checks the
 // budgets. That work stays bounded: it sizes at most max-objects objects
-// and at most max-events attachments without reading their contents.
+// and at most two attachments per event, and reads only the appended
+// audit packs, one at a time and each within the protocol's pack bound.
 func measureServeActorRangeUnderBudgets(gitDir, oldHead, newHead string, hostedPrefix []StoredEvent, budgets ReplicationBudgets, selectionID string) (ReplicationMeasurements, error) {
 	hostedObjects, err := serveEventObjects(gitDir, hostedPrefix)
 	if err != nil {
@@ -764,22 +779,46 @@ func measureServeActorRange(gitDir, oldHead, newHead string, hostedPrefix []Stor
 	}
 
 	// Attachments: the hosted prefix's, then each appended commit's
-	// log.txt, the only attachment an actor event can carry.
+	// log.txt and audit.pack, the attachments an actor event can carry.
 	for _, event := range hostedPrefix {
 		for _, attachment := range event.Attachments {
 			measurements.LargestAttachmentBytes = max(measurements.LargestAttachmentBytes, int64(len(attachment)))
 		}
 	}
-	logs := make([]string, 0, len(appended))
+	attachments := make([]string, 0, 2*len(appended))
 	for _, commit := range appended {
-		logs = append(logs, commit+":log.txt")
+		attachments = append(attachments, commit+":log.txt", commit+":audit.pack")
 	}
-	sizes, err := serveBlobSizes(gitDir, logs)
+	sizes, err := serveBlobSizes(gitDir, attachments)
 	if err != nil {
 		return ReplicationMeasurements{}, nil, fmt.Errorf("measure appended attachments: %w", err)
 	}
-	for _, size := range sizes {
+	packed := make([]string, 0)
+	for index, size := range sizes {
 		measurements.LargestAttachmentBytes = max(measurements.LargestAttachmentBytes, size)
+		if size >= 0 && index%2 == 1 {
+			packed = append(packed, appended[index/2])
+		}
+	}
+
+	// Expanded audit snapshots, discounting the hosted prefix's packs.
+	previous := make(map[string]int64)
+	for _, event := range hostedPrefix {
+		if pack, ok := event.Attachments["audit.pack"]; ok {
+			if err := auditPackSizes(pack, len(event.Commit), previous, nil); err != nil {
+				return ReplicationMeasurements{}, nil, fmt.Errorf("measure hosted audit snapshots: %w", err)
+			}
+		}
+	}
+	counting := budgets
+	counting.MaxObjectBytes, counting.MaxAttachmentBytes, counting.MaxTotalBytes = math.MaxInt64, math.MaxInt64, math.MaxInt64
+	measurements, err = measureAuditCommitPacksAt(gitDir, packed, previous, counting, selectionID, measurements)
+	if err != nil {
+		var exceeded replicationBudgetExceeded
+		if errors.As(err, &exceeded) {
+			return measurements, appended, err
+		}
+		return ReplicationMeasurements{}, nil, fmt.Errorf("measure appended audit snapshots: %w", err)
 	}
 
 	if err := enforceReplicationBudgets(selectionID, budgets, measurements); err != nil {
