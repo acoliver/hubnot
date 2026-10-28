@@ -32,11 +32,138 @@ type AutomergePolicy struct {
 	Rules []AutomergeRule `json:"rules"`
 }
 type AutomergeRule struct {
-	Name         string   `json:"name"`
-	TargetBranch string   `json:"targetBranch"`
-	Actors       []string `json:"actors"`
-	Authors      []string `json:"authors"`
-	Paths        []string `json:"paths"`
+	Name         string              `json:"name"`
+	TargetBranch string              `json:"targetBranch"`
+	Actors       []string            `json:"actors"`
+	Authors      []string            `json:"authors"`
+	Paths        []string            `json:"paths"`
+	Acceptance   AutomergeAcceptance `json:"acceptance,omitzero"`
+	Reviewers    AutomergeReviewers  `json:"reviewers,omitzero"`
+}
+
+const (
+	automergeAcceptanceMaintainers = "maintainers"
+	automergeAcceptanceRule        = "rule"
+)
+
+// AutomergeAcceptance is a rule's acceptance mode. Its decoder never
+// fails; validateOptionalPolicy refuses every value other than the
+// strings "maintainers" and "rule", because only there is the rule
+// name known for the message.
+type AutomergeAcceptance struct {
+	present bool
+	raw     json.RawMessage
+}
+
+// UnmarshalJSON is also called for null, because the field is a non-pointer
+// named type; presence is what lets validation refuse an explicit null.
+func (a *AutomergeAcceptance) UnmarshalJSON(raw []byte) error {
+	a.present = true
+	a.raw = append(json.RawMessage(nil), raw...)
+	return nil
+}
+
+func (a AutomergeAcceptance) MarshalJSON() ([]byte, error) {
+	if !a.present {
+		return []byte("null"), nil
+	}
+	return a.raw, nil
+}
+
+func (a AutomergeAcceptance) IsZero() bool { return !a.present }
+
+// Mode is meaningful only after validation has accepted the rule.
+func (a AutomergeAcceptance) Mode() string {
+	mode, _ := a.parse()
+	return mode
+}
+
+func (a AutomergeAcceptance) Standing() bool { return a.Mode() == automergeAcceptanceRule }
+
+func (a AutomergeAcceptance) parse() (string, bool) {
+	if !a.present {
+		return automergeAcceptanceMaintainers, true
+	}
+	// null decodes to "" without error and is refused with the other values.
+	var mode string
+	if err := json.Unmarshal(a.raw, &mode); err != nil {
+		return "", false
+	}
+	if mode != automergeAcceptanceMaintainers && mode != automergeAcceptanceRule {
+		return "", false
+	}
+	return mode, true
+}
+
+func automergeAcceptanceOf(mode string) AutomergeAcceptance {
+	raw, err := json.Marshal(mode)
+	if err != nil {
+		panic(err)
+	}
+	return AutomergeAcceptance{present: true, raw: raw}
+}
+
+// AutomergeReviewers lists the trusted reviewers whose approvals count for a
+// rule. Like AutomergeAcceptance, its decoder never fails and keeps the raw
+// value for validateOptionalPolicy.
+type AutomergeReviewers struct {
+	present bool
+	raw     json.RawMessage
+}
+
+func (r *AutomergeReviewers) UnmarshalJSON(raw []byte) error {
+	r.present = true
+	r.raw = append(json.RawMessage(nil), raw...)
+	return nil
+}
+
+func (r AutomergeReviewers) MarshalJSON() ([]byte, error) {
+	if !r.present {
+		return []byte("null"), nil
+	}
+	return r.raw, nil
+}
+
+func (r AutomergeReviewers) IsZero() bool { return !r.present }
+
+// Actors is meaningful only after validation has accepted the rule. It
+// returns nil when the field is absent.
+func (r AutomergeReviewers) Actors() []string {
+	actors, _ := r.parse()
+	return actors
+}
+
+func (r AutomergeReviewers) parse() ([]string, bool) {
+	if !r.present {
+		return nil, true
+	}
+	// Decode element by element so null, [null] and non-string members are
+	// refused rather than silently becoming empty strings.
+	var items []json.RawMessage
+	if err := json.Unmarshal(r.raw, &items); err != nil || items == nil {
+		return nil, false
+	}
+	actors := make([]string, 0, len(items))
+	for _, item := range items {
+		item = bytes.TrimSpace(item)
+		var actor string
+		if len(item) == 0 || item[0] != '"' || json.Unmarshal(item, &actor) != nil {
+			return nil, false
+		}
+		actors = append(actors, actor)
+	}
+	return actors, true
+}
+
+func automergeReviewersOf(actors ...string) AutomergeReviewers {
+	if actors == nil {
+		actors = []string{}
+	}
+	raw, err := json.Marshal(actors)
+	if err != nil {
+		panic(err)
+	}
+	return AutomergeReviewers{present: true, raw: raw}
 }
 
 type ProtectedChecksEvaluation struct {
@@ -81,17 +208,95 @@ func validateOptionalPolicy(policy PolicyDocument) error {
 					return err
 				}
 			}
-			for _, actor := range r.Actors {
-				if !actorListed(actor, policy.Maintainers) {
-					return fmt.Errorf("automerge rule %q actor %s is not a maintainer", r.Name, actor)
+			// A rule without the new fields keeps its historic check order, in
+			// which the maintainer check precedes the path check.
+			if r.Acceptance.IsZero() && r.Reviewers.IsZero() {
+				if err := validateAutomergeMaintainerActors(policy, r); err != nil {
+					return err
 				}
 			}
 			if err := validatePolicyPaths("automerge rule "+r.Name+" paths", r.Paths, true); err != nil {
 				return err
 			}
+			if err := validateAutomergeRuleFields(policy, r); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
+}
+
+func validateAutomergeMaintainerActors(policy PolicyDocument, r AutomergeRule) error {
+	for _, actor := range r.Actors {
+		if !actorListed(actor, policy.Maintainers) {
+			return fmt.Errorf("automerge rule %q actor %s is not a maintainer", r.Name, actor)
+		}
+	}
+	return nil
+}
+
+// validateAutomergeRuleFields applies the acceptance and reviewer rules in
+// the order of contracts/policy-rule-fields.md and returns the first failure.
+func validateAutomergeRuleFields(policy PolicyDocument, r AutomergeRule) error {
+	mode, ok := r.Acceptance.parse()
+	if !ok {
+		return fmt.Errorf("automerge rule %q acceptance must be %q or %q", r.Name, automergeAcceptanceMaintainers, automergeAcceptanceRule)
+	}
+	reviewers, ok := r.Reviewers.parse()
+	if !ok {
+		return fmt.Errorf("automerge rule %q reviewers must be an array of actor fingerprints", r.Name)
+	}
+	if mode == automergeAcceptanceMaintainers {
+		if err := validateAutomergeMaintainerActors(policy, r); err != nil {
+			return err
+		}
+	}
+	if mode == automergeAcceptanceRule && policy.Proposals.RequiredApprovals == 0 {
+		return fmt.Errorf("automerge rule %q has acceptance %q, which requires proposals.requiredApprovals of at least 1", r.Name, automergeAcceptanceRule)
+	}
+	if !r.Reviewers.IsZero() {
+		if len(reviewers) < 1 || len(reviewers) > maxPolicyRules {
+			return fmt.Errorf("automerge rule %q requires 1 to %d reviewers when reviewers is present", r.Name, maxPolicyRules)
+		}
+		if err := validateActorList("automerge reviewers", reviewers); err != nil {
+			return err
+		}
+		for _, reviewer := range reviewers {
+			if !actorListed(reviewer, policy.Proposals.TrustedReviewers) {
+				return fmt.Errorf("automerge rule %q reviewer %s is not a trusted reviewer", r.Name, reviewer)
+			}
+		}
+		if len(reviewers) < policy.Proposals.RequiredApprovals {
+			return fmt.Errorf("automerge rule %q lists %d reviewers, fewer than proposals.requiredApprovals (%d)", r.Name, len(reviewers), policy.Proposals.RequiredApprovals)
+		}
+	}
+	if mode != automergeAcceptanceRule {
+		return nil
+	}
+	// A standing rule must never authorize a change to policy, pipeline
+	// definitions or protected-check paths (FR-003, C-007).
+	for _, p := range r.Paths {
+		if q := strings.TrimSuffix(p, "/"); q == ".hn" || strings.HasPrefix(q, ".hn/") {
+			return fmt.Errorf("automerge rule %q path %q covers .hn, which a rule with acceptance %q cannot cover", r.Name, p, automergeAcceptanceRule)
+		}
+	}
+	if policy.ProtectedChecks != nil {
+		for _, p := range r.Paths {
+			for _, protected := range policy.ProtectedChecks.Paths {
+				if automergeSelectorsOverlap(p, protected) {
+					return fmt.Errorf("automerge rule %q path %q overlaps protected check path %q", r.Name, p, protected)
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// automergeSelectorsOverlap reports whether a rule selector and a
+// protected selector are equal or one is an ancestor of the other.
+func automergeSelectorsOverlap(rule, protected string) bool {
+	r, p := strings.TrimSuffix(rule, "/"), strings.TrimSuffix(protected, "/")
+	return r == p || strings.HasPrefix(p, r+"/") || strings.HasPrefix(r, p+"/")
 }
 
 func validatePolicyPaths(label string, paths []string, nonempty bool) error {
@@ -268,17 +473,28 @@ func validateProtectedDecisionAt(gitDir, acceptedGitDir string, policy PolicyDoc
 	if policy.ProtectedChecks == nil {
 		return nil
 	}
-	changed, err := changedPathsAt(gitDir, proposal.Event.Base, proposal.Event.Head)
-	// Selected proposal fetches supply both commits in the isolated quarantine.
-	// Otherwise an already accepted proposal may supply both. Require one
-	// complete store; never treat a missing side as an empty or partial diff.
-	if err != nil && acceptedGitDir != "" && acceptedGitDir != gitDir {
-		changed, err = changedPathsAt(acceptedGitDir, proposal.Event.Base, proposal.Event.Head)
-	}
+	changed, err := changedPathsInOneStore(gitDir, acceptedGitDir, proposal.Event.Base, proposal.Event.Head)
 	if err != nil {
 		return fmt.Errorf("protected checks: %w", err)
 	}
 	return validateProtectedDecisionEvidence(policy, decision, proposal, byID, changed)
+}
+
+// changedPathsInOneStore computes base..head changed paths from the
+// quarantine, else from the accepted store. It never pairs a commit from
+// one store with a commit from the other, and never treats a missing side
+// as an empty or partial diff.
+func changedPathsInOneStore(gitDir, acceptedGitDir, base, head string) ([]string, error) {
+	// Selected proposal fetches supply both commits in the isolated quarantine.
+	// Otherwise an already accepted proposal may supply both.
+	changed, err := changedPathsAt(gitDir, base, head)
+	if err != nil && acceptedGitDir != "" && acceptedGitDir != gitDir {
+		changed, err = changedPathsAt(acceptedGitDir, base, head)
+	}
+	if err != nil {
+		return nil, err
+	}
+	return changed, nil
 }
 
 func guardTargetProtectedPolicy(target string, evaluation *ProposalEvaluation) error {
