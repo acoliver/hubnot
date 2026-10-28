@@ -465,7 +465,9 @@ configuration before object evaluation. Use a full clone, or explicitly hydrate
 and reconcile its configuration outside this command. Downloading some missing
 objects alone does not make a configured partial clone eligible. Selected data
 that suffices for an ordinary manual merge does not waive this full-repository
-requirement. Automerge does not fetch or invoke shallow recovery.
+requirement. Automerge does not fetch missing objects or invoke shallow
+recovery. With `--remote`, it imports hosted facts with `hn sync` only after
+these checks pass (see [Commit path, publication and recovery](#commit-path-publication-and-recovery)).
 
 #### Executing a standing rule
 
@@ -553,8 +555,8 @@ Merged by rule ordinary, signed by <executor-actor> in fact <fact-id>
 
 ### Commit path, publication and recovery
 
-Automatic execution creates a native two-parent merge commit from the verified
-head tree and uses an expected-old Git ref transaction for the actual target
+Automatic execution without `--remote` creates a native two-parent merge commit
+from the verified head tree and uses an expected-old Git ref transaction for the actual target
 advance. It rechecks current evidence and target while holding that lease, then
 records the signed `proposal.merged` fact: with the exact acceptances under
 acceptance mode `maintainers`, or as a rule merge fact under a standing rule.

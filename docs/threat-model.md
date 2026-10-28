@@ -248,16 +248,33 @@ execution.
 Preview loads no signing key and changes no collaboration refs, target, index or
 private identity state. It refuses shallow and active partial/promisor clones
 before object evaluation, preventing lazy fetch or recovery writes in this
-command. The supported automatic path uses complete local Git data. Neither
-preview nor execution fetches, starts a daemon, executes a workflow, synchronizes
-or publishes; normal native operation does not need a provider or network
-service. Existing explicit local CI host execution remains separately unsafe
-and separately opted in per invocation.
+command. The supported automatic path uses complete local Git data. Preview,
+and execution without `--remote`, fetch no objects, start no daemon, execute
+no workflow, and neither synchronize nor publish; normal native operation does
+not need a provider or network service. When the rule's target branch tracks a
+remote, execution without `--remote` reads only that remote's
+`refs/hn/serve/v1` advertisement with `git ls-remote`. It refuses an upstream
+that is an `hn serve` remote, or one it cannot reach to tell, before it creates
+a merge commit or merge fact. Existing explicit local CI host execution remains
+separately unsafe and separately opted in per invocation.
 
-Execution rechecks current candidate/evidence and target, binds its actual
-signer, and advances the target using the signed-base expected-old ref lease.
-It refuses an unfinished Git operation, dirty index/worktree or an ignored-file
-collision. Automatic `commit-tree` creation does not invoke `pre-merge-commit`
+Execution with `--remote REMOTE` contacts the network and has side effects
+before and after the hosted advancement. It first checks that `REMOTE`
+identifies as an `hn serve` remote and that its replication selection imports
+every trusted actor. It then runs `hn sync REMOTE`, which imports the hosted
+facts and publishes the local actor chains. That publication happens even when
+the rule evaluation that follows the import refuses the advancement. After the
+second evaluation, the client asks the server to fast-forward the hosted target
+branch to the signed proposal head; no local merge commit is created. Once the
+server applies the update, the client records the merge fact and publishes it.
+A rerun after the rule merge fact exists takes the publication-only path, which
+publishes the existing fact and confirms the hosted branch without advancing it
+(`docs/serve-v0.md`, "Automerge rules" and "Rerunning a rule advancement").
+
+Local execution, without `--remote`, rechecks current candidate/evidence and
+target, binds its actual signer, and advances the local target using the
+signed-base expected-old ref lease. It refuses an unfinished Git operation,
+dirty index/worktree or an ignored-file collision. Automatic `commit-tree` creation does not invoke `pre-merge-commit`
 or `pre-commit` hooks: required checks must be configured as native pipelines.
 Operator-controlled Git `reference-transaction` hooks remain outside proposal
 instructions and retain Git behavior.
