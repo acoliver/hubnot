@@ -907,10 +907,14 @@ reported:
 4. Each appended event must carry a valid signature by the chain's actor,
    continue the sequence and the previous event ID, have the previous
    event's commit as its only parent, and hold exactly `event.json`,
-   `signature` and, for a run result, `log.txt`. A failure is
+   `signature` and the typed attachments of its kind: `log.txt` for a run
+   result, `audit.pack` for an audit fact and both for an audit result, as
+   described under [Audit facts](#audit-facts). A failure is
    `actor-chain-invalid` and names the full event ID of the first failing
    event, computed from its `event.json` even when the signature is broken,
-   or its commit when `event.json` cannot be read.
+   or its commit when `event.json` cannot be read. When the signature
+   verifies and an attachment does not, the sentence quotes the failed
+   attachment check.
 5. Every fact an appended event refers to, such as the issue a comment
    answers, the proposal a review or run request names, decision evidence or
    an identity authorization, must be hosted or arrive earlier in the same
@@ -923,11 +927,56 @@ reported:
 
 The server reads the hosted facts once per push and validates only the
 events the push appends, so the cost of a push grows with what it adds.
+The one exception is hosted audit facts: the read verifies each hosted
+`audit.pack` again, so verdict time also grows with the number of hosted
+audit facts and the size of their snapshots.
 
 The server's acceptance is never evidence. A client that fetches from this
 server validates every fact again before it uses it, and a signed fact is
 trusted only through the policy at the relevant commit. A server that
 accepted a forged fact would still not make clients trust it.
+
+### Audit facts
+
+[Native observational audits](audits-v1.md) are events in the signer's
+actor chain, so they reach the server in an ordinary actor push and pass the
+checks above. Each audit event also holds `audit.pack`, the inert snapshot
+pack described under
+[Snapshot dependency transport and admission](audits-v1.md#snapshot-dependency-transport-and-admission),
+and an `audit.result` holds its `log.txt` as well. The server checks them
+with the code `hn sync` uses when it imports the same chain:
+
+- The server parses `audit.pack` and hashes each object before Git reads it.
+  It then indexes the pack with `git index-pack --fsck-objects` in a private
+  temporary repository and compares its objects with the exact set the signed
+  fact names. Git sets `GIT_QUARANTINE_PATH`, `GIT_OBJECT_DIRECTORY` and
+  `GIT_ALTERNATE_OBJECT_DIRECTORIES` for the `pre-receive` hook. The server
+  removes them, and the other variables that point Git at another repository
+  or object store, for every command in the temporary repository, so hosted
+  objects cannot supply an object the pack omits. Only a verified pack is
+  installed, and only into the push's quarantine, so a rejected push leaves
+  the hosted object database unchanged.
+- An audit result's `log.txt` must match the signed `log` digest and stay
+  within 1 MiB.
+- The rule predecessors, authorization, request and native workflow
+  revision an audit event names must be hosted or arrive earlier in the same
+  push, otherwise `dependency-missing`.
+- The signer must hold the audit role in the policy at the event's recorded
+  policy commit, which travels in the pack. This is historical validity. The
+  hosted branches need no `audits` section, and the server never reads or
+  sets a private audit authority selection, so an accepted audit fact gives
+  nobody current authority to request or execute audits.
+
+Audit attachments count toward the budgets and the hosted fact ceilings as
+described under [Budgets](#budgets) and
+[Hosted fact ceilings](#hosted-fact-ceilings).
+
+Audits are observational on protected branches. A protected update never
+counts an audit fact as a review, CI result, decision or merge evidence. A
+failed audit of a ready candidate's head does not block the update, and a
+passing audit does not supply a missing CI result, even when the audit rule
+runs the protected pipeline's own definition and its executor is a trusted
+runner.
 
 ### Proposal code refs and the code-ref exception
 
@@ -982,10 +1031,10 @@ and `hn serve repo set NAME` changes them (see
 | Budget | Default | What is measured for one pushed ref |
 |----|----|----|
 | `max-events` | 10000 | events in the whole actor chain or memory stream after the push, hosted ones included |
-| `max-objects` | 100000 | Git objects the push makes reachable from the ref that the hosted value did not already reach |
-| `max-object-bytes` | 67108864 (64 MiB) | the largest of those objects |
-| `max-attachment-bytes` | 16777216 (16 MiB) | the largest event attachment in the chain, such as a run log |
-| `max-total-bytes` | 1073741824 (1 GiB) | the total size of those objects |
+| `max-objects` | 100000 | Git objects the push makes reachable from the ref that the hosted value did not already reach, plus the snapshot objects its audit packs expand to |
+| `max-object-bytes` | 67108864 (64 MiB) | the largest of those objects, expanded snapshot objects included |
+| `max-attachment-bytes` | 16777216 (16 MiB) | the largest event attachment in the chain: a run log, an `audit.pack` or an audit result log |
+| `max-total-bytes` | 1073741824 (1 GiB) | the total size of those objects, expanded snapshot objects included |
 
 Limits are inclusive: a measurement equal to its limit passes, and one above
 it is rejected with `over-budget`. The rejection line names the first budget
@@ -1004,6 +1053,13 @@ For an actor ref the server counts the same objects and bytes that client
 replication counts for the same chain, so a push measured at exactly a limit
 on the client is accepted.
 
+An `audit.pack` counts twice. As an attachment and as a Git object of the
+chain it counts at its stored, compressed size. The objects it expands to
+count as well, at their expanded sizes, before the server unpacks anything:
+a 1 MiB file that compresses into a 2 KB pack counts as a 1 MiB object. An
+expanded object that an `audit.pack` of the hosted chain already holds is not
+counted again, and one that several packs of the same push hold counts once.
+
 A proposal code ref is new when it is pushed, so its measurement covers every
 object reachable from the proposal's head, including the history it shares
 with hosted branches, the way client replication measures a new proposal
@@ -1020,11 +1076,11 @@ the same aggregate limits `hn` uses when it reads issue history in a clone:
 | Ceiling | Value | What is counted |
 |----|----|----|
 | `hosted-fact-events` | 100000 | events in all hosted actor chains together |
-| `hosted-fact-bytes` | 268435456 (256 MiB) | bytes of every hosted event's `event.json`, `signature` and run log together |
+| `hosted-fact-bytes` | 268435456 (256 MiB) | bytes of every hosted event's `event.json`, `signature` and attachments together: run logs, audit packs and audit result logs |
 
-A single object may use the whole byte ceiling, so any event and run log the
-five budgets admit can be read back, whatever the budgets were when it was
-admitted. A run log of up to 16 MiB is accepted with the default budgets and
+A single object may use the whole byte ceiling, so any event and attachment
+the five budgets admit can be read back, whatever the budgets were when it
+was admitted. A run log of up to 16 MiB is accepted with the default budgets and
 stays readable on every later push.
 
 The server checks the ceilings before it accepts an actor chain. A push that
@@ -1880,8 +1936,8 @@ git diff --check
 | FR-004 | Managed authorized_keys | `TestServeKeysMergeGoldenCases`, `TestServeKeysWritePreservesAdministratorLines`, `TestServeAdminKeysMaintainAuthorizedKeys`, `TestServeSSHDRoundTrip` |
 | FR-005 | Forced-command dispatch | `TestParseServeRequestAcceptsEveryGrammarForm`, `TestParseServeRequestRefusesEverythingElse`, `TestServeSessionUnsupportedCommandsRefusedWithoutChanges`, `TestServeSessionUnsafeAndUnhostedPathsRefused` |
 | FR-006 | Push attribution | `TestServePushBranchOwnershipAndPushLog`, `TestBuildServeGitEnvironmentKeepsOnlyServerValues` |
-| FR-007 | Actor chain check | `TestServeFactsActorKeyMismatch`, `TestServeFactsAlteredEventIsInvalid`, `TestServeFactsActorChainRewrite`, `TestServeFactsDependencyMissing`, `TestValidationSeamsActorRangeValidation` |
-| FR-008 | Protected-branch check | `TestServeProtectedAcceptsGovernedDirectPush`, `TestServeProtectedNotReady`, `TestServeProtectedBlocked`, `TestServeProtectedDestinationPolicy`, `TestServeProtectedNotFastForwardAndStaleTip` |
+| FR-007 | Actor chain check | `TestServeFactsActorKeyMismatch`, `TestServeFactsAlteredEventIsInvalid`, `TestServeFactsActorChainRewrite`, `TestServeFactsDependencyMissing`, `TestValidationSeamsActorRangeValidation`, `TestServeAuditFactsPushReadAndSync`, `TestAuditPackVerificationIgnoresReceiveEnvironment`, `TestServeAuditTamperedAttachmentsRefusedByPushAndReaders` |
+| FR-008 | Protected-branch check | `TestServeProtectedAcceptsGovernedDirectPush`, `TestServeProtectedNotReady`, `TestServeProtectedBlocked`, `TestServeProtectedDestinationPolicy`, `TestServeProtectedNotFastForwardAndStaleTip`, `TestServeAuditObservationalOnProtectedBranches` |
 | FR-009 | Tested commit only | `TestServeProtectedNotReady`, `TestServeAdvanceFastForwardsAndVerifies`, `TestServeAdvanceRefusesNotFastForward` |
 | FR-010 | Rules for other governed ref classes | `TestServeFactsProposalRefRules`, `TestServeFactsMemoryRefRules`, `TestServePushTagsAndReservedRefs`, `TestServeProtectedCreationAndDeletion` |
 | FR-011 | Ordinary branches | `TestServePushBranchOwnershipAndPushLog`, `TestServePushDocumentedExample` |
@@ -1898,16 +1954,16 @@ git diff --check
 | FR-022 | Protected-update serialization | `TestServeSessionPushWaitsForLockAndFetchDoesNot`, `TestServeProtectedNotFastForwardAndStaleTip`, `TestServeAdvanceConcurrentMaintainers` |
 | FR-023 | Documentation with tested examples | `TestServeQualityDocumentedExamplesAreExecuted`, `TestServeQualityTraceabilityTestsExist`, `TestServeReasonsDocsTableMatchesCatalogue` |
 | NFR-001 | Push verdict time | `TestServeQualityPushVerdictTimeNFR001` |
-| NFR-002 | Bounded incoming data | `TestServeFactsBudgetsAreInclusive`, `TestServeFactsBudgetPriorityWithSeveralExceeded`, `TestServePushOverRefUpdateBudgetRejectsEveryRef` |
-| NFR-003 | Fail-closed handling | `TestServeSessionUnknownKeyRefused`, `TestServeStateValidationRefusesEachLayoutDefect`, `TestServeSessionUnsafeAndUnhostedPathsRefused`, `TestServeFactsAlteredEventIsInvalid`, `TestServeFactsDependencyMissing`, `TestServeProtectedPolicyInvalid` |
+| NFR-002 | Bounded incoming data | `TestServeFactsBudgetsAreInclusive`, `TestServeFactsBudgetPriorityWithSeveralExceeded`, `TestServePushOverRefUpdateBudgetRejectsEveryRef`, `TestServeAuditBudgetsCountPacksAndExpandedObjects`, `TestServeAuditHostedCeilingsCountAuditAttachments` |
+| NFR-003 | Fail-closed handling | `TestServeSessionUnknownKeyRefused`, `TestServeStateValidationRefusesEachLayoutDefect`, `TestServeSessionUnsafeAndUnhostedPathsRefused`, `TestServeFactsAlteredEventIsInvalid`, `TestServeFactsDependencyMissing`, `TestServeProtectedPolicyInvalid`, `TestServeAuditTamperedAttachmentsRefusedByPushAndReaders` |
 | NFR-004 | Least privilege | `TestServeQualityEnforcedWriteBoundary`, `TestServeQualityWrittenPathsAndModes`, `TestServeLFSEnforcedWriteBoundary`, `TestServeLFSWrittenPathsAndModes`, `TestServeAdminRefusesRoot`, `TestServeStateRootRefusalPrecedesEveryStateAccess` |
 | NFR-005 | Race safety | `TestServeAdvanceRaceNFR005` |
 | NFR-006 | Client independence | `TestServeAdvanceFastForwardsAndVerifies`, `TestServeReplicationPhaseZeroFlow`, `TestReplicationAllTrustedForgedMarkerGrantsNoTrust` |
 | NFR-007 | Regression gate | The full gate above, plus the tests that pin earlier behavior: `TestValidationSeamsBaseEvaluationEquivalence`, `TestServeAdvanceKeepsLocalMerge`, `TestReplicationAllTrustedSelectionFilesAndShowOutput` |
 | NFR-008 | Private server state | `TestServeQualityWrittenPathsAndModes`, `TestServeLFSWrittenPathsAndModes`, `TestServeAdminRefusesUnsafeState`, `TestServeStateValidationRefusesEachLayoutDefect`, `TestServeStateRegistryRefusesInvalidContent` |
 | SC-001 | Brief acceptance examples pass | The six tests in [Acceptance examples of the brief](#acceptance-examples-of-the-brief), checked by `TestServeQualityTraceabilityTestsExist` |
-| SC-002 | Rejected pushes change no ref | `TestServePushAllOrNothing`, `TestServeProtectedRejectsDirectPushWithoutProposal`, `TestServeReasonsParserRejectsMalformedLines` |
-| SC-003 | Protected tips carry CI and both acceptances | `TestServeProtectedAcceptsGovernedDirectPush`, `TestServeProtectedDestinationPolicy`, `TestServeProtectedNotReady` |
+| SC-002 | Rejected pushes change no ref | `TestServePushAllOrNothing`, `TestServeProtectedRejectsDirectPushWithoutProposal`, `TestServeReasonsParserRejectsMalformedLines`, `TestServeAuditTamperedAttachmentsRefusedByPushAndReaders` |
+| SC-003 | Protected tips carry CI and both acceptances | `TestServeProtectedAcceptsGovernedDirectPush`, `TestServeProtectedDestinationPolicy`, `TestServeProtectedNotReady`, `TestServeAuditObservationalOnProtectedBranches` |
 | SC-004 | Phase 0 flow without selections or direct main pushes | `TestServeReplicationPhaseZeroFlow`, `TestServeReplicationCommandLogChecks` |
 | SC-005 | Fresh verifier reproduces the evidence | `TestServeAdvanceFastForwardsAndVerifies`, `TestServeReplicationPhaseZeroFlow` |
 | SC-006 | Requirements map to tests and the gate passes | `TestServeQualityTraceabilityTestsExist` |
