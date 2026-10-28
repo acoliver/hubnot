@@ -1,13 +1,3 @@
----
-affected_files: []
-cycle_number: 1
-mission_slug: standing-acceptance-01M5VD2K
-reproduction_command:
-reviewed_at: '2026-10-28T10:30:40Z'
-reviewer_agent: user
-wp_id: WP18
----
-
 # WP18 review: changes requested
 
 Reviewed implementation commit `ea01d3f1189a37b957f0e6ca511f41fd8d79ab40` on integrated lane HEAD `f51c82d3d1952fad2096932e656c3bd4a03d6dd9`. Only WP18 is reviewed or transitioned by this verdict.
