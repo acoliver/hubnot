@@ -512,7 +512,7 @@
     },
     "WP16": {
       "actor": "user",
-      "agent": "llxprt",
+      "agent": null,
       "agent_profile": "__resolved_profile_absent__",
       "agent_profile_version": "__resolved_profile_version_absent__",
       "force_count": 1,
@@ -524,6 +524,7 @@
         "WP16 adds tests only to standing_fact_test.go (a2f975b, plus comment-only 65684a9). Four surfaces: local projection, replication import, shallow verifier with complete closure, and hn serve actor-chain check (signer pushes own actor ref with own key to a hosted repo mirrored from the bare remote by governed pushes). TestStandingFactMatrixAgreement: 68/68 rows (100%) agree, covering F01-F20 (all shapes of F19/F20) each refused with its contract check plus actor-chain-invalid naming the fact on serve with hosted refs unchanged, 20 matched controls accepted everywhere, F21/F22 missing-dependency table (serve dependency-missing naming the absent ID or commit), valid set US1/US4/US5-1/D1/FR-011/two pipelines, L01-L06, B1-B4, and TestStandingFactBoundary as a subtest. TestStandingFactMatrixChangedPathBound: 44,000-path candidate (8,844,000 bytes over the 8,388,608 bound) refused by preview, --execute and all four surfaces with the bound error. TestStandingFactMatrixExecutionAdmitted: 6 real-client rule merges (5 local, 1 via --remote to hn serve) admitted on all four surfaces. No surface disagreed, so no production file changed. Gate at a2f975b: gofmt clean, go vet and go build pass (rerun at 65684a9), race suite ok (hubnot 3475s), TestMemoryIndexTenThousandRecordsPerformanceAndRecovery ok without -race (11.5s). Logs under .scratch/wp/standing-acceptance-01M5VD2K/WP16."
       ],
       "provider": "__resolved_provider_absent__",
+      "review": null,
       "review_result": {
         "feedback_path": "/home/acoliver/projects/appaday/gitium/hubnot/kitty-specs/standing-acceptance-01M5VD2K/tasks/WP16-four-surface-matrix-and-agreement/review-cycle-1.md",
         "reference": "review-cycle://standing-acceptance-01M5VD2K/WP16-four-surface-matrix-and-agreement/review-cycle-1.md",
@@ -531,14 +532,14 @@
         "verdict": "changes_requested"
       },
       "role": "reviewer",
-      "shell_pid": 879728,
-      "shell_pid_created_at": "1793156826.03",
+      "shell_pid": null,
+      "shell_pid_created_at": null,
       "subtasks": {
-        "T076": "done",
-        "T077": "done",
-        "T078": "done",
-        "T079": "done",
-        "T080": "done"
+        "T076": "planned",
+        "T077": "planned",
+        "T078": "planned",
+        "T079": "planned",
+        "T080": "planned"
       }
     },
     "WP17": {
