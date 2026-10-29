@@ -41,6 +41,16 @@ const standingCompatFrozenCommit = "d881d9bcd0ade4fa1bce91061954a8582e8d9318"
 // upstream file exactly.
 var standingCompatUpstreamCommits = []string{
 	"01a152cfbb822a7be9ccbc51dac34e3caa0cf925", // 0.0.2-dev and follow-up fixes
+	"b7a08b3f23d59106868634a64c6d1e58fb4357bc", // upstream merge of our requesters and sync PRs
+}
+
+// standingCompatDeliberateChanges are pre-existing test files changed on
+// purpose after the snapshot, each for a reason recorded here. Every other
+// difference still fails.
+var standingCompatDeliberateChanges = map[string]string{
+	// Upstream now defines mustGitTextAtDir in replication_borrow_test.go
+	// (from our sync PR); the identical copy here had to go.
+	"serve_reasons_test.go": "duplicate test helper removed after merging upstream b7a08b3",
 }
 
 // standingCompatBuildTimeout bounds the older build, which competes with
@@ -825,6 +835,10 @@ func TestStandingCompatPreExistingTestsFrozen(t *testing.T) {
 		}
 		if standingCompatMatchesUpstream(t, source, line) {
 			upstream = append(upstream, line)
+			continue
+		}
+		if fields := strings.Split(line, "\t"); len(fields) == 2 && fields[0] == "M" && standingCompatDeliberateChanges[fields[1]] != "" {
+			t.Logf("deliberate change to %s: %s", fields[1], standingCompatDeliberateChanges[fields[1]])
 			continue
 		}
 		changed = append(changed, line)

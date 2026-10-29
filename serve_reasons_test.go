@@ -690,15 +690,6 @@ func TestServeWireRemoteIdentificationOutsideRepository(t *testing.T) {
 	}
 }
 
-func mustGitTextAtDir(t *testing.T, gitDir string, args ...string) string {
-	t.Helper()
-	value, err := gitTextAt(gitDir, args...)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return value
-}
-
 func TestServeReasonsRenderListSortsByOriginalRefBytes(t *testing.T) {
 	// Arrange: ',' (0x2c) sorts before '0' (0x30), but its replacement '?'
 	// (0x3f) sorts after it, so sorting rendered refs would invert the order.
