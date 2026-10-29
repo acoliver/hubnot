@@ -990,6 +990,16 @@ func guardShallowEventClosure(operation string) error {
 				return err
 			}
 		}
+		for _, reference := range auditReferences(event) {
+			if err := missing(reference, shallowSelectedFact, "", ""); err != nil {
+				return err
+			}
+		}
+		for _, commit := range auditObjectRoots(event) {
+			if err := requireExactDependency(exactDependency{Operation: operation, Kind: shallowBaseCommit, MissingID: commit, ObjectType: "commit"}); err != nil {
+				return err
+			}
+		}
 		switch event.Kind {
 		case "proposal.revise", "review.submit":
 			if err := missing(event.Subject, shallowCandidateEvent, replicationProposal, event.Subject); err != nil {
@@ -1015,6 +1025,18 @@ func guardShallowEventClosure(operation string) error {
 		case "proposal.merged":
 			if err := missing(event.Subject, shallowCandidateEvent, replicationProposal, event.Subject); err != nil {
 				return err
+			}
+			if event.Rule != "" {
+				// A fact with a rule claim may be judged by path (b), which
+				// reads every listed review and run result, so each is a
+				// selected fact (FR-013). Results require their requests
+				// through the run.result arm.
+				for _, evidence := range event.Evidence {
+					if err := missing(evidence, shallowSelectedFact, "", ""); err != nil {
+						return err
+					}
+				}
+				break
 			}
 			for _, evidence := range event.Evidence {
 				if err := missing(evidence, shallowDecision, "", ""); err != nil {
@@ -1393,6 +1415,88 @@ func guardProposalEvaluationDependencies(operation string, proposal *StoredEvent
 		return err
 	}
 	for name := range policy.Pipelines {
+		if err := guardPipelineDefinition(operation, proposal.Event.Head, name, proposal.ID, ""); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// shallowRuleMergeOperation is the verification scope of a path (b) gap
+// found by projection outside any command scope.
+const shallowRuleMergeOperation = "rule merge verification"
+
+// shallowRuleMergeGuard runs shallowRuleObjectGuard for the candidate of a
+// rule merge fact so that every gap it records is replayable. Inside a
+// shallow verification scope the gap keeps that scope, whose replay reruns
+// projection. Outside one, as when hn log projects after its closure check,
+// the gap records a rule merge scope naming the fact, so recovery imports
+// the candidate's supplier and then reverifies the complete projection
+// instead of probing only the missing object.
+func shallowRuleMergeGuard(merge, proposal StoredEvent) error {
+	if activeShallowVerificationScope != nil {
+		return shallowRuleObjectGuard(activeShallowVerificationScope.Operation, proposal, nil)
+	}
+	scope := shallowVerificationScope{Operation: shallowRuleMergeOperation, Subject: merge.ID}
+	return withShallowVerificationScope(scope, func() error {
+		return shallowRuleObjectGuard(scope.Operation, proposal, nil)
+	})
+}
+
+// shallowRuleObjectGuard requires, in a shallow repository, every Git object
+// path (b) reads for a rule merge fact of proposal, before the fact is
+// judged (FR-014): the base commit, the head with a proposal code ref equal
+// to it, the base policy blob and each base-policy pipeline definition at
+// the head. Every gap is a ShallowDependencyGap owned by the candidate, so
+// an absent object is never evaluated as an empty change list. It returns
+// nil in a complete repository, where local projection reports an absent
+// object itself. Only the rule path of local projection calls it, after
+// path (a) failed. events is the caller's projection, which, as in
+// guardProposalDependencies, no object guard reads.
+func shallowRuleObjectGuard(operation string, proposal StoredEvent, events []StoredEvent) error {
+	shallow, err := repositoryIsShallow()
+	if err != nil || !shallow {
+		return err
+	}
+	// The kinds are fixed here, unlike guardProposalDependencies, which
+	// reports a "proposal merge" base as a merge ancestor.
+	for _, dependency := range []exactDependency{
+		{Operation: operation, Kind: shallowBaseCommit, MissingID: proposal.Event.Base},
+		{Operation: operation, Kind: shallowProposalCodeRef, MissingID: proposal.Event.Head},
+	} {
+		dependency.ObjectType, dependency.OwnerKind, dependency.OwnerID = "commit", replicationProposal, proposal.ID
+		if err := requireExactDependency(dependency); err != nil {
+			return err
+		}
+	}
+	head, exists, err := proposalHead(proposal.ID)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return classifyShallowDependency(exactDependency{
+			Operation: operation, Kind: shallowProposalCodeRef, MissingID: proposal.Event.Head,
+			OwnerKind: replicationProposal, OwnerID: proposal.ID, RequiredRef: proposalRef(proposal.ID),
+		}, fmt.Errorf("proposal code ref is unavailable"))
+	}
+	if head != proposal.Event.Head {
+		return fmt.Errorf("proposal code ref does not match the signed proposal")
+	}
+	if err := guardBasePolicy(operation, proposal.Event.Base, replicationProposal, proposal.ID); err != nil {
+		return err
+	}
+	policy, _, _, err := loadPolicy(proposal.Event.Base)
+	if err != nil {
+		return err
+	}
+	for _, name := range rulePipelineNames(policy) {
+		// A pipeline the head does not define is no gap: derivation leaves
+		// it out of the definitions, as it does in a complete repository.
+		if _, defined, err := exactTreeEntry(proposal.Event.Head, ".hn/pipelines/"+name+".json"); err != nil {
+			return err
+		} else if !defined {
+			continue
+		}
 		if err := guardPipelineDefinition(operation, proposal.Event.Head, name, proposal.ID, ""); err != nil {
 			return err
 		}
@@ -1873,6 +1977,23 @@ func verifyShallowOperation(scope shallowVerificationScope) error {
 		}
 		_, err = loadPolicyFile("proposed", scope.ProposedFile)
 		return err
+	case shallowRuleMergeOperation:
+		// Projection judges every merge fact: path (a), and where it fails
+		// path (b) with its object guard and derivation. The fact must be
+		// in the accepted projection, so its absence is never success.
+		if err := guardShallowEventClosure(scope.Operation); err != nil {
+			return err
+		}
+		events, err := collectEvents()
+		if err != nil {
+			return err
+		}
+		for _, stored := range events {
+			if stored.ID == scope.Subject {
+				return nil
+			}
+		}
+		return fmt.Errorf("rule merge %s is not in the accepted projection", scope.Subject)
 	default:
 		return fmt.Errorf("unsupported shallow verification scope %q", scope.Operation)
 	}

@@ -16,6 +16,13 @@ import (
 // follow them in order. The command never creates a commit, never changes
 // the checkout and never moves a local branch (C-005). The server signs
 // nothing (C-006): the maintainer's client records the merge fact.
+//
+// hn automerge PROPOSAL --rule NAME --execute --remote REMOTE under a
+// standing rule runs the same steps with a rule binding: the rule replaces
+// the acceptance and maintainer checks of step 1, step 6 adds hn-rule, and
+// step 8 records a rule merge fact signed by the executing actor (C-008).
+// A rerun after that fact was recorded runs serveAdvancePublishOnly, which
+// only publishes and confirms (FR-020).
 
 const (
 	serveAdvanceUsage         = "usage: hn merge PROPOSAL [--remote REMOTE [--branch BRANCH]]"
@@ -106,7 +113,13 @@ func serveAdvanceInterrupt(step string) error {
 }
 
 // serveAdvanceRerun is the command a user reruns after an interruption.
-func serveAdvanceRerun(proposalID, remote, branchRef string) string {
+// Under a rule binding only the same hn automerge command can record the
+// rule merge fact, so that is the command named; the rule's target branch
+// is the advanced branch, so it takes no --branch.
+func serveAdvanceRerun(proposalID, remote, branchRef string, binding serveAdvanceBinding) string {
+	if binding.Rule != "" {
+		return "hn automerge " + proposalID + " --rule " + binding.Rule + " --execute --remote " + remote
+	}
 	command := "hn merge " + proposalID + " --remote " + remote
 	if branchRef != "refs/heads/"+serveAdvanceDefaultBranch {
 		command += " --branch " + strings.TrimPrefix(branchRef, "refs/heads/")
@@ -116,14 +129,32 @@ func serveAdvanceRerun(proposalID, remote, branchRef string) string {
 
 // serveAdvanceBinding pins an advancement to what a caller already checked.
 // ExpectedActor is the signing identity the caller authorized; ExpectedTip
-// is the hosted branch tip the caller inspected. Empty fields are unbound.
+// is the hosted branch tip the caller inspected; Rule names the standing
+// automerge rule that replaces maintainer acceptance (FR-016). Empty fields
+// are unbound, and hn merge --remote binds none of them.
 type serveAdvanceBinding struct {
 	ExpectedActor string
 	ExpectedTip   string
+	Rule          string
 }
 
 func cmdMergeRemote(proposalID, remote, branchRef string) error {
 	return mergeRemoteBound(proposalID, remote, branchRef, serveAdvanceBinding{})
+}
+
+// serveAdvanceRuleUnsupported reports whether a refused advancement that
+// named a rule came from a server that does not know hn-rule: such a server
+// rejects the unknown push option with unsupported-command.
+func serveAdvanceRuleUnsupported(rejections []serveRejection, rule string) bool {
+	if rule == "" {
+		return false
+	}
+	for _, rejection := range rejections {
+		if rejection.Code == serveReasonUnsupportedCommand {
+			return true
+		}
+	}
+	return false
 }
 
 func mergeRemoteBound(proposalID, remote, branchRef string, binding serveAdvanceBinding) error {
@@ -134,8 +165,10 @@ func mergeRemoteBound(proposalID, remote, branchRef string, binding serveAdvance
 		return fmt.Errorf("remote %q does not exist", remote)
 	}
 
-	// Step 1: validate locally.
-	identity, proposal, evaluation, err := serveAdvanceValidate(proposalID)
+	// Step 1: validate locally. Under a rule binding, acceptance is the
+	// satisfied rule that stands in for maintainer acceptance; it is nil
+	// otherwise.
+	identity, proposal, evaluation, acceptance, err := serveAdvanceValidate(proposalID, branchRef, binding)
 	if err != nil {
 		return serveAdvanceStepError(1, "validate locally", err)
 	}
@@ -175,7 +208,11 @@ func mergeRemoteBound(proposalID, remote, branchRef string, binding serveAdvance
 			return nil
 		}
 		fmt.Printf("%s %s already contains %s for proposal %s\n", remote, branchRef, shortOID(head), shortID(proposal.ID))
-		return serveAdvanceRecordAndPublish(identity, proposal.ID, head, remote, "Recorded missing merge event")
+		recorded := "Recorded missing merge event"
+		if acceptance != nil {
+			recorded = "Recorded missing rule merge event"
+		}
+		return serveAdvanceRecordAndPublish(identity, proposal.ID, head, remote, recorded, acceptance)
 	}
 	if evaluation.Merged {
 		return serveAdvanceStepError(1, "validate locally", fmt.Errorf("proposal %s is already recorded as merged but %s %s does not contain its head %s", proposal.ID, remote, branchRef, shortOID(head)))
@@ -183,15 +220,22 @@ func mergeRemoteBound(proposalID, remote, branchRef string, binding serveAdvance
 
 	// Step 6: request advancement. The forced refspec makes Git send a
 	// non-fast-forward update instead of refusing it on the client, so the
-	// server's checks decide and report their structured reason.
-	stderr, err := serveAdvanceGit("push", "--porcelain",
-		"--push-option="+servePushOptionAdvance+"="+proposal.ID,
-		"--push-option="+servePushOptionExpected+"="+tip,
-		remote, "+"+head+":"+branchRef)
+	// server's checks decide and report their structured reason. A rule
+	// binding adds hn-rule after the two options hn merge --remote sends.
+	push := []string{"push", "--porcelain",
+		"--push-option=" + servePushOptionAdvance + "=" + proposal.ID,
+		"--push-option=" + servePushOptionExpected + "=" + tip}
+	if binding.Rule != "" {
+		push = append(push, "--push-option="+servePushOptionRule+"="+binding.Rule)
+	}
+	stderr, err := serveAdvanceGit(append(push, remote, "+"+head+":"+branchRef)...)
 	if err != nil {
-		if _, lines := extractServeRejections(stderr); len(lines) > 0 {
+		if rejections, lines := extractServeRejections(stderr); len(lines) > 0 {
 			for _, line := range lines {
 				fmt.Fprintln(os.Stderr, oneLine(line))
+			}
+			if serveAdvanceRuleUnsupported(rejections, binding.Rule) {
+				return serveAdvanceStepError(6, "request advancement", fmt.Errorf("%s does not support rule advancement (%s); upgrade hn on the server", remote, servePushOptionRule))
 			}
 			return serveAdvanceStepError(6, "request advancement", fmt.Errorf("%s refused to advance %s to %s; the branch is unchanged", remote, branchRef, shortOID(head)))
 		}
@@ -212,68 +256,108 @@ func mergeRemoteBound(proposalID, remote, branchRef string, binding serveAdvance
 		if !found {
 			at = "no commit"
 		}
-		return fmt.Errorf("server accepted the push but %s is at %s; rerun %s", branchRef, at, serveAdvanceRerun(proposal.ID, remote, branchRef))
+		return fmt.Errorf("server accepted the push but %s is at %s; rerun %s", branchRef, at, serveAdvanceRerun(proposal.ID, remote, branchRef, binding))
 	}
 	fmt.Printf("Advanced %s %s to %s for proposal %s\n", remote, branchRef, shortOID(head), shortID(proposal.ID))
 
 	// Steps 8 and 9.
-	return serveAdvanceRecordAndPublish(identity, proposal.ID, head, remote, "Recorded merge event")
+	recorded := "Recorded merge event"
+	if acceptance != nil {
+		recorded = "Recorded rule merge event"
+	}
+	return serveAdvanceRecordAndPublish(identity, proposal.ID, head, remote, recorded, acceptance)
 }
 
 // serveAdvanceValidate is step 1: the checks of cmdMerge that do not depend
 // on a checkout, in the same order and with the same functions, plus
 // readiness under the base policy. An existing merge fact is not an error
 // here; step 5 decides what it means.
-func serveAdvanceValidate(proposalID string) (*Identity, *StoredEvent, *ProposalEvaluation, error) {
+//
+// Without a rule binding the checks and their messages are those of hn
+// merge. With one, the rule authority replaces the acceptance and
+// maintainer checks: the named rule must be satisfied for branchRef by the
+// same events and the candidate's base policy, and the identity must be one
+// of its executing actors. The returned rule acceptance is nil without a
+// rule binding.
+func serveAdvanceValidate(proposalID, branchRef string, binding serveAdvanceBinding) (*Identity, *StoredEvent, *ProposalEvaluation, *ruleAcceptance, error) {
 	if err := requireFullEventID(proposalID); err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
 	// The proposal status scope checks the candidate's evaluation
 	// dependencies without the checkout ancestry that a local merge needs.
 	if err := prepareShallowVerification(shallowVerificationScope{Operation: "proposal status", Subject: proposalID}); err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
 	if err := guardShallowEventClosure("proposal advancement"); err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
 	events, err := collectEvents()
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
 	proposal, err := resolveEventDependency("proposal advancement", proposalID, shallowCandidateEvent, events)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
 	if err := guardProposalEvaluationDependencies("proposal advancement", proposal, events); err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
 	evaluation, err := evaluateProposal(proposal, events)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
 	if err := requireLineageTerminalEligibility("merge", proposal.ID, evaluation.Lineage); err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
 	if evaluation.Rejected {
-		return nil, nil, nil, fmt.Errorf("proposal has a current maintainer rejection")
+		return nil, nil, nil, nil, fmt.Errorf("proposal has a current maintainer rejection")
 	}
-	if !evaluation.Accepted {
-		return nil, nil, nil, fmt.Errorf("proposal lacks %d required acceptance decision(s)", evaluation.Policy.Proposals.RequiredAccepts)
+	if binding.Rule == "" && !evaluation.Accepted {
+		return nil, nil, nil, nil, fmt.Errorf("proposal lacks %d required acceptance decision(s)", evaluation.Policy.Proposals.RequiredAccepts)
 	}
 	if err := requireProposalCode(proposal); err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
 	identity, err := loadIdentity()
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
-	if !actorListed(identity.Actor, evaluation.Policy.Maintainers) {
-		return nil, nil, nil, fmt.Errorf("identity %s is not a maintainer under proposal policy", shortID(identity.Actor))
+	var acceptance *ruleAcceptance
+	if binding.Rule == "" {
+		if !actorListed(identity.Actor, evaluation.Policy.Maintainers) {
+			return nil, nil, nil, nil, fmt.Errorf("identity %s is not a maintainer under proposal policy", shortID(identity.Actor))
+		}
+	} else {
+		acceptance, err = serveAdvanceRuleAuthority(identity, proposal, evaluation, events, binding.Rule, branchRef)
+		if err != nil {
+			return nil, nil, nil, nil, err
+		}
 	}
 	if !evaluation.Ready {
-		return nil, nil, nil, fmt.Errorf("proposal is not ready; run 'hn proposal status %s' for missing evidence", proposal.ID)
+		return nil, nil, nil, nil, fmt.Errorf("proposal is not ready; run 'hn proposal status %s' for missing evidence", proposal.ID)
 	}
-	return identity, proposal, evaluation, nil
+	return identity, proposal, evaluation, acceptance, nil
+}
+
+// serveAdvanceRuleAuthority evaluates the named rule with the derivation
+// hn automerge and hn serve share, on events and the candidate's base
+// policy, for the branch being advanced. The rule must be satisfied and
+// identity must be one of its executing actors in that policy.
+func serveAdvanceRuleAuthority(identity *Identity, proposal *StoredEvent, evaluation *ProposalEvaluation, events []StoredEvent, rule, branchRef string) (*ruleAcceptance, error) {
+	changed, err := changedPathsAt("", proposal.Event.Base, proposal.Event.Head)
+	if err != nil {
+		return nil, err
+	}
+	inputs := automergeRuleInputs(proposal, evaluation, rule, changed, events)
+	inputs.TargetBranch = strings.TrimPrefix(branchRef, "refs/heads/")
+	acceptance := evaluateRuleAcceptance(inputs)
+	if !acceptance.Satisfied() {
+		return nil, fmt.Errorf("automerge rule %q is not satisfied by the current evidence; run 'hn automerge %s --rule %s' for its blockers", rule, proposal.ID, rule)
+	}
+	if !actorListed(identity.Actor, acceptance.Rule.Actors) {
+		return nil, fmt.Errorf("identity %s is not an executing actor for automerge rule %q", identity.Actor, rule)
+	}
+	return acceptance, nil
 }
 
 // serveAdvanceReadTip is step 4: the remote value of branchRef, fetched
@@ -331,13 +415,18 @@ func serveAdvanceIsAncestor(ancestor, descendant string) bool {
 }
 
 // serveAdvanceRecordAndPublish runs steps 8 and 9 and prints the second
-// output line with the given prefix.
-func serveAdvanceRecordAndPublish(identity *Identity, proposalID, head, remote, recorded string) error {
-	stored, err := serveAdvanceRecord(identity, proposalID, head)
+// output line with the given prefix. With a rule acceptance from step 1 it
+// records a rule merge fact under that rule.
+func serveAdvanceRecordAndPublish(identity *Identity, proposalID, head, remote, recorded string, rule *ruleAcceptance) error {
+	stored, err := serveAdvanceRecord(identity, proposalID, head, rule)
 	if err != nil {
 		return serveAdvanceStepError(8, "record the merge fact", err)
 	}
-	fmt.Printf("%s %s with %d acceptance decision(s)\n", recorded, shortID(stored.ID), len(stored.Event.Evidence))
+	if rule != nil {
+		fmt.Printf("%s %s under rule %s with %d evidence item(s)\n", recorded, shortID(stored.ID), safeText(stored.Event.Rule), len(stored.Event.Evidence))
+	} else {
+		fmt.Printf("%s %s with %d acceptance decision(s)\n", recorded, shortID(stored.ID), len(stored.Event.Evidence))
+	}
 	if err := serveAdvanceInterrupt("record"); err != nil {
 		return err
 	}
@@ -352,7 +441,11 @@ func serveAdvanceRecordAndPublish(identity *Identity, proposalID, head, remote, 
 // the candidate the way the repair block of cmdMerge does, then appends
 // proposal.merged with commit equal to the head. The branch was
 // fast-forwarded, so there is no merge commit to look for.
-func serveAdvanceRecord(identity *Identity, proposalID, head string) (*StoredEvent, error) {
+//
+// With the rule acceptance of step 1, the rule is evaluated again on the
+// re-collected events in place of the acceptance and maintainer checks, and
+// appendRuleMergeEvent self-checks the rule merge fact before it signs.
+func serveAdvanceRecord(identity *Identity, proposalID, head string, rule *ruleAcceptance) (*StoredEvent, error) {
 	events, err := collectEvents()
 	if err != nil {
 		return nil, err
@@ -374,6 +467,9 @@ func serveAdvanceRecord(identity *Identity, proposalID, head string) (*StoredEve
 	if evaluation.Merged {
 		return nil, fmt.Errorf("proposal %s is already recorded as merged", proposal.ID)
 	}
+	if rule != nil {
+		return serveAdvanceRecordRule(identity, proposal, evaluation, events, head, rule)
+	}
 	if evaluation.Rejected || !evaluation.Accepted {
 		return nil, fmt.Errorf("current accepting decisions no longer satisfy proposal policy")
 	}
@@ -387,6 +483,65 @@ func serveAdvanceRecord(identity *Identity, proposalID, head string) (*StoredEve
 		return nil, fmt.Errorf("proposal head %s does not match the advanced commit %s", shortOID(proposal.Event.Head), shortOID(head))
 	}
 	return appendProposalMergeEvent(identity, proposal, evaluation, head)
+}
+
+// serveAdvanceRecordRule is step 8 under a rule binding. The advanced
+// branch is the rule's target branch, which step 1 already checked, so the
+// rule is evaluated again without a target branch. The rule merge fact has
+// commit equal to the head.
+func serveAdvanceRecordRule(identity *Identity, proposal *StoredEvent, evaluation *ProposalEvaluation, events []StoredEvent, head string, rule *ruleAcceptance) (*StoredEvent, error) {
+	if !evaluation.Ready {
+		return nil, fmt.Errorf("current approval and CI evidence no longer satisfies proposal policy")
+	}
+	if proposal.Event.Head != head {
+		return nil, fmt.Errorf("proposal head %s does not match the advanced commit %s", shortOID(proposal.Event.Head), shortOID(head))
+	}
+	name := rule.Rule.Name
+	changed, err := changedPathsAt("", proposal.Event.Base, proposal.Event.Head)
+	if err != nil {
+		return nil, err
+	}
+	latest := evaluateRuleAcceptance(automergeRuleInputs(proposal, evaluation, name, changed, events))
+	if !latest.Satisfied() {
+		return nil, fmt.Errorf("automerge rule %q is no longer satisfied by the current evidence", name)
+	}
+	if !actorListed(identity.Actor, latest.Rule.Actors) {
+		return nil, fmt.Errorf("identity %s is no longer an executing actor for automerge rule %q", identity.Actor, name)
+	}
+	return appendRuleMergeEvent(identity, proposal, evaluation, latest, head)
+}
+
+// serveAdvancePublishOnly is the publication-only rerun of a remote rule
+// merge (FR-020, decision 01M5VSEHFCZGQHQ14CKJ3MAMP7): the executing
+// actor's rule merge fact for proposal is already recorded, so it publishes
+// or republishes the local facts as step 9 does and confirms that the
+// hosted branchRef contains the fact's commit.
+//
+// It never calls appendEvent or appendRuleMergeEvent and never pushes a
+// branch: the fact and the advancement it records already exist, and a
+// second fact or a second advancement for one candidate is what FR-020
+// forbids. When the hosted branch does not contain the commit, it reports
+// that and leaves the branch alone.
+func serveAdvancePublishOnly(remote, branchRef string, fact *StoredEvent, proposal *StoredEvent) error {
+	if err := publishLocalFacts(remote, nil); err != nil {
+		fmt.Fprintf(os.Stderr, "hn: %v\n", err)
+		return fmt.Errorf("merge fact recorded locally; run hn sync %s to publish it", remote)
+	}
+	if err := serveAdvanceInterrupt("republish"); err != nil {
+		return err
+	}
+	commit := fact.Event.Commit
+	tip, err := serveAdvanceReadTip(remote, branchRef)
+	if err != nil {
+		return err
+	}
+	if tip != commit && !serveAdvanceIsAncestor(commit, tip) {
+		return fmt.Errorf("rule merge event %s is recorded but %s %s does not contain %s; a publication-only rerun never advances the branch",
+			shortID(fact.ID), remote, branchRef, shortOID(commit))
+	}
+	fmt.Printf("%s %s contains %s for proposal %s\n", remote, branchRef, shortOID(commit), shortID(proposal.ID))
+	fmt.Printf("Rule merge event %s under rule %s is published on %s\n", shortID(fact.ID), safeText(fact.Event.Rule), remote)
+	return nil
 }
 
 // serveAdvanceGit runs git with the inherited environment and returns its

@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -21,6 +22,7 @@ type PolicyDocument struct {
 	Memory          *MemoryPolicy             `json:"memory,omitempty"`
 	ProtectedChecks *ProtectedChecksPolicy    `json:"protectedChecks,omitempty"`
 	Automerge       *AutomergePolicy          `json:"automerge,omitempty"`
+	Audits          *AuditPolicy              `json:"audits,omitempty"`
 }
 
 // MemoryPolicy is deliberately optional so repositories with an hn.policy/0
@@ -40,6 +42,18 @@ type ProposalPolicy struct {
 type PipelinePolicy struct {
 	RequiredResults int      `json:"requiredResults"`
 	TrustedRunners  []string `json:"trustedRunners"`
+	// Requesters may sign run.request events that count, in addition to
+	// maintainers. Absent keeps runs maintainer-requested only.
+	Requesters []string `json:"requesters,omitempty"`
+}
+
+// mayRequestRun reports whether actor's run.request counts for pipeline.
+func mayRequestRun(policy PolicyDocument, pipeline, actor string) bool {
+	if actorListed(actor, policy.Maintainers) {
+		return true
+	}
+	pipelinePolicy, exists := policy.Pipelines[pipeline]
+	return exists && actorListed(actor, pipelinePolicy.Requesters)
 }
 
 type PipelineEvaluation struct {
@@ -110,6 +124,9 @@ func parsePolicyBytes(encoded []byte) (PolicyDocument, string, error) {
 }
 
 func validatePolicy(policy PolicyDocument) error {
+	if err := validateAuditPolicy(policy.Audits); err != nil {
+		return err
+	}
 	if policy.Version != policyVersion {
 		return fmt.Errorf("unsupported policy version %q", policy.Version)
 	}
@@ -143,6 +160,14 @@ func validatePolicy(policy PolicyDocument) error {
 		}
 		if pipeline.RequiredResults > len(pipeline.TrustedRunners) {
 			return fmt.Errorf("pipeline %q requiredResults exceeds its trusted runner count", name)
+		}
+		if pipeline.Requesters != nil {
+			if len(pipeline.Requesters) < 1 || len(pipeline.Requesters) > 64 {
+				return fmt.Errorf("pipeline %q requesters must list 1 to 64 actors when present", name)
+			}
+			if err := validateActorList("pipeline "+name+" requesters", pipeline.Requesters); err != nil {
+				return err
+			}
 		}
 	}
 	if policy.Memory != nil {
@@ -378,7 +403,7 @@ func evaluateProposalEvidence(proposal *StoredEvent, events []StoredEvent, linea
 		latestByRunner := make(map[string]StoredEvent)
 		for _, request := range events {
 			if request.Event.Kind != "run.request" || request.Event.Subject != proposal.ID || request.Event.Pipeline != name ||
-				request.Event.Definition != expectedDefinition || !actorListed(request.Event.Actor, policy.Maintainers) {
+				request.Event.Definition != expectedDefinition || !mayRequestRun(policy, name, request.Event.Actor) {
 				continue
 			}
 			for _, result := range currentRunResults(events, request.ID) {
@@ -504,7 +529,7 @@ func validateDecisionEvent(decision, proposal StoredEvent, byID map[string]Store
 			}
 		case "run.result":
 			request, exists := byID[evidence.Event.Subject]
-			if !exists || request.Event.Kind != "run.request" || request.Event.Subject != proposal.ID || !actorListed(request.Event.Actor, policy.Maintainers) || evidence.Event.Outcome != "passed" {
+			if !exists || request.Event.Kind != "run.request" || request.Event.Subject != proposal.ID || !mayRequestRun(policy, request.Event.Pipeline, request.Event.Actor) || evidence.Event.Outcome != "passed" {
 				continue
 			}
 			pipelinePolicy, exists := policy.Pipelines[request.Event.Pipeline]
@@ -524,7 +549,61 @@ func validateDecisionEvent(decision, proposal StoredEvent, byID map[string]Store
 	return nil
 }
 
+// validateMergeEvent judges one proposal.merged fact on its own validation
+// pass. Projection shares one memo across a pass through
+// validateMergeEventWith instead.
 func validateMergeEvent(merge, proposal StoredEvent, byID map[string]StoredEvent) error {
+	_, err := validateMergeEventWith(newRuleValidationMemo(localRuleObjectAccess()), merge, proposal, byID)
+	return err
+}
+
+// validateMergeEventWith is local projection's fact-admission surface: the
+// union rule of admitMergeFact over maintainerMergeCheck (path a) and the
+// local rule path (path b), whose object reads go through memo.
+func validateMergeEventWith(memo *ruleValidationMemo, merge, proposal StoredEvent, byID map[string]StoredEvent) (mergeAuthority, error) {
+	return admitMergeFact(merge,
+		func() error { return maintainerMergeCheck(merge, proposal, byID) },
+		func() error { return localRuleMergeCheck(memo, merge, proposal, byID) },
+	)
+}
+
+// localRuleMergeCheck is path (b) for local projection. A ruleFactError is
+// returned as is, so its message reads the same on every surface; a missing
+// input such as an absent commit refuses the fact and never evaluates it.
+// In a shallow clone an absent input is a ShallowDependencyGap with
+// replayable recovery (FR-014).
+func localRuleMergeCheck(memo *ruleValidationMemo, merge, proposal StoredEvent, byID map[string]StoredEvent) error {
+	if err := shallowRuleMergeGuard(merge, proposal); err != nil {
+		return err
+	}
+	err := validateRuleMergeFactWith(memo, merge, proposal, byID)
+	var factErr *ruleFactError
+	if err == nil || errors.As(err, &factErr) {
+		return err
+	}
+	return fmt.Errorf("merge %s: %w", merge.ID, err)
+}
+
+// localRuleObjectAccess reads path (b) inputs from the current repository.
+func localRuleObjectAccess() ruleObjectAccess {
+	return ruleObjectAccess{
+		PolicyAt: func(commit string) (PolicyDocument, string, error) {
+			policy, _, digest, err := loadPolicy(commit)
+			return policy, digest, err
+		},
+		ChangedPaths: func(base, head string) ([]string, error) {
+			return changedPathsAt("", base, head)
+		},
+		PipelineDigest: func(head, pipeline string) (string, error) {
+			_, _, digest, err := loadPipeline(head, pipeline)
+			return digest, err
+		},
+	}
+}
+
+// maintainerMergeCheck is path (a): the acceptance merge fact check that
+// predates rule merge facts, unchanged.
+func maintainerMergeCheck(merge, proposal StoredEvent, byID map[string]StoredEvent) error {
 	policy, _, digest, err := loadPolicy(proposal.Event.Base)
 	if err != nil {
 		return fmt.Errorf("merge %s: %w", shortID(merge.ID), err)
@@ -631,7 +710,36 @@ func cmdProposalStatus(query string) error {
 	}
 	fmt.Printf("Decision: %d/%d accepts; %d rejects\n", len(evaluation.AcceptDecisions), evaluation.Policy.Proposals.RequiredAccepts, len(evaluation.RejectDecisions))
 	fmt.Printf("Status:   %s\n", proposalStatus(evaluation))
+	printRuleMergeClaims(proposal, evaluation, events)
 	return nil
+}
+
+// printRuleMergeClaims prints one line per merge fact that carries a rule
+// claim, sorted by fact ID (FR-021). Projection already admitted every merge
+// fact, so one that fails the maintainer check was admitted as a rule merge;
+// one that passes it is a maintainer merge whose rule claim is unverified.
+func printRuleMergeClaims(proposal *StoredEvent, evaluation *ProposalEvaluation, events []StoredEvent) {
+	var claims []StoredEvent
+	for _, merge := range evaluation.MergeEvents {
+		if merge.Event.Rule != "" {
+			claims = append(claims, merge)
+		}
+	}
+	if len(claims) == 0 {
+		return
+	}
+	sortEventsByID(claims)
+	byID := make(map[string]StoredEvent, len(events))
+	for _, stored := range events {
+		byID[stored.ID] = stored
+	}
+	for _, merge := range claims {
+		if maintainerMergeCheck(merge, *proposal, byID) == nil {
+			fmt.Printf("Merged by maintainers in fact %s; its rule annotation \"%s\" is not verified\n", merge.ID, safeText(merge.Event.Rule))
+		} else {
+			fmt.Printf("Merged by rule %s, signed by %s in fact %s\n", safeText(merge.Event.Rule), merge.Event.Actor, merge.ID)
+		}
+	}
 }
 
 func sortedDecisionIDs(decisions []StoredEvent) []string {

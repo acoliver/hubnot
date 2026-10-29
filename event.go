@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/base64"
@@ -43,12 +44,18 @@ type Event struct {
 	Runner       string   `json:"runner,omitempty"`
 	Policy       string   `json:"policy,omitempty"`
 	Evidence     []string `json:"evidence,omitempty"`
+	// Rule is a canonical rule claim of a proposal.merged event. It is set
+	// only by verifyEvent from the signed bytes and only written by
+	// encodeAndSign, never by encoding/json, so legacy payloads keep their
+	// meaning (decision 01M5VSEHF1G2YQDQW7HPVBF95K).
+	Rule string `json:"-"`
 
 	Issue     *IssueState `json:"issue,omitempty"`
 	Parents   []string    `json:"parents,omitempty"`
 	Operation string      `json:"operation,omitempty"`
 	Request   string      `json:"request,omitempty"`
 	Intent    string      `json:"intent,omitempty"`
+	Audit     *AuditFact  `json:"audit,omitempty"`
 }
 
 type StoredEvent struct {
@@ -85,7 +92,7 @@ func encodeAndSign(event Event, identity *Identity) ([]byte, []byte, error) {
 	if err := validateEventContent(event); err != nil {
 		return nil, nil, err
 	}
-	payload, err := json.Marshal(event)
+	payload, err := marshalEvent(event)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -97,6 +104,164 @@ func encodeAndSign(event Event, identity *Identity) ([]byte, []byte, error) {
 	return payload, signature, nil
 }
 
+// marshalEvent encodes an event exactly as json.Marshal does and, only when
+// a rule claim is set, appends the canonical "rule" key after every other
+// field.
+func marshalEvent(event Event) ([]byte, error) {
+	if event.Rule == "" {
+		return json.Marshal(event)
+	}
+	wire := struct {
+		Event
+		Rule string `json:"rule"`
+	}{event, event.Rule}
+	return json.Marshal(wire)
+}
+
+// parseMergeRuleClaim returns the canonical rule claim of a proposal.merged
+// payload: exactly one top-level key equal to "rule" under case folding,
+// spelled exactly "rule" after JSON unescaping, whose value is a JSON string
+// that is a valid rule name. Every other shape, including malformed JSON, is
+// no claim; it is never a refusal, so payloads that verified before rule
+// claims existed keep their verdict (decision 01M5VSEHEVA82N9T64ZH1P1Q2A).
+//
+// verifyEvent calls it on every proposal.merged after json.Unmarshal has
+// accepted the payload, so it walks the top level once and skips values by
+// counting depth instead of decoding them.
+func parseMergeRuleClaim(payload []byte) string {
+	i := skipJSONSpace(payload, 0)
+	if i >= len(payload) || payload[i] != '{' {
+		return ""
+	}
+	i = skipJSONSpace(payload, i+1)
+	if i < len(payload) && payload[i] == '}' {
+		return ""
+	}
+	matches := 0
+	claim := ""
+	for {
+		keyEnd := skipJSONString(payload, i)
+		if keyEnd < 0 {
+			return ""
+		}
+		key := payload[i:keyEnd]
+		i = skipJSONSpace(payload, keyEnd)
+		if i >= len(payload) || payload[i] != ':' {
+			return ""
+		}
+		valueStart := skipJSONSpace(payload, i+1)
+		valueEnd := skipJSONValue(payload, valueStart)
+		if valueEnd < 0 {
+			return ""
+		}
+		if name, ok := jsonKeyFoldsToRule(key); ok {
+			matches++
+			if name == "rule" && payload[valueStart] == '"' {
+				if err := json.Unmarshal(payload[valueStart:valueEnd], &claim); err != nil {
+					return ""
+				}
+			}
+		}
+		i = skipJSONSpace(payload, valueEnd)
+		if i >= len(payload) {
+			return ""
+		}
+		if payload[i] == '}' {
+			break
+		}
+		if payload[i] != ',' {
+			return ""
+		}
+		i = skipJSONSpace(payload, i+1)
+	}
+	if skipJSONSpace(payload, i+1) != len(payload) || matches != 1 || !validPipelineName(claim) {
+		return ""
+	}
+	return claim
+}
+
+// jsonKeyFoldsToRule reports whether a quoted JSON key equals "rule" under
+// case folding and returns the unescaped key. Only ASCII letters fold to the
+// letters of "rule", so a key without escapes is compared byte by byte.
+func jsonKeyFoldsToRule(quoted []byte) (string, bool) {
+	raw := quoted[1 : len(quoted)-1]
+	if bytes.IndexByte(raw, '\\') < 0 {
+		if len(raw) != len("rule") || !bytes.EqualFold(raw, []byte("rule")) {
+			return "", false
+		}
+		return string(raw), true
+	}
+	var key string
+	if err := json.Unmarshal(quoted, &key); err != nil || !strings.EqualFold(key, "rule") {
+		return "", false
+	}
+	return key, true
+}
+
+func skipJSONSpace(data []byte, i int) int {
+	for i < len(data) && (data[i] == ' ' || data[i] == '\t' || data[i] == '\n' || data[i] == '\r') {
+		i++
+	}
+	return i
+}
+
+// skipJSONString returns the index after the string starting at i, or -1.
+func skipJSONString(data []byte, i int) int {
+	if i >= len(data) || data[i] != '"' {
+		return -1
+	}
+	for i++; i < len(data); i++ {
+		switch data[i] {
+		case '\\':
+			i++
+		case '"':
+			return i + 1
+		}
+	}
+	return -1
+}
+
+// skipJSONValue returns the index after the value starting at i, or -1. It
+// skips nested objects and arrays by depth; it does not validate them.
+func skipJSONValue(data []byte, i int) int {
+	if i >= len(data) {
+		return -1
+	}
+	switch data[i] {
+	case '"':
+		return skipJSONString(data, i)
+	case '{', '[':
+		depth := 0
+		for i < len(data) {
+			switch data[i] {
+			case '"':
+				i = skipJSONString(data, i)
+				if i < 0 {
+					return -1
+				}
+				continue
+			case '{', '[':
+				depth++
+			case '}', ']':
+				depth--
+				if depth == 0 {
+					return i + 1
+				}
+			}
+			i++
+		}
+		return -1
+	}
+	start := i
+	for i < len(data) && data[i] != ',' && data[i] != '}' && data[i] != ']' && data[i] != ' ' && data[i] != '\t' && data[i] != '\n' && data[i] != '\r' {
+		i++
+	}
+	if i == start {
+		return -1
+	}
+	return i
+}
+
 func verifyEvent(payload, signature []byte) (Event, string, error) {
 	var event Event
 	if err := json.Unmarshal(payload, &event); err != nil {
@@ -105,6 +270,11 @@ func verifyEvent(payload, signature []byte) (Event, string, error) {
 	if isResourceKind(event.Kind) {
 		if err := strictResourceJSON(payload, &event, resourcePayloadLimit(resourceFamily(event.Kind))); err != nil {
 			return Event{}, "", fmt.Errorf("invalid resource event JSON: %w", err)
+		}
+	}
+	if isAuditKind(event.Kind) {
+		if err := strictAuditJSON(payload, &event); err != nil {
+			return Event{}, "", fmt.Errorf("invalid audit JSON: %w", err)
 		}
 	}
 	// Bound the authenticated bytes, not a re-encoding which can omit unknown
@@ -135,10 +305,25 @@ func verifyEvent(payload, signature []byte) (Event, string, error) {
 	if err := validateEventContent(event); err != nil {
 		return Event{}, "", err
 	}
+	if event.Kind == "proposal.merged" {
+		event.Rule = parseMergeRuleClaim(payload)
+	}
 	return event, eventID(payload), nil
 }
 
 func validateEventContent(event Event) error {
+	// Only an event being built for signing reaches the rule checks with a
+	// rule set: verifyEvent sets a valid rule on proposal.merged after this
+	// validation, so they bind what Hubnot signs, never what verifiers accept.
+	if event.Rule != "" && event.Kind != "proposal.merged" {
+		return fmt.Errorf("rule is only valid on proposal.merged")
+	}
+	if isAuditKind(event.Kind) {
+		return validateAuditEvent(event)
+	}
+	if event.Audit != nil {
+		return fmt.Errorf("audit payload requires an audit kind")
+	}
 	if isResourceKind(event.Kind) {
 		if event.Previous != "" && !validEventID(event.Previous) {
 			return fmt.Errorf("invalid previous event ID")
@@ -204,6 +389,9 @@ func validateEventContent(event Event) error {
 	case "proposal.merged":
 		if !validEventID(event.Subject) || !validEventID(event.Policy) || !validGitOID(event.Commit) || !validGitOID(event.Head) || !validEvidenceIDs(event.Evidence) {
 			return fmt.Errorf("proposal merge requires a proposal, policy, head, commit, and decision evidence")
+		}
+		if event.Rule != "" && !validPipelineName(event.Rule) {
+			return fmt.Errorf("proposal merge rule must be a valid rule name")
 		}
 	case "identity.authorize":
 		if event.Relationship != identityRelationshipDevice && event.Relationship != identityRelationshipSuccessor {

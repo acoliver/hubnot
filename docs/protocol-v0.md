@@ -260,9 +260,110 @@ the exact review and run-result event IDs that satisfy policy. Rejections
 require an explanation.
 
 A `proposal.merged` event binds the candidate, proposed head, resulting Git
-commit, base-policy digest, and acceptance-decision IDs. It is emitted after
-Git creates the merge commit; branch publication remains a separate ordinary
-Git action.
+commit, base-policy digest, and evidence IDs: acceptance decisions for a
+maintainer merge, or approvals and run results for a rule merge. It is
+emitted after Git creates the merge commit, or after `hn serve` fast-forwards
+the branch; branch publication remains a separate ordinary Git action.
+
+Every verifier applies one union rule to a `proposal.merged` fact. The fact is
+valid when it passes the existing maintainer check, whatever else it carries.
+When the maintainer check fails, the fact is valid only if it carries a rule
+claim and passes the rule check. A fact that passes neither check is invalid,
+and every command that projects events refuses while such a fact is in the
+local store. A maintainer merge that also carries a rule claim remains a
+maintainer merge; status displays it as such, with the rule name marked as not
+verified.
+
+A rule merge fact is a `proposal.merged` fact with the optional `rule` field,
+which Hubnot encodes as the last key and only on this kind. `rule` names an
+automerge rule with acceptance mode `rule` in the candidate's base policy, and
+the signer must be one of that rule's executing actors. `policy` is the base
+policy digest. `evidence` lists exactly the qualifying approval and passing
+run-result IDs: at most one approval per counting reviewer and one result per
+trusted runner per pipeline. Any other item, including a `proposal.decision`,
+fails the rule check. `commit` is either a two-parent merge commit or the head
+itself after an `hn serve` fast-forward.
+
+The fact below is what the executing actor `integrator` records under rule
+`ordinary` after a local merge of a candidate with one counted approval and
+one passing result. Values in angle brackets, the sequence and the timestamp
+differ between repositories.
+
+<!-- example: standing-rule-merge-fact -->
+```json
+{
+  "protocol": "hn/0",
+  "kind": "proposal.merged",
+  "actor": "<executor fingerprint>",
+  "actorName": "integrator",
+  "publicKey": "<base64 ed25519 key>",
+  "sequence": 12,
+  "timestamp": "2026-10-26T09:14:03.120Z",
+  "previous": "sha256:<previous event>",
+  "subject": "sha256:<candidate>",
+  "head": "<candidate head commit>",
+  "commit": "<result commit>",
+  "policy": "sha256:<base policy digest>",
+  "evidence": ["sha256:<approval>", "sha256:<passing run result>"],
+  "rule": "ordinary"
+}
+```
+
+`evidence` is sorted. An acceptance merge fact has the same keys without
+`rule`, and its `evidence` lists acceptance decisions.
+
+Verifiers recognize a rule claim on `proposal.merged` only in this shape:
+
+| `proposal.merged` payload | Rule claim |
+|----|----|
+| Exactly one top-level key equal to `rule` under Unicode case folding, spelled exactly `rule`, whose value is a JSON string that is a valid rule name (1 to 64 of `A-Z a-z 0-9 - _ .`, excluding `.` and `..`) | that name |
+| No such key | none |
+| `"rule"` with `null`, `""`, a number, a boolean, an array or an object | none |
+| A case variant such as `"RULE"` or `"Rule"`, alone or next to `rule` | none |
+| Two or more keys equal to `rule` under case folding | none |
+| A string that is not a valid rule name | none |
+
+Keys are compared after JSON unescaping. A fact without a claim gets the
+maintainer check alone. No event is refused because of a `rule` key: other
+event kinds ignore it as before, and resource kinds refuse it through their
+strict decoder as before.
+
+The rule check re-derives the named rule from the base policy, the candidate's
+base and head, and the listed evidence, and judges the fact by that evidence
+alone. Maintainer rejections, change requests and failed runs outside the
+evidence block execution and server advancement and have no effect on fact
+validity. The checks run in this order, and the first failure is reported as
+`rule merge <full fact ID> fails <check>: <detail>`: `policy-digest`,
+`rule-exists`, `rule-acceptance`, `rule-signer`, `rule-author`, `manual-path`,
+`changed-paths`, `evidence-item`, `evidence-duplicate`, `approval-threshold`
+and `pipeline-threshold`. A base or head commit that is missing from a full
+clone refuses the fact; it is never judged as an empty change list.
+
+A shallow clone runs the rule check only when it holds every input the check
+reads. For a fact with a rule claim, each listed evidence ID is a required
+`selected event fact`, and each listed run result also requires the
+`run request` it answers. When the maintainer check fails, the rule check then
+requires the candidate's `base commit`, its head commit with a
+`proposal code ref` equal to the signed head, the base `policy blob`, and each
+base-policy `pipeline definition` that the head defines. A missing input fails
+the command with a shallow dependency gap naming the dependency kind, the full
+missing ID, the owning candidate and the recovery command, as described in
+[Replication v0](replication-v0.md#depth-limited-repositories).
+`hn sync REMOTE --recover-shallow` imports the candidate's exact selection and
+verifies the complete projection again before it clears the gap. A missing
+object is never judged as an empty change list. Maintainer merges keep their
+previous shallow behavior: a fact that passes the maintainer check never waits
+for the rule check's inputs, and a fact without a rule claim still requires
+each listed evidence ID as a `decision`.
+
+Older clients ignore the `rule` key and run only the maintainer check. They
+therefore reject every fact that only the rule check admits, and agree with
+newer clients on every maintainer merge.
+
+Missing-event repair follows the acceptance mode of the rule that merged the
+candidate. Under acceptance mode `maintainers`, repair uses `hn merge`, as
+described under optional policy rules. Under acceptance mode `rule`, the
+executing actor reruns the same `hn automerge` command.
 
 ## Optional policy rules
 
@@ -291,8 +392,21 @@ base bytes. It does not reinterpret historical decisions or contained-merge
 repair under a later policy.
 
 Automerge introduces no event kind, implicit role or automatic decision. A named
-base-policy rule restricts executing maintainers, authors, target branch and
-allowed paths in addition to existing current review/run/acceptance requirements.
+base-policy rule restricts executing actors, authors, target branch and allowed
+paths. In acceptance mode `maintainers`, the default, the executing actors must
+be maintainers and the existing current review, run and acceptance requirements
+all apply. In acceptance mode `rule`, the maintainer-accepted amendment that
+adopted the rule stands in for per-proposal maintainer acceptance, and the
+current review and run requirements still apply.
+
+A rule's optional `acceptance` field is `"maintainers"` or `"rule"`. Its optional
+`reviewers` field lists the trusted reviewers whose approvals count toward the
+rule. A rule in mode `rule` requires at least one approval and may not cover
+`.hn` or overlap a protected-check path. Clients that predate these fields
+reject a policy that contains either one. See
+[Standing acceptance rule fields](governance-v0.md#standing-acceptance-rule-fields)
+for the limits and inspection output.
+
 Default preview is keyless and read-only; execution is explicit. Version-one
 automation requires a full non-promisor repository, a clean checked-out rule
 target equal to the signed base, and no unfinished Git operation. It refuses
@@ -303,10 +417,12 @@ as the two parents. An expected-old ref transaction guards the actual advance
 and a final evidence/target check. This path uses `git commit-tree`, so ordinary
 `pre-merge-commit` and `pre-commit` hooks are not invoked; required check authority
 comes from native policy and pipeline evidence. Operator `reference-transaction`
-hooks remain Git behavior. The resulting `proposal.merged` is the existing
-signed fact binding candidate, head, result commit, base policy and exact
-acceptance IDs. Missing-event repair uses ordinary `hn merge`; collaboration
-and branch publication remain explicit separate actions.
+hooks remain Git behavior. Under acceptance mode `maintainers`, the resulting
+`proposal.merged` is the existing signed fact binding candidate, head, result
+commit, base policy and exact acceptance IDs, and missing-event repair uses
+ordinary `hn merge`. Under acceptance mode `rule`, it is a rule merge fact, and
+repair reruns the same `hn automerge` command. Collaboration and branch
+publication remain explicit separate actions.
 
 ## Synchronization
 
@@ -334,7 +450,7 @@ separate explicit `git push` for that outcome.
 
 `hn serve` hosts repositories over SSH and answers with ordinary Git
 transports. This section defines what a client can observe from such a server:
-a marker ref, two push options and a line format for rejections. `serve_wire.go`
+a marker ref, three push options and a line format for rejections. `serve_wire.go`
 and `serve_reasons.go` implement it.
 
 ### Server marker and identification
@@ -372,11 +488,15 @@ A client may send these push options with `git push --push-option`:
 |----|----|----|
 | `hn-advance` | full candidate event ID, `sha256:` followed by 64 lowercase hex digits | requests advancement of a protected branch to that candidate's signed head |
 | `hn-expected-tip` | full commit ID of the branch tip the client read | the update is refused with `protected-stale-tip` when the branch has moved |
+| `hn-rule` | rule name, 1 to 64 of `A-Z a-z 0-9 - _ .`, excluding `.` and `..` | names the automerge rule whose standing acceptance the advancement uses; valid only together with `hn-advance` |
 
-Each option may appear at most once. A push with `hn-advance` must contain
-exactly one ref update, and that update must target a protected branch. Any
-other option, a repeated option, a malformed value, or an `hn-advance` push
-with another shape rejects every ref update in the push with
+Each option may appear at most once, and a push carries at most three options.
+`hn-rule` requires `hn-advance` in the same push. A push with `hn-advance` must
+contain exactly one ref update, and that update must target a protected
+branch. Any other option, a repeated option, a malformed value, more than
+three options, `hn-rule` without `hn-advance`, or an `hn-advance` push with
+another shape rejects every ref update in the push with `unsupported-command`.
+A server built before rule advancement refuses `hn-rule` the same way, with
 `unsupported-command`.
 
 ### Rejection lines
@@ -396,7 +516,7 @@ are omitted when they have no value.
 |----|----|
 | `ref` | full ref name, or `-` for a refusal of the whole session |
 | `actor` | full mapped actor fingerprint, or `-` when the key is unknown |
-| `code` | one code from the reason-code table below |
+| `code` | one code from the reason-code tables below |
 | `ids` | comma-separated full `sha256:` event IDs and full commit IDs |
 | `missing` | comma-separated evidence kinds, always in the order `proposal`, `review`, `ci`, `acceptance` |
 | `budget`, `limit`, `measured` | the exceeded budget, its limit and the measured value; see the budget fields below |
@@ -451,7 +571,7 @@ The client parses each rejection and renders it again with the rules above.
 It never echoes the server's bytes, so a hostile server cannot place terminal
 control sequences in the output. A rejection line that does not parse is
 dropped. A rejection without a sentence line gets the meaning from the
-reason-code table as its sentence. A remote that does not identify as
+reason-code tables as its sentence. A remote that does not identify as
 `hn serve` gets the plain error even when its hooks print lines in this format.
 
 ### Budget fields
@@ -501,6 +621,17 @@ The next action is a template. A server replaces placeholders such as
 | `lfs-quota` | An LFS upload would exceed the repository quota | ask the administrator to raise the quota |
 | `lfs-object-mismatch` | Uploaded LFS content does not match its object ID or size | retry the upload |
 
+### Reason codes for rule advancement
+
+A protected-branch advancement that names a rule with `hn-rule` can also be
+refused with these codes.
+
+| Code | Meaning | Typical next action |
+|----|----|----|
+| `advance-not-rule-executor` | The requester is not an executing actor of the named rule in the base policy | ask an executing actor of the rule to run `hn automerge --remote` |
+| `protected-rule-not-satisfied` | The named rule does not exist, is not a standing rule, or the candidate does not satisfy it | run `hn automerge <candidate> --rule <rule>` |
+| `protected-rule-veto` | A current trusted change request or trusted failure blocks the rule | resolve the named events, then retry |
+
 ## Known limits
 
 - One actor remains single-writer; disconnected concurrent writers sharing a
@@ -530,3 +661,42 @@ histories that contain them. Exact container/schema/answer references participat
 in reader, quarantine and shallow recovery closure before promotion. See
 [Native resources](resources-v1.md) for typed schemas, command grammar, conflict
 projection, bounds and authority limits.
+
+## Independent audit facts and portable observations
+
+The additive `audit.rule-authorize`, `audit.rule-revoke`, `audit.request` and
+`audit.result` kinds use the existing signed `hn/0` actor envelope with a strict
+versioned `audit` payload. Absent audit fields remain omitted: earlier signed
+encodings, signatures and IDs do not change. Older clients reject unknown kinds
+and must be upgraded before selecting histories containing these facts.
+[Audit schemas](audits-v1.md) define exact policy/scope, predecessor, target,
+rule-definition, requester/executor, outcome, finding, log and backend bindings.
+Results are observational: neither passed nor failed audit facts qualify as
+`run.result`, review, proposal acceptance or merge evidence. Follow-up issues
+use ordinary signed native issue state with finding/request/result links.
+
+Historical audit admission validates recorded policy, exact relationships,
+source/target objects, typed attachments and bounded logs identically for local
+writes, fetched histories, shallow recovery and portable imports. Audit snapshot
+packs preserve exact required target/rule trees; an absent unreferenced parent
+of a snapshot target is allowed, while ordinary incomplete selected ancestry
+still refuses. Structural/type checks precede accepted visibility. Read validation
+needs no private audit anchor. Current authoring/execution separately requires
+explicit local adoption of a named authority branch and its current policy,
+roles and unconflicted rule heads; imported history never supplies that choice.
+
+[Project snapshots](project-migration.md) use `hn.project-snapshot/1`; uncompressed
+portable tar archives use `hn.project-archive/1`, canonical manifests and
+content-addressed blobs. These are new containers, not a rewrite of signed facts
+or a standard `git bundle`. Exact selected native refs/dependencies are validated
+in private quarantine before guarded promotion to remote-observation refs.
+Signing-owned actor streams, private keys, local audit anchors and active
+destination policy are not imported. Explicit selected committed history remains
+exact, including historical sensitive bytes; export is not a secret scrubber.
+
+Foreign records preserve source identity, attribution, topology and verified
+retrieved bytes. Reviews, users, permissions, CI and workflows remain inert
+observations and grant no native identity, policy or execution authority.
+[Saved migration](migration-engine.md) binds immutable observations, destination
+baselines, explicit decisions and dependent write payloads. Source inspection,
+archive creation and admission never implicitly execute content or publish code.

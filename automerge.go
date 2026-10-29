@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -31,9 +32,20 @@ type automergeInspection struct {
 	Proposal          *StoredEvent
 	Evaluation        *ProposalEvaluation
 	Rule              *AutomergeRule
+	RuleAcceptance    *ruleAcceptance // set whenever Rule is
 	Branch, Current   string
 	Changed, Blockers []string
+	// Repair is the existing merge commit of a candidate whose code merged
+	// under a standing rule but whose rule merge fact was not recorded
+	// (FR-020). It is set only when that is the sole difference from an
+	// eligible candidate, in place of the moved-target blocker.
+	Repair string
 }
+
+// automergeTargetMoved is the blocker of a target that no longer equals the
+// signed base. Its text is unchanged under acceptance mode maintainers,
+// whose missing merge-event repair is hn merge.
+const automergeTargetMoved = "target no longer equals the signed base; revise the candidate (use hn merge for a missing merge-event repair)"
 
 func cmdAutomerge(args []string) error {
 	if len(args) < 1 {
@@ -57,6 +69,15 @@ func cmdAutomerge(args []string) error {
 		return err
 	}
 	printAutomergeInspection(inspection)
+	// A remote rerun after the rule merge fact was recorded takes the
+	// publication-only path (FR-020) before the already-merged blocker.
+	// Every other rerun keeps the refusals below unchanged.
+	if *execute && *remote != "" {
+		if fact := automergePublicationOnlyFact(inspection, *rule, *remote); fact != nil {
+			fmt.Printf("Publication-only rerun: rule merge event %s is already recorded\n", shortID(fact.ID))
+			return serveAdvancePublishOnly(*remote, "refs/heads/"+inspection.Rule.TargetBranch, fact, inspection.Proposal)
+		}
+	}
 	if err := inspection.eligible(); err != nil {
 		return err
 	}
@@ -89,7 +110,23 @@ func cmdAutomerge(args []string) error {
 			return fmt.Errorf("cannot tell whether %s, the upstream of %s, is an hn serve remote (%s); retry when it is reachable", upstream, inspection.Rule.TargetBranch, reason)
 		}
 	}
+	// The repair state never reaches mergeProposal, which refuses a
+	// contained head whenever a guard is present.
+	if inspection.Repair != "" {
+		return recordMissingRuleMerge(identity, inspection, *rule)
+	}
 	guard := &proposalMergeGuard{ExpectedActor: identity.Actor}
+	// The command a user reruns after an interruption. Under acceptance mode
+	// rule only the same automerge command can record the rule merge fact;
+	// hn merge repair stays maintainer-only.
+	rerun := "hn merge " + inspection.Proposal.ID
+	// Under acceptance mode rule the standing rule stands in for the
+	// per-proposal acceptance and maintainer checks (FR-009); a maintainer
+	// listed in the rule's actors gets the same authority (FR-011).
+	if inspection.Rule.Acceptance.Standing() {
+		rerun = automergeRuleRerun(inspection.Proposal.ID, *rule)
+		guard.Rule = &ruleMergeAuthority{Name: *rule, Latest: inspection.RuleAcceptance, Rerun: rerun}
+	}
 	guard.Check = func(proposal *StoredEvent, evaluation *ProposalEvaluation, branch, current string) error {
 		next, err := inspectAutomerge(proposal.ID, *rule)
 		if err != nil {
@@ -104,17 +141,124 @@ func cmdAutomerge(args []string) error {
 		if !actorListed(identity.Actor, next.Rule.Actors) {
 			return fmt.Errorf("identity %s is no longer an executing actor for automerge rule %q", identity.Actor, *rule)
 		}
-		// The common merge path signs this exact latest acceptance snapshot.
+		if guard.Rule != nil {
+			if !next.RuleAcceptance.Satisfied() {
+				return fmt.Errorf("automerge candidate, policy or target changed before merge")
+			}
+			guard.Rule.Latest = next.RuleAcceptance
+		}
+		// The common merge path signs this exact latest acceptance snapshot,
+		// and under a rule authority the rule evidence in guard.Rule.Latest.
 		*evaluation = *next.Evaluation
 		return nil
 	}
 	guard.Advance = func(proposal *StoredEvent, evaluation *ProposalEvaluation, branch, current, message string) (string, error) {
-		return advanceAutomerge(proposal, evaluation, inspection.Rule.TargetBranch, current, message, guard.Check)
+		return advanceAutomerge(proposal, evaluation, inspection.Rule.TargetBranch, current, message, rerun, guard.Check)
 	}
 	if err := runAutomergeHook("before-native-merge"); err != nil {
 		return err
 	}
 	return mergeProposal([]string{inspection.Proposal.ID}, guard)
+}
+
+// automergeRuleRerun is the command that repairs an interrupted local merge
+// under a standing rule.
+func automergeRuleRerun(proposalID, rule string) string {
+	return fmt.Sprintf("hn automerge %s --rule %s --execute", proposalID, rule)
+}
+
+// recordMissingRuleMerge is the local repair of FR-020. The code merged
+// under a standing rule but its rule merge fact was not recorded; it
+// inspects the candidate again, requires the same repair state, and records
+// the fact once with commit set to the existing merge commit. It creates no
+// commit and moves no branch.
+func recordMissingRuleMerge(identity *Identity, first *automergeInspection, rule string) error {
+	next, err := inspectAutomerge(first.Proposal.ID, rule)
+	if err != nil {
+		return err
+	}
+	if err := next.eligible(); err != nil {
+		return err
+	}
+	if next.Repair == "" || next.Repair != first.Repair || next.Branch != first.Branch || next.Current != first.Current ||
+		next.Proposal.Event.Base != first.Proposal.Event.Base || next.Proposal.Event.Head != first.Proposal.Event.Head ||
+		next.Evaluation.PolicyDigest != first.Evaluation.PolicyDigest || !next.RuleAcceptance.Satisfied() {
+		return fmt.Errorf("automerge candidate, policy or target changed before merge")
+	}
+	if !actorListed(identity.Actor, next.Rule.Actors) {
+		return fmt.Errorf("identity %s is no longer an executing actor for automerge rule %q", identity.Actor, rule)
+	}
+	stored, err := appendRuleMergeEvent(identity, next.Proposal, next.Evaluation, next.RuleAcceptance, next.Repair)
+	if err != nil {
+		return fmt.Errorf("rule merge event repair at %s failed: %w", shortOID(next.Repair), err)
+	}
+	fmt.Printf("Recorded missing rule merge event %s under rule %s with %d evidence item(s)\n", shortID(stored.ID), safeText(stored.Event.Rule), len(stored.Event.Evidence))
+	return nil
+}
+
+// automergePublicationOnlyFact decides whether hn automerge PROPOSAL --rule
+// NAME --execute --remote REMOTE is a publication-only rerun (FR-020,
+// decision 01M5VSEHFCZGQHQ14CKJ3MAMP7) and returns the identity's own rule
+// merge fact when it is. All of these must hold: the candidate is recorded
+// as merged under a standing rule NAME of its base policy, the identity
+// loads and is one of the rule's executing actors, the local store holds a
+// rule merge fact for the candidate under NAME signed by that identity, and
+// REMOTE is an hn serve remote. Any other case, including every failure to
+// tell, returns nil, so the caller's existing refusals apply unchanged; the
+// candidate is merged, so that refusal always includes the already-merged
+// blocker.
+func automergePublicationOnlyFact(inspection *automergeInspection, rule, remote string) *StoredEvent {
+	if remote == "" || inspection.Rule == nil || !inspection.Rule.Acceptance.Standing() || !inspection.Evaluation.Merged {
+		return nil
+	}
+	identity, err := loadIdentity()
+	if err != nil || !actorListed(identity.Actor, inspection.Rule.Actors) {
+		return nil
+	}
+	events, err := collectEvents()
+	if err != nil {
+		return nil
+	}
+	fact, err := automergeOwnRuleMergeFact(events, *inspection.Proposal, rule, identity.Actor, inspection.Evaluation.PolicyDigest)
+	if err != nil || fact == nil {
+		return nil
+	}
+	if !validReplicationRemote(remote) {
+		return nil
+	}
+	if identified, _ := serveRemoteIdentifies(remote); !identified {
+		return nil
+	}
+	return fact
+}
+
+// automergeOwnRuleMergeFact returns actor's rule merge fact for proposal
+// under rule and the base policy digest, the lowest event ID first, or nil
+// when there is none. Only facts that projection admitted through the rule
+// path (b) count: a fact that passes maintainerMergeCheck is an acceptance
+// merge fact even when it names a rule. Projection has already validated
+// every fact in events, so path (b) is not run again.
+func automergeOwnRuleMergeFact(events []StoredEvent, proposal StoredEvent, rule, actor, policyDigest string) (*StoredEvent, error) {
+	if rule == "" || actor == "" || policyDigest == "" {
+		return nil, fmt.Errorf("own rule merge fact lookup needs a rule, an actor and a policy digest")
+	}
+	byID := make(map[string]StoredEvent, len(events))
+	var facts []StoredEvent
+	for _, stored := range events {
+		byID[stored.ID] = stored
+		event := stored.Event
+		if event.Kind == "proposal.merged" && event.Subject == proposal.ID && event.Rule == rule && event.Actor == actor && event.Policy == policyDigest {
+			facts = append(facts, stored)
+		}
+	}
+	sort.Slice(facts, func(i, j int) bool { return facts[i].ID < facts[j].ID })
+	for index := range facts {
+		if maintainerMergeCheck(facts[index], proposal, byID) != nil {
+			fact := facts[index]
+			return &fact, nil
+		}
+	}
+	return nil, nil
 }
 
 // Avoid promisor lazy fetch and recovery-ledger writes in preview without
@@ -230,6 +374,11 @@ func inspectAutomerge(query, ruleName string) (*automergeInspection, error) {
 			result.Blockers = append(result.Blockers, fmt.Sprintf("automerge rule %q does not exist in the signed base policy", ruleName))
 		}
 	}
+	standing := false
+	if result.Rule != nil {
+		result.RuleAcceptance = evaluateRuleAcceptance(automergeRuleInputs(proposal, evaluation, ruleName, changed, events))
+		standing = result.Rule.Acceptance.Standing()
+	}
 	if err := requireLineageTerminalEligibility("automerge", proposal.ID, evaluation.Lineage); err != nil {
 		result.Blockers = append(result.Blockers, err.Error())
 	}
@@ -239,11 +388,25 @@ func inspectAutomerge(query, ruleName string) (*automergeInspection, error) {
 	if !evaluation.CodeMatches {
 		result.Blockers = append(result.Blockers, "proposal code ref does not match its signed head")
 	}
-	if !evaluation.Ready {
+	// Under acceptance mode rule the rule's own thresholds replace readiness
+	// and no maintainer acceptance is required. The evaluator's author, path
+	// and rule-missing texts are not copied: the checks below report them.
+	if standing {
+		for _, unmet := range result.RuleAcceptance.UnmetOf(ruleUnmetApprovals, ruleUnmetPipeline) {
+			result.Blockers = append(result.Blockers, unmet.Text)
+		}
+	} else if !evaluation.Ready {
 		result.Blockers = append(result.Blockers, "current approval, protected check or CI evidence is not ready")
 	}
-	if !evaluation.Accepted {
+	if !standing && !evaluation.Accepted {
 		result.Blockers = append(result.Blockers, "current required maintainer acceptances are missing")
+	}
+	// A maintainers-mode rule with reviewers also needs its own approval
+	// threshold (US5-4); without reviewers its blockers are unchanged.
+	if result.Rule != nil && !standing && !result.Rule.Reviewers.IsZero() {
+		for _, unmet := range result.RuleAcceptance.UnmetOf(ruleUnmetApprovals) {
+			result.Blockers = append(result.Blockers, unmet.Text)
+		}
 	}
 	if evaluation.Rejected {
 		result.Blockers = append(result.Blockers, "proposal has a current maintainer rejection")
@@ -259,9 +422,9 @@ func inspectAutomerge(query, ruleName string) (*automergeInspection, error) {
 			result.Blockers = append(result.Blockers, fmt.Sprintf("pipeline %q has a current trusted failure", pipeline.Name))
 		}
 	}
-	if current != proposal.Event.Base {
-		result.Blockers = append(result.Blockers, "target no longer equals the signed base; revise the candidate (use hn merge for a missing merge-event repair)")
-	}
+	// The moved-target blocker is placed here once every other blocker is
+	// known, so a repair state is reported only as the sole difference.
+	targetMoved, targetAt := current != proposal.Event.Base, len(result.Blockers)
 	if len(changed) == 0 {
 		result.Blockers = append(result.Blockers, "proposal has no changed paths")
 	}
@@ -308,7 +471,50 @@ func inspectAutomerge(query, ruleName string) (*automergeInspection, error) {
 	if len(status) > 0 {
 		result.Blockers = append(result.Blockers, "worktree and index must be clean before automerge")
 	}
+	if targetMoved {
+		if standing && len(result.Blockers) == 0 && !evaluation.Merged && targetDigest == evaluation.PolicyDigest {
+			result.Repair = automergeRepairCommit(proposal, current)
+		}
+		if result.Repair == "" {
+			result.Blockers = slices.Insert(result.Blockers, targetAt, automergeTargetMoved)
+		}
+	}
 	return result, nil
+}
+
+// automergeRepairCommit returns the one first-parent merge commit of current
+// that names the candidate head as a parent, or "" when there is none or
+// more than one. Its errors mean "not a repair state", never a failure of
+// the inspection, so the moved-target blocker refuses instead.
+func automergeRepairCommit(proposal *StoredEvent, current string) string {
+	commit, err := findProposalMergeCommit(proposal, current)
+	if err != nil || !validFullGitObjectID(commit) {
+		return ""
+	}
+	return commit
+}
+
+// automergeRuleInputs gathers the rule derivation's inputs from what the
+// inspection already holds. The target branch is left empty because the
+// inspection reports a checked-out branch mismatch itself. A pipeline whose
+// definition does not load at the head is left out, so none of its results
+// count; evaluateProposal already refuses that case when the code matches.
+func automergeRuleInputs(proposal *StoredEvent, evaluation *ProposalEvaluation, ruleName string, changed []string, events []StoredEvent) ruleInputs {
+	definitions := make(map[string]string, len(evaluation.Policy.Pipelines))
+	for name := range evaluation.Policy.Pipelines {
+		if _, _, definition, err := loadPipeline(proposal.Event.Head, name); err == nil {
+			definitions[name] = definition
+		}
+	}
+	return ruleInputs{
+		Policy:              evaluation.Policy,
+		PolicyDigest:        evaluation.PolicyDigest,
+		Proposal:            *proposal,
+		RuleName:            ruleName,
+		Changed:             changed,
+		PipelineDefinitions: definitions,
+		Events:              events,
+	}
 }
 
 // Unlike protection matching, a descendant permission never allows modifying an
@@ -342,10 +548,16 @@ func printAutomergeInspection(i *automergeInspection) {
 		for _, actor := range actors {
 			fmt.Printf("  %s\n", actor)
 		}
+		if a := i.RuleAcceptance; a != nil {
+			printAutomergeRuleAcceptance(a)
+		}
 	}
 	fmt.Println("Changed paths:")
 	for _, p := range i.Changed {
 		fmt.Printf("  %q\n", p)
+	}
+	if i.Repair != "" {
+		fmt.Printf("Repair: code merged at %s; --execute records the missing rule merge fact\n", shortOID(i.Repair))
 	}
 	if len(i.Blockers) == 0 {
 		fmt.Println("Eligible: explicit --execute is required to merge locally.")
@@ -355,6 +567,29 @@ func printAutomergeInspection(i *automergeInspection) {
 			fmt.Printf("  %s\n", safeText(b))
 		}
 	}
+}
+
+// printAutomergeRuleAcceptance prints the acceptance mode, the counted
+// reviewers and the counted approvals of the rule (FR-008).
+func printAutomergeRuleAcceptance(a *ruleAcceptance) {
+	if a.Standing {
+		fmt.Println("Acceptance: rule (standing acceptance; no maintainer acceptance required)")
+	} else {
+		fmt.Println("Acceptance: maintainers (maintainer acceptance required)")
+	}
+	if a.HasRuleReviewers {
+		fmt.Println("Counted reviewers:")
+		for _, reviewer := range a.CountedReviewers {
+			fmt.Printf("  %s\n", safeText(reviewer))
+		}
+	} else {
+		fmt.Println("Counted reviewers: all trusted reviewers")
+	}
+	fmt.Printf("Counted approvals: %d/%d", len(a.Approvals), a.RequiredApprovals)
+	if a.Standing {
+		fmt.Print(" (author approvals do not count)")
+	}
+	fmt.Println()
 }
 
 // A prepared expected-old transaction locks the actual target and HEAD before
@@ -493,7 +728,10 @@ func (t *automergeRefTransaction) close() {
 	_ = t.wait()
 }
 
-func advanceAutomerge(proposal *StoredEvent, evaluation *ProposalEvaluation, branch, current, message string, check func(*StoredEvent, *ProposalEvaluation, string, string) error) (string, error) {
+// rerun is the command the recovery messages name: hn merge PROPOSAL under
+// acceptance mode maintainers, the same hn automerge command under
+// acceptance mode rule.
+func advanceAutomerge(proposal *StoredEvent, evaluation *ProposalEvaluation, branch, current, message, rerun string, check func(*StoredEvent, *ProposalEvaluation, string, string) error) (string, error) {
 	if current != proposal.Event.Base {
 		return "", fmt.Errorf("automerge target must equal the signed base")
 	}
@@ -538,7 +776,7 @@ func advanceAutomerge(proposal *StoredEvent, evaluation *ProposalEvaluation, bra
 	// actual value before deciding whether a safe checkout rollback is needed.
 	actualRaw, readErr := boundedPolicyGitOutput("", 128, "rev-parse", "--verify", "refs/heads/"+branch)
 	if readErr != nil {
-		return "", fmt.Errorf("automerge ref outcome is uncertain; inspect branch %q and run 'hn merge %s' if code merged", branch, proposal.ID)
+		return "", fmt.Errorf("automerge ref outcome is uncertain; inspect branch %q and run '%s' if code merged", branch, rerun)
 	}
 	actual := strings.TrimSpace(string(actualRaw))
 	if actual != commit {
@@ -550,7 +788,7 @@ func advanceAutomerge(proposal *StoredEvent, evaluation *ProposalEvaluation, bra
 		return "", fmt.Errorf("automerge target was not advanced to the prepared merge; current target %s (commit confirmation: %v)", actual, commitErr)
 	}
 	if err := runAutomergeHook("merge-committed"); err != nil {
-		return "", fmt.Errorf("code merged at %s but event recording interrupted; run 'hn merge %s': %w", commit, proposal.ID, err)
+		return "", fmt.Errorf("code merged at %s but event recording interrupted; run '%s': %w", commit, rerun, err)
 	}
 	return commit, nil
 }
@@ -629,7 +867,12 @@ func automergeIgnoredPathCollision(changed []string, p string) bool {
 // change request or failing run that exists only on the server blocks the
 // rule, and it requires the checked-out target branch to equal the hosted
 // tip it then binds the advancement to. The server applies its own checks
-// to the advancement; it does not evaluate automerge rules.
+// to the advancement. Under acceptance mode rule the advancement is also
+// bound to the rule: the client sends hn-rule, the server evaluates the
+// rule itself in place of maintainer acceptance, and the client records a
+// rule merge fact with commit equal to the head. Under acceptance mode
+// maintainers no rule is sent, and the server requires maintainer
+// acceptance as for hn merge --remote.
 func automergeRemote(first *automergeInspection, rule, remote, actor string) error {
 	if !validReplicationRemote(remote) {
 		return fmt.Errorf("invalid remote name %q", remote)
@@ -670,11 +913,46 @@ func automergeRemote(first *automergeInspection, rule, remote, actor string) err
 	if err != nil {
 		return err
 	}
+	if found && hosted != inspection.Current {
+		if repaired, ok := automergeRemoteRepairTip(inspection, remote, branchRef); ok {
+			return mergeRemoteBound(inspection.Proposal.ID, remote, branchRef, serveAdvanceBinding{ExpectedActor: actor, ExpectedTip: repaired, Rule: rule})
+		}
+	}
 	if !found || hosted != inspection.Current {
 		return fmt.Errorf("local %s is at %s but %s has %s; update the local branch to the hosted tip and rerun",
 			inspection.Rule.TargetBranch, shortOID(inspection.Current), remote, shortOID(hosted))
 	}
-	return mergeRemoteBound(inspection.Proposal.ID, remote, branchRef, serveAdvanceBinding{ExpectedActor: actor, ExpectedTip: hosted})
+	binding := serveAdvanceBinding{ExpectedActor: actor, ExpectedTip: hosted}
+	if inspection.Rule.Acceptance.Standing() {
+		binding.Rule = rule
+	}
+	return mergeRemoteBound(inspection.Proposal.ID, remote, branchRef, binding)
+}
+
+// automergeRemoteRepairTip recognizes the remote repair of FR-020 under a
+// standing rule: the server applied the advancement but the rule merge fact
+// was not recorded. It holds when the candidate has no merge fact, the
+// local target still equals the signed base, and the hosted tip equals or
+// descends from the head. It returns that hosted tip, which binds
+// mergeRemoteBound, whose step 5 then records the missing fact once with
+// commit equal to the head. Under acceptance mode maintainers it never
+// holds, so the local-equals-hosted refusal is unchanged.
+func automergeRemoteRepairTip(inspection *automergeInspection, remote, branchRef string) (string, bool) {
+	if !inspection.Rule.Acceptance.Standing() || inspection.Evaluation.Merged || inspection.Current != inspection.Proposal.Event.Base {
+		return "", false
+	}
+	// The hosted tip may descend from the head through commits this clone
+	// has not fetched; step 4 reads and fetches it the same way. A tip that
+	// cannot be read is not a repair state, and the caller refuses.
+	tip, err := serveAdvanceReadTip(remote, branchRef)
+	if err != nil {
+		return "", false
+	}
+	head := inspection.Proposal.Event.Head
+	if tip != head && !serveAdvanceIsAncestor(head, tip) {
+		return "", false
+	}
+	return tip, true
 }
 
 // automergeUnselectedActors lists the policy's maintainers, trusted

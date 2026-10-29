@@ -15,6 +15,13 @@ import (
 // kitty-specs/hn-serve-01M5P0NP/contracts/push-verdict.md and the first
 // failing step is reported. The server only decides: it never creates a
 // commit and never signs anything (C-005, C-006).
+//
+// An advancement request that names an automerge rule with hn-rule runs
+// the rule steps of
+// kitty-specs/standing-acceptance-01M5VD2K/contracts/serve-rule-advancement.md
+// instead: the rule's standing acceptance replaces maintainer acceptance,
+// and every rule step is guarded by options.Rule, so updates without
+// hn-rule are judged exactly as before (FR-018).
 
 // Steps of the protected branch table, in the order they run.
 const (
@@ -31,6 +38,16 @@ const (
 	serveProtectedStepDestReady      = 11
 	serveProtectedStepProtectedCheck = 12
 	serveProtectedStepAdvanceAllowed = 13
+
+	// Steps that run only for an advancement request naming a rule with
+	// hn-rule (kitty-specs/standing-acceptance-01M5VD2K/contracts/
+	// serve-rule-advancement.md): 7a, step 10 under the rule, and step 13
+	// under the rule. hn-rule requires hn-advance, so the candidate set has
+	// exactly one candidate and the "latest failing step" ranking of
+	// several candidates never compares these values.
+	serveProtectedStepRuleDestPolicy = 14
+	serveProtectedStepRuleAcceptance = 15
+	serveProtectedStepRuleExecutor   = 16
 )
 
 // serveProtectedVerdict is the outcome of one protected update. Step is 0
@@ -47,13 +64,15 @@ type serveProtectedVerdict struct {
 }
 
 // serveProtectedUpdate holds what every candidate check of one update
-// reads: the tip T, the pushed head H, the destination policy at T and the
-// facts known to this push.
+// reads: the tip T, the pushed head H, the destination policy at T and its
+// digest, the push options and the facts known to this push.
 type serveProtectedUpdate struct {
 	ctx        *serveVerdictContext
 	ref        string
 	tip, head  string
 	destPolicy PolicyDocument
+	destDigest string
+	options    servePushOptions
 	events     []StoredEvent
 	// pushedCode maps a candidate ID to the commit of a proposal ref this
 	// push creates for it.
@@ -97,7 +116,7 @@ func evaluateServeProtectedUpdate(ctx *serveVerdictContext, update serveRefUpdat
 	}
 
 	// Step 4: the destination policy at the current tip.
-	destPolicy, _, err := loadReplicationPolicyAt(ctx.GitDir, ctx.GitDir, tip)
+	destPolicy, destDigest, err := loadReplicationPolicyAt(ctx.GitDir, ctx.GitDir, tip)
 	if err != nil {
 		return serveProtectedReject(serveProtectedStepDestPolicy, "", nil, &serveRejection{
 			Code: serveReasonProtectedPolicyInvalid,
@@ -154,6 +173,8 @@ func evaluateServeProtectedUpdate(ctx *serveVerdictContext, update serveRefUpdat
 		tip:        tip,
 		head:       head,
 		destPolicy: destPolicy,
+		destDigest: destDigest,
+		options:    options,
 		events:     events,
 		pushedCode: servePushedProposalCode(ctx.PushUpdates),
 		hostedCode: hostedCode,
@@ -178,6 +199,22 @@ func evaluateServeProtectedUpdate(ctx *serveVerdictContext, update serveRefUpdat
 		rejection := reported.rejection
 		rejection.IDs = serveProtectedIDs(ids, rejection.IDs)
 		return serveProtectedReject(reported.step, reported.candidate, ids, rejection)
+	}
+
+	// Step 13 under a rule: the requester must be an executing actor of the
+	// named rule in the base policy. The maintainer requirement below does
+	// not apply, because the rule's standing acceptance accepted the
+	// candidate at step 10.
+	if options.Rule != "" {
+		if rule := ruleByName(passed.basePolicy, options.Rule); rule == nil || !actorListed(ctx.Actor, rule.Actors) {
+			return serveProtectedReject(serveProtectedStepRuleExecutor, passed.candidate, ids, &serveRejection{
+				Code: serveReasonAdvanceNotRuleExecutor,
+				IDs:  serveProtectedIDs(ids, nil),
+				Sentence: "actor " + ctx.Actor + " requested advancement of " + update.Ref + " under rule " + options.Rule +
+					" and is not one of its executing actors in the base policy of " + passed.candidate + ".",
+			})
+		}
+		return serveProtectedVerdict{Candidate: passed.candidate, Candidates: ids}
 	}
 
 	// Step 13: an advancement request needs a maintainer of both policies.
@@ -305,6 +342,20 @@ func (check *serveProtectedUpdate) candidate(candidate *StoredEvent) serveProtec
 	}
 	result.basePolicy = basePolicy
 
+	// Step 7a under a rule: a rule applies only under the policy that
+	// defines it, so the destination policy must be the base policy
+	// (FR-017). This also makes step 11 identical to step 10.
+	if check.options.Rule != "" && check.destDigest != baseDigest {
+		return result.fail(serveProtectedStepRuleDestPolicy, &serveRejection{
+			Code:    serveReasonProtectedDestinationPolicy,
+			IDs:     []string{candidate.ID},
+			Missing: []string{serveEvidenceProposal},
+			Next:    "revise " + candidate.ID + " against " + check.tip,
+			Sentence: check.ref + " at " + serveShortCommit(check.tip) + " has policy " + check.destDigest + " and candidate " + candidate.ID +
+				" was based on policy " + baseDigest + "; rule " + check.options.Rule + " applies only under its own policy.",
+		})
+	}
+
 	// Step 8: the candidate's code is hosted or arrives in this push.
 	code := proposalCodeState{}
 	if hosted, ok := check.hostedCode[candidate.ID]; ok {
@@ -348,6 +399,21 @@ func (check *serveProtectedUpdate) candidate(candidate *StoredEvent) serveProtec
 		})
 	}
 
+	// Steps 10 and 11 under a rule: the rule replaces readiness and
+	// acceptance, and step 7a already made the destination policy the base
+	// policy, so step 11 would repeat step 10 and is skipped. A pipeline
+	// without a valid definition at H is absent from the rule's inputs and
+	// becomes its pipeline condition.
+	if check.options.Rule != "" {
+		if rejection := check.ruleAcceptance(candidate, basePolicy, baseDigest); rejection != nil {
+			return result.fail(serveProtectedStepRuleAcceptance, rejection)
+		}
+		if rejection := check.protectedBaseline(candidate, base); rejection != nil {
+			return result.fail(serveProtectedStepProtectedCheck, rejection)
+		}
+		return result
+	}
+
 	// Step 10: ready and accepted under the base policy.
 	if baseDefinitionErr != nil || !base.Ready || !base.Accepted {
 		missing, details := serveProtectedUnmet("base policy", base, baseDefinitionErr, check.head)
@@ -378,22 +444,142 @@ func (check *serveProtectedUpdate) candidate(candidate *StoredEvent) serveProtec
 		})
 	}
 
-	// Step 12: protected checks at the destination. The same guard hn merge
-	// applies before a local merge: when the destination opts in to protected
-	// checks, its policy must be the candidate's base policy and no protected
-	// path may have changed between the base and the tip, so a stale
-	// candidate cannot carry an approval past a newer protected baseline.
-	if check.tip != "" {
-		if err := guardTargetProtectedPolicy(check.tip, base); err != nil {
-			return result.fail(serveProtectedStepProtectedCheck, &serveRejection{
-				Code:     serveReasonProtectedDestinationPolicy,
-				Missing:  []string{serveEvidenceProposal},
-				Next:     "revise " + candidate.ID + " against " + serveShortCommit(check.tip),
-				Sentence: check.ref + " at " + serveShortCommit(check.tip) + " refuses candidate " + candidate.ID + ": " + serveDiagnostic(err, check.ctx.GitDir) + ".",
-			})
-		}
+	if rejection := check.protectedBaseline(candidate, base); rejection != nil {
+		return result.fail(serveProtectedStepProtectedCheck, rejection)
 	}
 	return result
+}
+
+// protectedBaseline is step 12, protected checks at the destination. The
+// same guard hn merge applies before a local merge: when the destination
+// opts in to protected checks, its policy must be the candidate's base
+// policy and no protected path may have changed between the base and the
+// tip, so a stale candidate cannot carry an approval past a newer
+// protected baseline.
+func (check *serveProtectedUpdate) protectedBaseline(candidate *StoredEvent, base *ProposalEvaluation) *serveRejection {
+	if check.tip == "" {
+		return nil
+	}
+	if err := guardTargetProtectedPolicy(check.tip, base); err != nil {
+		return &serveRejection{
+			Code:     serveReasonProtectedDestinationPolicy,
+			Missing:  []string{serveEvidenceProposal},
+			Next:     "revise " + candidate.ID + " against " + serveShortCommit(check.tip),
+			Sentence: check.ref + " at " + serveShortCommit(check.tip) + " refuses candidate " + candidate.ID + ": " + serveDiagnostic(err, check.ctx.GitDir) + ".",
+		}
+	}
+	return nil
+}
+
+// ruleAcceptance is step 10 under the rule named by hn-rule. It derives
+// rule satisfaction with evaluateRuleAcceptance, the derivation the client
+// preview and local execution share (FR-012), from the base policy, the
+// candidate's changed paths, the pipeline definitions at H and the facts of
+// this push, and reports the failures in the contract order: the rule
+// itself (a to c), vetoes (d), author and paths (e), thresholds (f).
+func (check *serveProtectedUpdate) ruleAcceptance(candidate *StoredEvent, basePolicy PolicyDocument, baseDigest string) *serveRejection {
+	name := check.options.Rule
+	notSatisfied := func(missing []string, details string) *serveRejection {
+		next := strings.NewReplacer("<candidate>", candidate.ID, "<rule>", name).Replace(serveReasonDefaultNext(serveReasonProtectedRuleNotSatisfied))
+		return &serveRejection{
+			Code:     serveReasonProtectedRuleNotSatisfied,
+			IDs:      []string{candidate.ID},
+			Missing:  missing,
+			Next:     next,
+			Sentence: "candidate " + candidate.ID + " does not satisfy rule " + name + ": " + details + ".",
+		}
+	}
+	unmetText := func(unmet []ruleUnmet) string {
+		texts := make([]string, len(unmet))
+		for index, condition := range unmet {
+			texts[index] = condition.Text
+		}
+		return strings.Join(texts, "; ")
+	}
+
+	// An unreadable diff never becomes an empty change list (FR-014).
+	changed, err := changedPathsAt(check.ctx.GitDir, candidate.Event.Base, candidate.Event.Head)
+	if err != nil {
+		return notSatisfied(nil, "its changed paths cannot be read: "+serveDiagnostic(err, check.ctx.GitDir))
+	}
+	definitions := make(map[string]string, len(basePolicy.Pipelines))
+	for _, pipeline := range rulePipelineNames(basePolicy) {
+		if definition, err := replicationPipelineDigestAt(check.ctx.GitDir, check.ctx.GitDir, candidate.Event.Head, pipeline); err == nil {
+			definitions[pipeline] = definition
+		}
+	}
+	acceptance := evaluateRuleAcceptance(ruleInputs{
+		Policy:              basePolicy,
+		PolicyDigest:        baseDigest,
+		Proposal:            *candidate,
+		RuleName:            name,
+		TargetBranch:        strings.TrimPrefix(check.ref, "refs/heads/"),
+		Changed:             changed,
+		PipelineDefinitions: definitions,
+		Events:              check.events,
+	})
+
+	if unmet := acceptance.UnmetOf(ruleUnmetMissing, ruleUnmetMode, ruleUnmetTargetBranch); len(unmet) > 0 {
+		return notSatisfied(nil, unmetText(unmet))
+	}
+	// A maintainer rejection is a veto too, but step 9 already reported it
+	// as protected-blocked; it is checked last only to stay fail-closed.
+	if rejection := serveRuleVetoRejection(candidate.ID, name, acceptance.Vetoes, ruleVetoChangeRequest, ruleVetoFailure); rejection != nil {
+		return rejection
+	}
+	if unmet := acceptance.UnmetOf(ruleUnmetAuthor, ruleUnmetManualPath, ruleUnmetPath); len(unmet) > 0 {
+		return notSatisfied(nil, unmetText(unmet))
+	}
+	if unmet := acceptance.UnmetOf(ruleUnmetApprovals, ruleUnmetPipeline); len(unmet) > 0 {
+		var missing []string
+		for _, condition := range unmet {
+			kind := serveEvidenceReview
+			if condition.Kind == ruleUnmetPipeline {
+				kind = serveEvidenceCI
+			}
+			if !slices.Contains(missing, kind) {
+				missing = append(missing, kind)
+			}
+		}
+		return notSatisfied(missing, unmetText(unmet))
+	}
+	if rejection := serveRuleVetoRejection(candidate.ID, name, acceptance.Vetoes, ruleVetoRejection); rejection != nil {
+		return rejection
+	}
+	if !acceptance.Satisfied() {
+		return notSatisfied(nil, "the rule derivation did not accept it")
+	}
+	return nil
+}
+
+// serveRuleVetoClauses names each veto kind in a protected-rule-veto
+// sentence.
+var serveRuleVetoClauses = map[string]string{
+	ruleVetoChangeRequest: "trusted change request",
+	ruleVetoFailure:       "trusted failure",
+	ruleVetoRejection:     "current maintainer rejection",
+}
+
+// serveRuleVetoRejection is the protected-rule-veto line for the vetoes of
+// the given kinds, or nil when there are none. vetoes are sorted by event
+// ID, so the IDs after the candidate are too.
+func serveRuleVetoRejection(candidate, rule string, vetoes []ruleVeto, kinds ...string) *serveRejection {
+	var ids, clauses []string
+	for _, veto := range vetoes {
+		if !slices.Contains(kinds, veto.Kind) {
+			continue
+		}
+		ids = append(ids, veto.Event.ID)
+		clauses = append(clauses, serveRuleVetoClauses[veto.Kind]+" "+veto.Event.ID)
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+	return &serveRejection{
+		Code:     serveReasonProtectedRuleVeto,
+		IDs:      append([]string{candidate}, ids...),
+		Sentence: "candidate " + candidate + " is blocked by rule " + rule + ": " + strings.Join(clauses, "; ") + ".",
+	}
 }
 
 // evaluate evaluates the candidate under policy with decisions matched by

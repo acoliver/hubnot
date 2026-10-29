@@ -217,6 +217,14 @@ func comparePolicies(base, proposed policySource) []policyChange {
 			proposedRunners = nil
 		}
 		changes = append(changes, actorChanges("pipeline "+name+" trusted runners", baseRunners, proposedRunners)...)
+		baseRequesters, proposedRequesters := basePipeline.Requesters, proposedPipeline.Requesters
+		if !inBase {
+			baseRequesters = nil
+		}
+		if !inProposed {
+			proposedRequesters = nil
+		}
+		changes = append(changes, actorChanges("pipeline "+name+" requesters", baseRequesters, proposedRequesters)...)
 	}
 	changes = append(changes, compareOptionalPolicies(base.Policy, proposed.Policy)...)
 	return changes
@@ -238,6 +246,12 @@ func printPolicySource(source policySource) {
 		fmt.Printf("  %s (required results %d):\n", name, pipeline.RequiredResults)
 		for _, actor := range sortedStrings(pipeline.TrustedRunners) {
 			fmt.Printf("    %s\n", actor)
+		}
+		if len(pipeline.Requesters) > 0 {
+			fmt.Println("    requesters besides maintainers:")
+			for _, actor := range sortedStrings(pipeline.Requesters) {
+				fmt.Printf("      %s\n", actor)
+			}
 		}
 	}
 }
@@ -371,6 +385,14 @@ func optionalScalarChange(base int, inBase bool, proposed int, inProposed bool) 
 }
 
 func printOptionalPolicy(policy PolicyDocument) {
+	if p := policy.Audits; p != nil {
+		fmt.Printf("Audits: enabled (scope %s; observational)\n", p.Scope)
+		printActors("Audit rule owners:", p.RuleOwners)
+		printActors("Audit requesters:", p.Requesters)
+		printActors("Audit executors:", p.Executors)
+	} else {
+		fmt.Println("Audits: disabled")
+	}
 	if p := policy.ProtectedChecks; p != nil {
 		fmt.Printf("Protected checks: enabled (required designated approvals %d; author excluded)\n", p.RequiredApprovals)
 		printActors("Designated reviewers:", p.TrustedReviewers)
@@ -387,8 +409,19 @@ func printOptionalPolicy(policy PolicyDocument) {
 		sort.Slice(rules, func(i, j int) bool { return rules[i].Name < rules[j].Name })
 		for _, r := range rules {
 			fmt.Printf("Rule %s; target branch %s:\n", r.Name, r.TargetBranch)
-			printActors("  Executing maintainers:", r.Actors)
+			if r.Acceptance.Standing() {
+				fmt.Println("  Acceptance: rule (standing acceptance; no maintainer acceptance per proposal)")
+				printActors("  Executing actors:", r.Actors)
+			} else {
+				fmt.Println("  Acceptance: maintainers (maintainer acceptance required)")
+				printActors("  Executing maintainers:", r.Actors)
+			}
 			printActors("  Proposal authors:", r.Authors)
+			if r.Reviewers.IsZero() {
+				fmt.Println("  Counted reviewers: all trusted reviewers")
+			} else {
+				printActors("  Counted reviewers:", r.Reviewers.Actors())
+			}
 			fmt.Println("  Allowed literal paths:")
 			for _, path := range sortedStrings(r.Paths) {
 				fmt.Printf("    %q\n", path)
@@ -401,6 +434,18 @@ func printOptionalPolicy(policy PolicyDocument) {
 
 func compareOptionalPolicies(base, proposed PolicyDocument) []policyChange {
 	changes := []policyChange{{Label: "protected checks enabled", Value: boolChange(base.ProtectedChecks != nil, proposed.ProtectedChecks != nil)}, {Label: "automerge enabled", Value: boolChange(base.Automerge != nil, proposed.Automerge != nil)}}
+	changes = append(changes, policyChange{Label: "audits enabled", Value: boolChange(base.Audits != nil, proposed.Audits != nil)})
+	var oldAudit, newAudit AuditPolicy
+	if base.Audits != nil {
+		oldAudit = *base.Audits
+	}
+	if proposed.Audits != nil {
+		newAudit = *proposed.Audits
+	}
+	changes = append(changes, policyChange{Label: "audit scope", Value: fmt.Sprintf("%q -> %q", oldAudit.Scope, newAudit.Scope)})
+	changes = append(changes, actorChanges("audit rule owners", oldAudit.RuleOwners, newAudit.RuleOwners)...)
+	changes = append(changes, actorChanges("audit requesters", oldAudit.Requesters, newAudit.Requesters)...)
+	changes = append(changes, actorChanges("audit executors", oldAudit.Executors, newAudit.Executors)...)
 	var a, b ProtectedChecksPolicy
 	if base.ProtectedChecks != nil {
 		a = *base.ProtectedChecks
@@ -442,6 +487,20 @@ func compareOptionalPolicies(base, proposed PolicyDocument) []policyChange {
 		changes = append(changes, actorChanges("automerge rule "+name+" authors", old.Authors, next.Authors)...)
 		added, removed := sortedDifference(sortedStrings(old.Paths), sortedStrings(next.Paths))
 		changes = append(changes, policyChange{Label: "automerge rule " + name + " paths added", Value: joinedOrNone(added)}, policyChange{Label: "automerge rule " + name + " paths removed", Value: joinedOrNone(removed)})
+		// "added" and "removed" describe the whole rule; an absent acceptance
+		// field compares as maintainers and absent reviewers as an empty list.
+		oldMode, nextMode := old.Acceptance.Mode(), next.Acceptance.Mode()
+		acceptance := "unchanged (" + oldMode + ")"
+		switch {
+		case !was:
+			acceptance = "added (" + nextMode + ")"
+		case !is:
+			acceptance = "removed (" + oldMode + ")"
+		case oldMode != nextMode:
+			acceptance = "changed (" + oldMode + " -> " + nextMode + ")"
+		}
+		changes = append(changes, policyChange{Label: "automerge rule " + name + " acceptance", Value: acceptance})
+		changes = append(changes, actorChanges("automerge rule "+name+" reviewers", old.Reviewers.Actors(), next.Reviewers.Actors())...)
 	}
 	return changes
 }

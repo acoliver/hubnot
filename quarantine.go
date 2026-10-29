@@ -364,6 +364,8 @@ func runReplicationTransaction(selection ReplicationSelection) (replicationTrans
 		}
 	}
 
+	// One memo per pass, so rule merge facts share object reads (NFR-005).
+	dependencyOptions := replicationDependencyOptions{RuleMemo: newRuleValidationMemo(replicationRuleObjectAccess(quarantineDir, mainGitDir))}
 	for key, outcome := range outcomes {
 		if outcome.Status != replicationPromotable {
 			continue
@@ -388,7 +390,7 @@ func runReplicationTransaction(selection ReplicationSelection) (replicationTrans
 			continue
 		}
 		for _, event := range outcome.events {
-			dependency, relationErr := replicationEventDependency(quarantineDir, mainGitDir, event, byID, codeHeads, eventOwner, codeOwners)
+			dependency, relationErr := replicationEventDependencyWithOptions(quarantineDir, mainGitDir, event, byID, codeHeads, eventOwner, codeOwners, dependencyOptions)
 			if relationErr != nil {
 				outcome.Status = replicationRelationshipBad
 				outcome.Diagnostic = fmt.Sprintf("selection actor %s event %s (%s) is invalid: %v", outcome.ID, event.ID, event.Event.Kind, relationErr)
@@ -907,6 +909,11 @@ func measureQuarantinedSelectionUnderBudgets(quarantineGitDir, mainGitDir, kind,
 		}
 	}
 	if kind == replicationActor {
+		var err error
+		measurements, err = measureAuditSnapshotDependenciesAt(quarantineGitDir, mainGitDir, root, acceptedRoot, budgets, selectionID, measurements)
+		if err != nil {
+			return measurements, err
+		}
 		events, err := loadActorEventsAt(quarantineGitDir, root)
 		if err != nil {
 			return ReplicationMeasurements{}, err
@@ -1037,10 +1044,7 @@ func validateQuarantinedEventTree(gitDir string, event StoredEvent) error {
 		}
 		names[name] = true
 	}
-	want := map[string]bool{"event.json": true, "signature": true}
-	if event.Event.Kind == "run.result" {
-		want["log.txt"] = true
-	}
+	want := eventTreeMembers(event.Event.Kind)
 	if len(names) != len(want) {
 		return fmt.Errorf("event %s has unsupported attachment or missing signed material", event.ID)
 	}
@@ -1050,6 +1054,22 @@ func validateQuarantinedEventTree(gitDir string, event StoredEvent) error {
 		}
 	}
 	return nil
+}
+
+// eventTreeMembers is the exact set of regular files an event commit of
+// kind holds: event.json, signature and the kind's typed attachments.
+func eventTreeMembers(kind string) map[string]bool {
+	want := map[string]bool{"event.json": true, "signature": true}
+	if isAuditKind(kind) {
+		want["audit.pack"] = true
+		if kind == "audit.result" {
+			want["log.txt"] = true
+		}
+	}
+	if kind == "run.result" {
+		want["log.txt"] = true
+	}
+	return want
 }
 
 func acceptedProposalHeads() (map[string]string, map[string]string, error) {
@@ -1086,6 +1106,98 @@ type replicationDependencyOptions struct {
 	// whose code ref is absent from codeHeads. The base must exist, and the head
 	// must descend from it whenever the head commit is present.
 	AllowAbsentProposalCode bool
+	// RuleMemo shares path (b) object reads of rule merge facts across one
+	// validation pass over one quarantine and accepted store. nil gives each
+	// call its own memo.
+	RuleMemo *ruleValidationMemo
+}
+
+// ruleMemo is the option's memo, or a fresh one reading gitDir and
+// acceptedGitDir.
+func (o replicationDependencyOptions) ruleMemo(gitDir, acceptedGitDir string) *ruleValidationMemo {
+	if o.RuleMemo != nil {
+		return o.RuleMemo
+	}
+	return newRuleValidationMemo(replicationRuleObjectAccess(gitDir, acceptedGitDir))
+}
+
+// replicationRuleObjectAccess reads path (b) inputs for replication import
+// and the hn serve actor-chain check. Changed paths come from one complete
+// store, the quarantine else the accepted store, never from a mix.
+func replicationRuleObjectAccess(gitDir, acceptedGitDir string) ruleObjectAccess {
+	return ruleObjectAccess{
+		PolicyAt: func(commit string) (PolicyDocument, string, error) {
+			return loadReplicationPolicyAt(gitDir, acceptedGitDir, commit)
+		},
+		ChangedPaths: func(base, head string) ([]string, error) {
+			return changedPathsInOneStore(gitDir, acceptedGitDir, base, head)
+		},
+		PipelineDigest: func(head, pipeline string) (string, error) {
+			return replicationPipelineDigestAt(gitDir, acceptedGitDir, head, pipeline)
+		},
+	}
+}
+
+// ruleMergeDependency carries a missing path (b) input of a rule merge fact
+// out of the rulePath of admitMergeFact, so the proposal.merged arm can
+// report it as a replication dependency instead of a refusal.
+type ruleMergeDependency struct {
+	dependency replicationDependency
+}
+
+func (d *ruleMergeDependency) Error() string {
+	return fmt.Sprintf("rule merge %s missing dependency %s: %s", d.dependency.EventID, d.dependency.Missing, d.dependency.Reason)
+}
+
+// replicationRuleMergeCheck is path (b) for replication import. It runs only
+// after the acceptance merge fact check failed for a fact with a rule claim.
+// An absent base or head commit, or an absent request of a cited run result,
+// is a *ruleMergeDependency; nothing is evaluated against an empty change
+// list (FR-014).
+func replicationRuleMergeCheck(gitDir, acceptedGitDir string, memo *ruleValidationMemo, merge, proposal StoredEvent,
+	byID map[string]StoredEvent, eventOwners, codeOwners map[string]string) error {
+	if dependency := replicationRuleCommitDependency(gitDir, acceptedGitDir, merge, proposal, codeOwners); dependency != nil {
+		return &ruleMergeDependency{dependency: *dependency}
+	}
+	for _, evidenceID := range merge.Event.Evidence {
+		evidence := byID[evidenceID]
+		if evidence.Event.Kind != "run.result" {
+			continue
+		}
+		if _, exists := byID[evidence.Event.Subject]; !exists {
+			request := evidence.Event.Subject
+			return &ruleMergeDependency{dependency: replicationDependency{EventID: merge.ID, EventKind: merge.Event.Kind, Missing: request,
+				Recovery: "select the full actor history supplying " + request, Key: eventOwners[request], Reason: "run request is absent"}}
+		}
+	}
+	err := validateRuleMergeFactWith(memo, merge, proposal, byID)
+	var factErr *ruleFactError
+	if err == nil || errors.As(err, &factErr) {
+		return err
+	}
+	return fmt.Errorf("merge %s: %w", merge.ID, err)
+}
+
+// replicationRuleCommitDependency reports the first of the candidate's base
+// and head commits that keeps path (b) from reading both from one store, or
+// nil when the quarantine or the accepted store holds both.
+func replicationRuleCommitDependency(gitDir, acceptedGitDir string, merge, proposal StoredEvent, codeOwners map[string]string) *replicationDependency {
+	base, head := proposal.Event.Base, proposal.Event.Head
+	for _, store := range []string{gitDir, acceptedGitDir} {
+		if replicationCommitPresent(store, store, base) && replicationCommitPresent(store, store, head) {
+			return nil
+		}
+	}
+	// Each commit may exist in a different store; the exact proposal
+	// selection brings the head with its ancestry into the quarantine.
+	missing, reason := head, "rule merge base and head commits are not in one store"
+	if !replicationCommitPresent(gitDir, acceptedGitDir, base) {
+		missing, reason = base, "rule merge base commit is absent"
+	} else if !replicationCommitPresent(gitDir, acceptedGitDir, head) {
+		reason = "rule merge head commit is absent"
+	}
+	return &replicationDependency{EventID: merge.ID, EventKind: merge.Event.Kind, Missing: missing,
+		Recovery: "add exact proposal selection --proposal " + proposal.ID, Key: codeOwners[proposal.ID], Reason: reason}
 }
 
 func replicationEventDependency(gitDir, acceptedGitDir string, event StoredEvent, byID map[string]StoredEvent, codeHeads, eventOwners, codeOwners map[string]string) (*replicationDependency, error) {
@@ -1125,6 +1237,14 @@ func absentProposalCodeDependency(gitDir, acceptedGitDir string, event StoredEve
 
 func replicationEventDependencyWithOptions(gitDir, acceptedGitDir string, event StoredEvent, byID map[string]StoredEvent,
 	codeHeads, eventOwners, codeOwners map[string]string, options replicationDependencyOptions) (*replicationDependency, error) {
+	if isAuditKind(event.Event.Kind) {
+		for _, id := range auditReferences(event.Event) {
+			if _, exists := byID[id]; !exists {
+				return &replicationDependency{EventID: event.ID, EventKind: event.Event.Kind, Missing: id, Key: eventOwners[id], Recovery: "select the full actor history supplying " + id, Reason: "audit dependency is absent"}, nil
+			}
+		}
+		return nil, validateAuditRelationshipAt(gitDir, acceptedGitDir, event, byID)
+	}
 	require := func(id, description string, predicate func(StoredEvent) bool) (*replicationDependency, error) {
 		stored, exists := byID[id]
 		if !exists {
@@ -1222,7 +1342,17 @@ func replicationEventDependencyWithOptions(gitDir, acceptedGitDir string, event 
 		if err := validateProposalMergeBinding(event, byID[e.Subject]); err != nil {
 			return nil, err
 		}
-		return nil, validateReplicationMergeAt(gitDir, acceptedGitDir, event, byID[e.Subject], byID)
+		proposal := byID[e.Subject]
+		_, err = admitMergeFact(event,
+			func() error { return validateReplicationMergeAt(gitDir, acceptedGitDir, event, proposal, byID) },
+			func() error {
+				return replicationRuleMergeCheck(gitDir, acceptedGitDir, options.ruleMemo(gitDir, acceptedGitDir), event, proposal, byID, eventOwners, codeOwners)
+			})
+		var pending *ruleMergeDependency
+		if errors.As(err, &pending) {
+			return &pending.dependency, nil
+		}
+		return nil, err
 	case "identity.accept":
 		dependency, err := require(e.Subject, "identity authorization", func(value StoredEvent) bool { return value.Event.Kind == "identity.authorize" })
 		if err == nil && dependency == nil {
@@ -1240,6 +1370,7 @@ func replicationEventReferences(event Event) []string {
 	references := append([]string(nil), event.Evidence...)
 	references = append(references, issueReferences(event)...)
 	references = append(references, resourceReferences(event)...)
+	references = append(references, auditReferences(event)...)
 	switch event.Kind {
 	case "issue.comment", "proposal.revise", "review.submit", "run.request", "run.result", "proposal.decision", "proposal.merged", "identity.accept":
 		references = append(references, event.Subject)
@@ -1324,7 +1455,7 @@ func validateReplicationDecisionAt(gitDir, acceptedGitDir string, decision, prop
 		case "run.result":
 			request, exists := byID[evidence.Event.Subject]
 			if !exists || request.Event.Kind != "run.request" || request.Event.Subject != proposal.ID ||
-				!actorListed(request.Event.Actor, policy.Maintainers) || evidence.Event.Outcome != "passed" {
+				!mayRequestRun(policy, request.Event.Pipeline, request.Event.Actor) || evidence.Event.Outcome != "passed" {
 				continue
 			}
 			pipelinePolicy, exists := policy.Pipelines[request.Event.Pipeline]

@@ -44,12 +44,63 @@ func gitInputAt(gitDir string, input []byte, args ...string) ([]byte, error) {
 }
 
 func gitInputWithDirectory(gitDir string, input []byte, extraEnv []string, args ...string) ([]byte, error) {
+	return gitRun(gitDir, append(os.Environ(), extraEnv...), input, args...)
+}
+
+// gitRoutingVariables are inherited variables that would point Git at
+// another repository, object store or configuration than the one a command
+// names. Entries ending in "=" match one variable; GIT_CONFIG matches every
+// GIT_CONFIG* variable. Receive-pack sets several of them for its hooks,
+// including GIT_QUARANTINE_PATH, under which Git refuses ref updates.
+var gitRoutingVariables = []string{
+	"GIT_ALTERNATE_OBJECT_DIRECTORIES=", "GIT_CEILING_DIRECTORIES=", "GIT_COMMON_DIR=", "GIT_CONFIG",
+	"GIT_DIR=", "GIT_DISCOVERY_ACROSS_FILESYSTEM=", "GIT_GRAFT_FILE=", "GIT_INDEX_FILE=", "GIT_NAMESPACE=",
+	"GIT_NO_REPLACE_OBJECTS=", "GIT_OBJECT_DIRECTORY=", "GIT_QUARANTINE_PATH=", "GIT_REPLACE_REF_BASE=",
+	"GIT_SHALLOW_FILE=", "GIT_TEMPLATE_DIR=", "GIT_WORK_TREE=",
+}
+
+// isolatedGitEnvironment is the process environment without
+// gitRoutingVariables.
+func isolatedGitEnvironment() []string {
+	environment := make([]string, 0, len(os.Environ()))
+	for _, entry := range os.Environ() {
+		if !slices.ContainsFunc(gitRoutingVariables, func(prefix string) bool { return strings.HasPrefix(entry, prefix) }) {
+			environment = append(environment, entry)
+		}
+	}
+	return environment
+}
+
+// gitPrivateEnvironment is isolatedGitEnvironment for commands in the
+// private temporary repository private, with every ambient configuration
+// source off as well. isolatedGitEnvironment drops all GIT_CONFIG*
+// variables, which also drops the caller's exclusions such as
+// GIT_CONFIG_NOSYSTEM and GIT_CONFIG_GLOBAL=/dev/null, so the exclusions
+// are set again here, for every caller: no system, global or
+// command-line configuration can name a template, an object store or an
+// include for the private repository. HOME and XDG_CONFIG_HOME name
+// private too, for Git before 2.32, which ignores GIT_CONFIG_GLOBAL;
+// private holds neither .gitconfig nor git/config.
+func gitPrivateEnvironment(private string) []string {
+	return append(isolatedGitEnvironment(), "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL="+os.DevNull, "HOME="+private, "XDG_CONFIG_HOME="+private)
+}
+
+// gitPrivateInputAt runs git for the private temporary repository private
+// with gitPrivateEnvironment, so the command neither reads nor writes an
+// inherited object store, an inherited quarantine cannot refuse it and
+// ambient configuration cannot redirect it. A repository it initializes
+// must be initialized with --template=, so no template is copied either.
+func gitPrivateInputAt(private string, input []byte, args ...string) ([]byte, error) {
+	return gitRun(private, gitPrivateEnvironment(private), input, args...)
+}
+
+func gitRun(gitDir string, environment []string, input []byte, args ...string) ([]byte, error) {
 	if gitDir != "" {
 		args = append([]string{"--git-dir=" + gitDir}, args...)
 	}
 	cmd := exec.Command("git", args...)
 	cmd.Stdin = bytes.NewReader(input)
-	cmd.Env = append(os.Environ(), extraEnv...)
+	cmd.Env = environment
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr

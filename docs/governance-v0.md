@@ -26,10 +26,43 @@ remain as historical evidence but provide no authority to this protocol.
 }
 ```
 
+A pipeline may also list `requesters`: 1–64 actors, besides maintainers,
+whose run requests count for that pipeline. Omit the field to keep run
+requests maintainer-only. Requesting a run grants nothing else: results still
+count only from `trustedRunners`, and requesters gain no review, decision or
+merge authority. Older clients reject policies that contain the field.
+
+```json
+"test": {
+  "requiredResults": 1,
+  "trustedRunners": ["<runner-actor>"],
+  "requesters": ["<orchestrator-actor>"]
+}
+```
+
 Actor values are complete lowercase SHA-256 fingerprints of Ed25519 public
 keys. Unknown JSON fields, duplicate or malformed actors, an empty maintainer
 list, unsatisfiable thresholds, invalid pipeline names, and unsupported policy
 versions are rejected. Policy files are limited to 1 MiB.
+
+## Roles that sound alike
+
+Three optional policy sections name actors who may ask for work or carry it
+out. They are independent: listing an actor in one grants nothing in the
+others.
+
+| Field | Who it lists | What the actor may do | Maintainers included |
+|---|---|---|---|
+| `pipelines.NAME.requesters` | CI requesters | Sign a `run.request` that counts for that pipeline | Yes, always |
+| `pipelines.NAME.trustedRunners` | CI runners | Sign a `run.result` that counts | No |
+| `automerge.rules[].actors` | Rule executors | Execute that automerge rule | No |
+| `audits.requesters` | Audit requesters | Request an audit (see [audits-v1.md](audits-v1.md)) | No |
+| `audits.executors` | Audit executors | Execute an audit and sign its result | No |
+| `audits.ruleOwners` | Audit rule owners | Authorize or revoke audit rules | No |
+
+Audit roles also require the operator's local authority adoption, and audit
+results never count as CI results or merge evidence. CI requesters and rule
+executors need no local adoption.
 
 ## Inspect policy
 
@@ -130,8 +163,9 @@ accepted repository data:
 2. the configured number of distinct trusted reviewers currently approve;
 3. author approval counts only when the base policy permits it;
 4. every required pipeline has enough distinct passing trusted runners;
-5. each run request was signed by a base-policy maintainer and binds the exact
-   candidate, head, pipeline name, and pipeline-definition digest.
+5. each run request was signed by a base-policy maintainer, or by an actor in
+   that pipeline's optional `requesters` list, and binds the exact candidate,
+   head, pipeline name, and pipeline-definition digest.
 
 A reviewer's latest review is current. Change requests are displayed but are
 not a protocol-level veto. A runner's latest exact result is current for a
@@ -158,7 +192,8 @@ policy:
 
 - reviews count only from the destination policy's trusted reviewers, and an
   author's own approval counts only when the destination policy allows it;
-- run requests count only when a destination maintainer signed them, results
+- run requests count only when a destination maintainer or a listed
+  destination pipeline requester signed them, results
   count only from each destination pipeline's trusted runners, and each
   pipeline needs the destination's required number of passing results;
 - decisions count only when a destination maintainer signed them, and the
@@ -189,7 +224,9 @@ A `proposal.merged` fact names the candidate's signed `head` and a resulting
 Validation is the same for both shapes. Hubnot checks that the fact binds the
 candidate's immutable head, that a base-policy maintainer signed it against
 the base policy digest, and that it cites enough current acceptance decisions.
-It does not inspect the ancestry of `commit`. `hn merge PROPOSAL` without
+A fact that fails this check is valid only as a rule merge fact, through the
+rule check that [Executing a standing rule](#executing-a-standing-rule) and
+the protocol describe. Neither check inspects the ancestry of `commit`. `hn merge PROPOSAL` without
 `--remote` keeps producing the second shape.
 
 ## Merge and conflict recovery
@@ -293,7 +330,9 @@ hn policy check --base main --file .hn/policy.json
 ```
 
 Inspection and comparison expose activation, protected paths, designated
-reviewers, thresholds and every automerge rule's actors, authors, paths and target.
+reviewers, thresholds and every automerge rule's actors, authors, paths and target,
+along with its acceptance mode and counted reviewers (see
+[Inspecting a standing rule](#inspecting-a-standing-rule)).
 Older clients that do not recognize these fields reject policies containing
 them, including a `null` field. Omit the fields for compatibility with such
 clients. Existing signed bytes and historical facts are not rewritten.
@@ -358,7 +397,9 @@ path remains governed by the original signed base and evidence.
 
 An automerge policy contains 1–64 uniquely named rules. Every rule explicitly
 names a local target branch, 1–64 executing actors, 1–64 authors and 1–64 literal
-allowed paths. Executing actors must also be base-policy maintainers. Directory
+allowed paths. Executing actors must also be base-policy maintainers unless the
+rule has acceptance mode `rule` (see
+[Standing acceptance rule fields](#standing-acceptance-rule-fields)). Directory
 allowlists permit descendants only; allowing `docs/` does not permit replacing
 the `docs` ancestor itself. Every changed path must match a rule selector.
 
@@ -375,8 +416,59 @@ preview establishes candidate/target eligibility; execution additionally checks
 the selected private signing identity. A preview result never authorizes a later
 execution without reevaluation.
 
-Execution requires current ordinary and designated approvals, required passing
-pipeline results, and the existing maintainer acceptances. It also refuses current
+After the executing actors, the preview prints three lines about the rule's
+acceptance. `Acceptance:` names the acceptance mode and says whether the
+proposal needs maintainer acceptance. `Counted reviewers:` lists the full
+fingerprints of the reviewers in the rule's `reviewers` field, or reads `all
+trusted reviewers` when the rule has no such field. `Counted approvals:` gives
+the current approvals the rule counts and the `proposals.requiredApprovals`
+threshold, as `N/M`. Under acceptance mode `rule` it adds `(author approvals do
+not count)`, because the candidate author's approval never counts there.
+
+Under acceptance mode `rule`, two blockers change. The readiness blocker
+`current approval, protected check or CI evidence is not ready` is replaced by
+the rule's own thresholds, `rule approval threshold is unmet: N of M counted
+approvals` and `pipeline "P" has N of M passing trusted results`, and the
+blocker `current required maintainer acceptances are missing` is dropped. A
+pipeline result counts only when it answers a run request from a maintainer or
+a listed requester of that pipeline. Every other blocker keeps its text and
+position. A current change request from any trusted reviewer, counted or not,
+a current trusted pipeline failure and a current maintainer rejection still
+block the rule. Under acceptance mode `maintainers` the blockers stay as they
+were, and a rule with `reviewers` also reports the rule approval threshold.
+
+The preview below is for a candidate by the rule's author that changes
+`src/feature.txt` and `tests/feature.txt` under the standing rule `ordinary`,
+with one approval from the counted reviewer, one passing result of pipeline
+`test` and no maintainer decision. It writes no event and no ref.
+
+<!-- example: standing-preview -->
+```text
+$ hn automerge <candidate-id> --rule ordinary
+Proposal: <candidate-id>
+Base: <base-commit>
+Head: <head-commit>
+Policy: <policy-digest>
+Target: main at <base-commit>
+Rule: ordinary
+Permitted executing actors:
+  <executor-actor>
+Acceptance: rule (standing acceptance; no maintainer acceptance required)
+Counted reviewers:
+  <reviewer-actor>
+Counted approvals: 1/1 (author approvals do not count)
+Changed paths:
+  "src/feature.txt"
+  "tests/feature.txt"
+Eligible: explicit --execute is required to merge locally.
+```
+
+Under acceptance mode `maintainers`, execution requires current ordinary and
+designated approvals, required passing pipeline results, and the existing
+maintainer acceptances. Under acceptance mode `rule` the rule's thresholds
+replace the maintainer acceptances, as
+[Executing a standing rule](#executing-a-standing-rule) describes. Execution
+in either mode also refuses current
 trusted change requests or pipeline failures, maintainer rejections, superseded
 or closed lineages, mismatched code refs, disallowed authors or changed paths,
 policy amendments, and protected-check changes. The latter two take the manual
@@ -392,14 +484,101 @@ configuration before object evaluation. Use a full clone, or explicitly hydrate
 and reconcile its configuration outside this command. Downloading some missing
 objects alone does not make a configured partial clone eligible. Selected data
 that suffices for an ordinary manual merge does not waive this full-repository
-requirement. Automerge does not fetch or invoke shallow recovery.
+requirement. Automerge does not fetch missing objects or invoke shallow
+recovery. With `--remote`, it imports hosted facts with `hn sync` only after
+these checks pass (see [Commit path, publication and recovery](#commit-path-publication-and-recovery)).
+
+#### Executing a standing rule
+
+An actor listed in the `actors` of a rule with acceptance mode `rule` executes
+it with the same command:
+
+```sh
+hn automerge <full-candidate-event-id> --rule ordinary --execute
+```
+
+The executing actor does not need to be a maintainer. A maintainer listed in the
+rule's `actors` follows the same path and records the same kind of merge fact.
+Any other identity is refused with `identity <actor> is not an executing actor
+for automerge rule "ordinary"`, even when the preview is eligible.
+
+Two things change compared with acceptance mode `maintainers`. No maintainer
+decision is needed: the rule's approval and pipeline thresholds and its
+executing actors take the place of the maintainer acceptances and the
+maintainer identity check. The recorded `proposal.merged` fact names the rule
+in its `rule` field, carries the base policy digest in `policy`, and lists the
+counted approvals and passing run results, sorted, as its `evidence`. Every
+other blocker of the preview still applies. Execution inspects the candidate,
+the target and the evidence again immediately before it advances the branch,
+under the same expected-old ref lease, and it signs the evidence of that last
+inspection.
+
+Before it signs, `hn` builds the fact in memory and judges it with the merge
+fact admission that every verifier applies. If verifiers would refuse the fact,
+or would admit it as anything other than a rule merge, `hn` signs nothing and
+reports `refusing to sign a rule merge fact that verifiers would reject:`
+followed by the failed check. The code is already merged at that point, so the
+whole message starts with `code merged at <commit> but recording failed:`.
+
+`hn proposal status` prints one line after `Status:   merged` for each rule
+merge fact, sorted by fact ID, with the full fingerprint of the signer and the
+full fact ID:
+
+```text
+Merged by rule ordinary, signed by <executor-actor> in fact <fact-id>
+```
+
+A maintainer merge fact that also carries a rule claim prints
+`Merged by maintainers in fact <fact-id>; its rule annotation "<name>" is not
+verified`. Its maintainer acceptances make it valid, and nothing checked its
+rule claim. Merge facts without a rule claim add no line.
+
+The example below runs User Story 1 locally under the standing rule `ordinary`.
+Pipeline `test` lists the author in `requesters`, so no maintainer signs
+anything for the candidate. The author has committed `src/feature.txt` and
+`tests/feature.txt` at `<head-commit>` on top of `main` at `<base-commit>`.
+Each `# As` line names the identity that runs the commands below it; each
+identity syncs before and after its command. `...` stands for output that
+differs between runs. The runner uses the unsafe host backend, which the
+README describes and which needs both of its flags on every invocation.
+
+<!-- example: standing-execute -->
+```text
+# As author:
+$ hn proposal open --base <base-commit> --head <head-commit> Add the standing feature
+Opened proposal <candidate-short>: Add the standing feature
+# As gpt-reviewer:
+$ hn review <candidate-id> --approve
+Recorded approve review <approval-short> on proposal <candidate-short>
+# As author:
+$ hn run request <candidate-id> test
+Requested pipeline test as run <request-short>
+# As runner:
+$ hn run execute <request-id> --backend host --allow-unsafe-host-execution
+Recorded passed result <result-short> with host backend (exit 0, ...ms)
+# As integrator:
+$ hn automerge <candidate-id> --rule ordinary
+Rule: ordinary
+Acceptance: rule (standing acceptance; no maintainer acceptance required)
+Counted approvals: 1/1 (author approvals do not count)
+Eligible: explicit --execute is required to merge locally.
+$ hn automerge <candidate-id> --rule ordinary --execute
+Merged proposal <candidate-short> into main at <merge-short>
+Recorded rule merge event <fact-short> under rule ordinary with 2 evidence item(s)
+$ hn proposal status <candidate-id>
+Status:   merged
+Merged by rule ordinary, signed by <executor-actor> in fact <fact-id>
+```
+
+`<fact-id>` is the full event ID, including its `sha256:` prefix.
 
 ### Commit path, publication and recovery
 
-Automatic execution creates a native two-parent merge commit from the verified
-head tree and uses an expected-old Git ref transaction for the actual target
+Automatic execution without `--remote` creates a native two-parent merge commit
+from the verified head tree and uses an expected-old Git ref transaction for the actual target
 advance. It rechecks current evidence and target while holding that lease, then
-records the existing signed `proposal.merged` fact with the exact acceptances.
+records the signed `proposal.merged` fact: with the exact acceptances under
+acceptance mode `maintainers`, or as a rule merge fact under a standing rule.
 Ignored files that the checkout would overwrite cause refusal.
 
 This commit path uses `git commit-tree`, not ordinary `git merge`/`git commit`.
@@ -425,8 +604,10 @@ the hosted facts, inspects the rule again against them and asks the server to
 advance the branch to the signed head. See
 [Automerge rules](serve-v0.md#automerge-rules).
 
-If code merged but its signed fact could not be recorded, inspect the target
-and retry `hn merge C` for the existing manual repair. Repair requires current
+If code merged but its signed fact could not be recorded under acceptance
+mode `maintainers`, inspect the target and retry `hn merge C` for the existing
+manual repair. Under a standing rule, rerun the same `hn automerge` command
+instead (see [Repairing an interrupted rule merge](#repairing-an-interrupted-rule-merge)). Repair requires current
 qualifying evidence and one unique first-parent merge that directly names C's
 head; it adds only the missing event. Repeating automerge does not create a
 second merge when the target already moved. A failure before ref advancement
@@ -439,3 +620,383 @@ These gates enforce Hubnot's native merge path. They do not prevent a process
 with direct host or Git write access from changing branches outside Hubnot, and
 the local ref lease is not a distributed transaction across arbitrary writers
 or remote replicas.
+
+### Limits of standing acceptance
+
+A standing rule delegates one act: running `hn automerge` for the proposals
+the rule covers. An executing actor that is not a maintainer gains no other
+authority. Each refusal below happens before any event is signed and before
+any ref changes.
+
+| Command run by an executing actor that is not a maintainer | Result |
+|----|----|
+| `hn automerge PROPOSAL --rule NAME --execute` for a rule that lists the actor | merges when every check of the rule passes |
+| `hn automerge PROPOSAL --rule OTHER --execute` for a rule that does not list the actor | refused with `identity <actor> is not an executing actor for automerge rule "OTHER"` |
+| `hn decide PROPOSAL --accept` | refused with `identity <actor> is not a maintainer under policy <digest>` |
+| `hn merge PROPOSAL` | refused with `identity <actor> is not a maintainer under proposal policy`, or with `proposal lacks N required acceptance decision(s)` while no maintainer has accepted |
+| `hn merge PROPOSAL --remote REMOTE` | refused at step 1 with the same maintainer message |
+| Any rule for a policy amendment or a protected-check change | refused with `policy amendments require manual merge` or `protected check changes require manual merge` |
+
+The maintainer refusals print shortened actor IDs and policy digests.
+
+Policy amendments and protected-check changes always take the manual path. A
+maintainer accepts them with `hn decide --accept` and lands them with
+`hn merge`, even when they already carry every review, passing result,
+designated approval and acceptance. A candidate also cannot use a rule that
+its own head adds. Rules come from the signed base policy, so `hn automerge`
+reports `automerge rule "NAME" does not exist in the signed base policy`.
+
+Every blocker of the preview applies to execution under a standing rule: a
+maintainer rejection, a change request from any trusted reviewer, a trusted
+pipeline failure, too few counted approvals or passing results, an author or
+a changed path outside the rule, a target that moved since the signed base, a
+dirty worktree, an unfinished Git operation, a shallow clone and a partial
+clone. Execution then refuses with `automerge blocked:` followed by the
+blockers.
+
+#### Repairing an interrupted rule merge
+
+An interruption can leave the merge commit on the target branch without its
+rule merge fact. The error names the command to run next. Under a standing
+rule that command is the same `hn automerge` command:
+
+```text
+code merged at <merge-commit> but event recording interrupted; run 'hn automerge <candidate-id> --rule ordinary --execute': ...
+```
+
+The same rerun hint follows `code merged at <merge-short> but recording
+failed:` and the message for an uncertain ref outcome.
+
+Rerun that command in the same clone. Its preview replaces the blocker
+`target no longer equals the signed base; ...` with a repair line when all of
+these hold:
+
+- the candidate has no merge fact under its base policy;
+- the checked-out target contains the head through exactly one first-parent
+  merge commit that names the head as a parent;
+- the `.hn/policy.json` digest of the target equals the base policy digest;
+- every other check of the rule passes on the current evidence.
+
+```text
+Repair: code merged at <merge-short>; --execute records the missing rule merge fact
+Eligible: explicit --execute is required to merge locally.
+```
+
+With `--execute` the command inspects the candidate again and records the
+missing rule merge fact once, with `commit` set to the existing merge commit:
+
+```text
+Recorded missing rule merge event <fact-short> under rule ordinary with 2 evidence item(s)
+```
+
+The repair creates no commit and moves no branch; only the executing actor's
+own event chain gains the fact. A second rerun is blocked with `proposal is
+already recorded as merged` and changes nothing. When any condition fails,
+for example because a trusted change request arrived or the target moved on
+with a policy change, the preview keeps the moved-target blocker next to the
+other blockers and `--execute` records nothing.
+
+Under acceptance mode `maintainers` the repair is unchanged: the moved-target
+blocker directs to `hn merge C`, and its repair path requires a base-policy
+maintainer. An executing actor of a standing rule cannot repair through
+`hn merge`.
+
+### Standing acceptance rule fields
+
+An automerge rule may carry two optional fields, `acceptance` and `reviewers`.
+
+`acceptance` sets the rule's acceptance mode. Its value is exactly the string
+`"maintainers"` or the string `"rule"`. A rule without the field uses
+`maintainers`, which is the behavior described above: every executing actor
+must be a base-policy maintainer, and every proposal still needs its maintainer
+acceptances.
+
+A rule with `"acceptance": "rule"` is a standing rule. The maintainer-accepted
+policy amendment that adopted the rule is the standing acceptance for every
+proposal that satisfies it, so maintainers do not accept those proposals one
+by one. They grant this acceptance once, when they accept the amendment. The
+executing actors of a standing rule need not be maintainers; an automation
+identity can execute the rule and sign its merge fact. Listing an actor in a
+rule's `actors` lets it execute that rule and grants it nothing else. Under a
+standing rule the candidate author's own approval never counts, even when
+`allowAuthorApproval` is true.
+
+`reviewers` lists the trusted reviewers whose approvals count toward the rule,
+in either acceptance mode. It holds 1 to 64 distinct full actor fingerprints.
+Each one must also appear in `proposals.trustedReviewers`, and the list needs
+at least `proposals.requiredApprovals` entries. A current change request from
+any trusted reviewer still blocks the rule, whether or not the reviewer is in
+the list. Without the field, approvals from every trusted reviewer count.
+
+Policy validation adds three limits to a standing rule:
+
+- `proposals.requiredApprovals` must be at least 1, so every proposal merged
+  under the rule carries at least one independent approval.
+- No path selector may be `.hn` or `.hn/` or start with `.hn/`. Policy and
+  pipeline definitions stay under maintainer acceptance, so a standing rule
+  cannot change the rules that govern it.
+- No path selector may overlap a `protectedChecks.paths` selector. Remove one
+  trailing `/` from each selector; the two overlap when they are equal, when
+  the protected selector starts with the rule selector followed by `/`, or when
+  the rule selector starts with the protected selector followed by `/`. With
+  the protected path `scripts/lint.sh`, the rule paths `scripts/` and
+  `scripts/lint.sh` overlap, and `scripts/lint.sh.bak` and `script/` do not.
+  With the protected path `scripts/`, the rule path `scripts/lint/run.sh`
+  overlaps and `scriptsx/` does not. Changes to protected checks keep their
+  designated review and maintainer acceptance because a standing rule could
+  otherwise weaken a check without any maintainer decision.
+
+Policy amendments and protected-check changes still take the manual path under
+both acceptance modes.
+
+A rule without either field keeps its policy bytes, validation and behavior
+exactly as before. Clients that predate these fields reject any policy that
+contains either one, including `"acceptance": "maintainers"`. Omit both fields
+while such clients must still read the policy.
+
+#### Refused standing rules
+
+Each draft below starts from a valid policy with the maintainer
+`<maintainer-actor>`, the trusted reviewers `<reviewer-actor>` and
+`<second-reviewer-actor>`, one required approval, one required acceptance, no
+pipelines, and one rule named `ordinary` for the target `main` with the actor
+`<maintainer-actor>`, the author `<author-actor>` and the path `docs/`. The
+`rule:` line lists the fields the draft sets on that rule, `proposals:` lists
+the fields it sets in `proposals`, and `policy:` lists the sections it adds to
+the policy. `hn policy check --base main --file .hn/policy.json` refuses each
+draft with the message on its `refusal:` line and changes nothing.
+
+<!-- example: standing-policy-refusals -->
+```text
+# A standing rule needs at least one required approval.
+rule: {"acceptance": "rule", "actors": ["<executor-actor>"]}
+proposals: {"requiredApprovals": 0}
+refusal: automerge rule "ordinary" has acceptance "rule", which requires proposals.requiredApprovals of at least 1
+
+# A present reviewers list needs 1 to 64 entries.
+rule: {"acceptance": "rule", "actors": ["<executor-actor>"], "reviewers": []}
+refusal: automerge rule "ordinary" requires 1 to 64 reviewers when reviewers is present
+
+# Reviewers are distinct full actor fingerprints.
+rule: {"acceptance": "rule", "actors": ["<executor-actor>"], "reviewers": ["<reviewer-actor>", "<reviewer-actor>"]}
+refusal: automerge reviewers contains duplicate actor <reviewer-actor>
+
+# Every reviewer is a trusted reviewer.
+rule: {"acceptance": "rule", "actors": ["<executor-actor>"], "reviewers": ["<untrusted-actor>"]}
+refusal: automerge rule "ordinary" reviewer <untrusted-actor> is not a trusted reviewer
+
+# Reviewers can supply the required approvals.
+rule: {"acceptance": "rule", "actors": ["<executor-actor>"], "reviewers": ["<reviewer-actor>"]}
+proposals: {"requiredApprovals": 2}
+refusal: automerge rule "ordinary" lists 1 reviewers, fewer than proposals.requiredApprovals (2)
+
+# A standing rule cannot cover .hn.
+rule: {"acceptance": "rule", "actors": ["<executor-actor>"], "paths": ["docs/", ".hn/pipelines/"]}
+refusal: automerge rule "ordinary" path ".hn/pipelines/" covers .hn, which a rule with acceptance "rule" cannot cover
+
+# A standing rule cannot overlap a protected check path.
+rule: {"acceptance": "rule", "actors": ["<executor-actor>"], "paths": ["docs/", "scripts/"]}
+policy: {"protectedChecks": {"paths": ["scripts/lint.sh"], "trustedReviewers": ["<reviewer-actor>"], "requiredApprovals": 1}}
+refusal: automerge rule "ordinary" path "scripts/" overlaps protected check path "scripts/lint.sh"
+```
+
+#### Inspecting a standing rule
+
+`hn policy show` prints an `Acceptance:` line for every rule, followed by the
+executing actors, the proposal authors, the counted reviewers and the allowed
+paths. A standing rule reads `Acceptance: rule (standing acceptance; no
+maintainer acceptance per proposal)` and lists its actors under `Executing
+actors:`. A rule in mode `maintainers` reads `Acceptance: maintainers
+(maintainer acceptance required)` and keeps the `Executing maintainers:`
+heading. A rule without `reviewers` prints `Counted reviewers: all trusted
+reviewers`.
+
+`hn policy check` adds three lines after each rule's path lines: the
+acceptance mode and the reviewers added and removed. The acceptance value is
+`added (MODE)` or `removed (MODE)` when the whole rule is added or removed,
+`unchanged (MODE)` when the mode stays the same, and `changed (OLD -> NEW)`
+when it moves between modes. A rule without `acceptance` compares as
+`maintainers`, so adding `"acceptance": "maintainers"` to an existing rule
+reports `unchanged (maintainers)`. A rule without `reviewers` compares as an
+empty list. Rules appear in name order.
+
+Read these lines before accepting a policy amendment. Accepting an amendment
+that adds a standing rule, or moves a rule to acceptance mode `rule`, is the
+one maintainer act that grants standing acceptance. The lines show who can
+execute the rule, whose proposals it covers, whose approvals count and which
+paths it reaches, all as full identities.
+
+The policy below adds the standing rule `ordinary`. On a `main` whose policy
+is the same document without the `automerge` section, `hn policy check` ends
+with the lines shown. After the amendment lands on `main`, `hn policy show
+main` ends with the rule as shown.
+
+<!-- example: standing-policy-rule -->
+```json
+{
+  "version": "hn.policy/0",
+  "maintainers": ["<maintainer-actor>"],
+  "proposals": {
+    "requiredApprovals": 1,
+    "requiredAccepts": 1,
+    "trustedReviewers": ["<reviewer-actor>"],
+    "allowAuthorApproval": false
+  },
+  "pipelines": {},
+  "automerge": {
+    "rules": [
+      {
+        "name": "ordinary",
+        "targetBranch": "main",
+        "acceptance": "rule",
+        "actors": ["<executor-actor>"],
+        "authors": ["<author-actor>"],
+        "reviewers": ["<reviewer-actor>"],
+        "paths": ["src/", "tests/", "docs/"]
+      }
+    ]
+  }
+}
+```
+
+```text
+$ hn policy check --base main --file .hn/policy.json
+...
+  automerge rule ordinary enabled: changed (false -> true)
+  automerge rule ordinary target branch: "" -> "main"
+  automerge rule ordinary actors added: <executor-actor>
+  automerge rule ordinary actors removed: (none)
+  automerge rule ordinary authors added: <author-actor>
+  automerge rule ordinary authors removed: (none)
+  automerge rule ordinary paths added: docs/, src/, tests/
+  automerge rule ordinary paths removed: (none)
+  automerge rule ordinary acceptance: added (rule)
+  automerge rule ordinary reviewers added: <reviewer-actor>
+  automerge rule ordinary reviewers removed: (none)
+```
+
+```text
+$ hn policy show main
+...
+Automerge: enabled (explicit execution only)
+Rule ordinary; target branch main:
+  Acceptance: rule (standing acceptance; no maintainer acceptance per proposal)
+  Executing actors:
+  <executor-actor>
+  Proposal authors:
+  <author-actor>
+  Counted reviewers:
+  <reviewer-actor>
+  Allowed literal paths:
+    "docs/"
+    "src/"
+    "tests/"
+Pipelines:
+  (none)
+```
+
+## Standing acceptance traceability
+
+This section maps every functional requirement, non-functional requirement,
+success criterion and user-story scenario of the standing acceptance
+specification, `kitty-specs/standing-acceptance-01M5VD2K/spec.md`, to the tests
+that prove it. `TestStandingQualityTraceability` reads the IDs from the
+specification when it runs. It fails when an ID has no row or more than one
+row, when a row has an ID the specification does not define, when a row names
+no test, and when a named test is not declared in a root `*_test.go` file.
+The full regression gate of NFR-007 also runs `gofmt -l`, `go vet ./...`,
+`go build ./...`, `go test -race ./...` and `git diff --check`.
+
+### Requirements
+
+| ID | Requirement | Tests |
+|----|----|----|
+| FR-001 | Acceptance mode field | `TestStandingPolicyFieldsRefusals`, `TestStandingPolicyFieldsAcceptedValues`, `TestStandingPolicyFieldsFoldedKeyCaseIsStillValidated` |
+| FR-002 | Non-maintainer executing actors | `TestStandingPolicyFieldsRefusals`, `TestStandingPolicyFieldsAcceptedValues`, `TestStandingPolicyFieldsLegacyRuleKeepsCheckOrder` |
+| FR-003 | Path safety for standing acceptance | `TestStandingPolicyFieldsRefusals`, `TestStandingPolicyFieldsSelectorOverlap`, `TestStandingPolicyDocumentedRefusals`, `TestStandingQualityCaseVariantDirectoryIsOrdinaryContent` |
+| FR-004 | Minimum independent review | `TestStandingPolicyFieldsRefusals`, `TestStandingPolicyDocumentedRefusals` |
+| FR-005 | Rule reviewers | `TestStandingPolicyFieldsRefusals`, `TestRuleAcceptanceLiveRuleReviewersRestrictCounting`, `TestRuleAcceptanceLiveChangeRequestVetoes`, `TestStandingAutomergePreviewRuleReviewers` |
+| FR-006 | Author approval under standing acceptance | `TestRuleAcceptanceLiveAuthorApprovalByMode`, `TestStandingAutomergePreviewRuleReviewers` |
+| FR-007 | Policy inspection | `TestStandingPolicyInspectionShow`, `TestStandingPolicyInspectionCheck`, `TestStandingPolicyDocumentedRule`, `TestStandingPolicyFieldsPolicyCheckRefusals` |
+| FR-008 | Preview | `TestStandingAutomergePreviewStandingRule`, `TestStandingAutomergeDocumentedPreview`, `TestStandingAutomergePreviewMaintainersRuleOptOut` |
+| FR-009 | Execution without per-proposal acceptance | `TestStandingAutomergeExecuteUserStory1`, `TestStandingAutomergeContainmentBlockersAtExecution`, `TestStandingAutomergeContainmentRepositoryState`, `TestStandingServeAdvanceUserStory4` |
+| FR-010 | Rule merge fact | `TestStandingEventCanonicalClaimRoundTrip`, `TestStandingEventNonCanonicalRuleIsNoClaim`, `TestStandingEventSigningRefusesNonCanonicalRule`, `TestStandingEventEncodingUnchangedWithoutRule`, `TestStandingAutomergeExecuteUserStory1`, `TestStandingQualityDocumentedRuleMergeFact` |
+| FR-011 | Rule merge signer | `TestRuleAcceptanceFactDefects`, `TestStandingFactLocalDefects`, `TestStandingAutomergeExecuteMaintainerAndSecondRule` |
+| FR-012 | Re-derivation by every verifier | `TestRuleAcceptanceFactDefects`, `TestRuleAcceptanceFactCheckOrder`, `TestRuleAcceptanceLiveRequestAndResultQualification`, `TestStandingFactLocalDefects`, `TestStandingFactImportDefects`, `TestStandingFactShallowDefects`, `TestStandingFactMatrixAgreement` |
+| FR-013 | Evidence availability | `TestStandingFactImportWithheldApproval`, `TestStandingFactShallowMissingDependencies`, `TestStandingFactShallowMaintainerMergesUnchanged` |
+| FR-014 | Missing code objects | `TestStandingFactLocalValidRuleMerge`, `TestStandingFactImportObjectAccess`, `TestStandingFactImportAbsentCommit`, `TestStandingFactShallowNoEmptyDiff`, `TestStandingFactShallowRecovery` |
+| FR-015 | Scope of fact validation | `TestRuleAcceptanceFactImmutable`, `TestStandingFactMatrixAgreement` |
+| FR-016 | hn serve advancement under a rule | `TestStandingServeVerdictAcceptsRuleAdvancement`, `TestStandingServeVerdictVetoes`, `TestStandingServeVerdictRuleNotSatisfied`, `TestStandingServeWireRuleCatalogue`, `TestStandingServeWireRuleCodesRoundTrip` |
+| FR-017 | Target policy must equal base policy | `TestStandingAutomergePreviewPolicyChanges`, `TestStandingServeVerdictDestinationPolicy` |
+| FR-018 | Direct protected pushes unchanged | `TestStandingServeVerdictAcceptsRuleAdvancement`, `TestStandingServeAdvanceForbiddenCommands` |
+| FR-019 | Bounded executing-actor authority | `TestStandingAutomergeContainmentForbiddenCommands`, `TestStandingAutomergeRepairConstructedState`, `TestStandingServeAdvanceForbiddenCommands`, `TestStandingServeRecoveryRefusals` |
+| FR-020 | Recovery of an interrupted rule merge | `TestStandingAutomergeRepairInterruptedRun`, `TestStandingAutomergeRepairConstructedState`, `TestStandingAutomergeRepairRerunHints`, `TestStandingServeRecoveryInterruptions`, `TestStandingServeRecoveryCompletedRun`, `TestStandingServeRecoveryRefusals`, `TestStandingServeRecoveryAcceptanceMergeRefused`, `TestStandingServeRecoveryHostedBranchLacksCommit` |
+| FR-021 | Status names the rule | `TestStandingAutomergeExecuteUserStory1`, `TestStandingAutomergeExecuteStatusOfMaintainerMerges` |
+| FR-022 | Compatibility | `TestStandingCompatOlderClient`, `TestStandingEventLegacyVerdictsUnchanged`, `TestStandingPolicyFieldsLegacyEncodingIsUnchanged` |
+| FR-023 | Documentation with tested examples | `TestServeQualityDocumentedExamplesAreExecuted`, `TestStandingQualityDocumentedRuleMergeFact`, `TestStandingAutomergeDocumentedPreview`, `TestStandingAutomergeDocumentedExecute`, `TestStandingPolicyDocumentedRefusals`, `TestStandingPolicyDocumentedRule`, `TestStandingServeDocumentedAdvance`, `TestStandingServeDocumentedVeto`, `TestStandingServeWireRuleReasonDocsTable`, `TestStandingQualityDocsStyle` |
+| FR-024 | Union validity of merge facts | `TestRuleAcceptanceAdmitMergeFact`, `TestRuleAcceptanceAdmitMergeFactWithValidator`, `TestStandingFactLocalRuleClaimOnMaintainerMerge`, `TestStandingFactMatrixAgreement` |
+| FR-025 | Fail-closed activation | `TestStandingFactBoundary`, `TestStandingServeWireRuleRefusedBeforeVerdict`, `TestStandingHarnessLegacyAndBoundaryFixtures` |
+| NFR-001 | Fail-closed verification | `TestStandingFactMatrixAgreement`, `TestStandingFactLocalDefects`, `TestStandingFactImportDefects`, `TestStandingFactShallowDefects` |
+| NFR-002 | Verdict agreement | `TestStandingFactMatrixAgreement`, `TestStandingAutomergeAgreementPreviewExecute`, `TestStandingServeAdvanceAgreementPreviewServer`, `TestStandingServeAdvanceAuthorizationAndTransport` |
+| NFR-003 | Executing-actor containment | `TestStandingAutomergeContainmentForbiddenCommands`, `TestStandingServeAdvanceForbiddenCommands`, `TestStandingServeRecoveryRefusals` |
+| NFR-004 | Opt-out compatibility | `TestStandingCompatOlderClient`, `TestStandingCompatPreExistingTestsFrozen`, `TestStandingAutomergePreviewMaintainersRuleOptOut` |
+| NFR-005 | Bounded validation work | `TestRuleAcceptanceFactMemo`, `TestStandingFactLocalMemoSharedAcrossFacts`, `TestStandingFactMatrixChangedPathBound` |
+| NFR-006 | Import cost | `TestStandingQualityImportTimeNFR006` |
+| NFR-007 | Regression gate | `TestStandingQualityRootSourcesAreGofmtFormatted`, `TestStandingCompatPreExistingTestsFrozen` |
+
+### Success criteria
+
+| ID | Success criterion | Tests |
+|----|----|----|
+| SC-001 | Every acceptance scenario passes through the public CLIs, locally and through `hn serve` | `TestStandingQualityTraceability`, `TestStandingAutomergeExecuteUserStory1`, `TestStandingServeAdvanceUserStory4` |
+| SC-002 | An ordinary change merges with zero maintainer-signed events for it | `TestStandingAutomergeExecuteWithoutMaintainer`, `TestStandingServeAdvanceUserStory4` |
+| SC-003 | No forged or insufficient rule merge fact is accepted | `TestStandingFactMatrixAgreement`, `TestStandingFactMatrixChangedPathBound` |
+| SC-004 | A fresh verifier reproduces every rule merge verdict | `TestStandingFactMatrixExecutionAdmitted`, `TestStandingAutomergeExecuteUserStory1`, `TestStandingServeAdvanceUserStory4` |
+| SC-005 | No policy amendment or protected-check change merges by rule | `TestStandingAutomergeContainmentManualPath`, `TestStandingFactLocalDefects`, `TestStandingFactMatrixAgreement` |
+| SC-006 | Every requirement maps to tests and the full gate passes | `TestStandingQualityTraceability`, `TestStandingQualityTraceabilityCheckRejectsGaps` |
+
+### User-story scenarios
+
+| ID | Scenario | Tests |
+|----|----|----|
+| US1-1 | The executing actor merges with no maintainer decision | `TestStandingAutomergeExecuteUserStory1`, `TestStandingAutomergeDocumentedExecute` |
+| US1-2 | A clone with no identity verifies the rule merge | `TestStandingAutomergeExecuteUserStory1`, `TestStandingFactImportValidRuleMerge` |
+| US1-3 | The same evidence under acceptance mode `maintainers` is refused | `TestStandingAutomergeExecuteUserStory1`, `TestStandingAutomergePreviewStandingRule` |
+| US1-4 | The keyless preview shows the standing rule | `TestStandingAutomergePreviewStandingRule`, `TestStandingAutomergeDocumentedPreview` |
+| US2-1 | `hn policy check` lists the added standing rule | `TestStandingPolicyInspectionCheck`, `TestStandingPolicyDocumentedRule` |
+| US2-2 | The amendment takes the manual path | `TestStandingAutomergeContainmentManualPath`, `TestStandingHarnessAdoption` |
+| US2-3 | A candidate cannot use a rule its own head adds | `TestStandingAutomergePreviewPolicyChanges`, `TestStandingAutomergeContainmentManualPath` |
+| US2-4 | A standing rule cannot list `.hn` paths | `TestStandingPolicyFieldsRefusals`, `TestStandingPolicyDocumentedRefusals` |
+| US2-5 | A standing rule cannot overlap a protected path | `TestStandingPolicyFieldsRefusals`, `TestStandingPolicyFieldsSelectorOverlap` |
+| US2-6 | Malformed acceptance and reviewers fields are refused | `TestStandingPolicyFieldsRefusals`, `TestStandingPolicyFieldsPolicyCheckRefusals`, `TestStandingPolicyDocumentedRefusals` |
+| US3-1 | Import refuses each defective fact | `TestStandingFactImportDefects` |
+| US3-2 | `hn serve` refuses each defective fact | `TestStandingFactMatrixAgreement` |
+| US3-3 | Local projection refuses each defective fact | `TestStandingFactLocalDefects` |
+| US3-4 | Shallow verification requires the fact's inputs | `TestStandingFactShallowDefects`, `TestStandingFactShallowMissingDependencies`, `TestStandingFactShallowRecovery` |
+| US3-5 | An absent evidence ID is a missing dependency | `TestStandingFactImportWithheldApproval` |
+| US3-6 | A maintainer merge with a rule claim is a maintainer merge | `TestStandingFactLocalRuleClaimOnMaintainerMerge`, `TestStandingFactBoundary`, `TestStandingAutomergeExecuteStatusOfMaintainerMerges` |
+| US3-7 | Legacy history keeps its verdicts | `TestStandingFactLocalLegacyHistory`, `TestStandingFactImportLegacyHistory`, `TestStandingFactShallowLegacyHistory`, `TestStandingEventLegacyVerdictsUnchanged`, `TestStandingFactMatrixAgreement` |
+| US4-1 | The executing actor advances a protected branch | `TestStandingServeAdvanceUserStory4`, `TestStandingServeVerdictAcceptsRuleAdvancement`, `TestStandingServeDocumentedAdvance` |
+| US4-2 | A new clone verifies the hosted rule merge | `TestStandingServeAdvanceUserStory4` |
+| US4-3 | A late veto refuses the advancement | `TestStandingServeVerdictVetoes`, `TestStandingServeAdvanceVeto`, `TestStandingServeDocumentedVeto` |
+| US4-4 | A direct push still needs maintainer acceptance | `TestStandingServeVerdictAcceptsRuleAdvancement`, `TestStandingServeAdvanceForbiddenCommands` |
+| US4-5 | An actor outside the rule is refused | `TestStandingServeVerdictAcceptsRuleAdvancement`, `TestStandingServeAdvanceAuthorizationAndTransport` |
+| US4-6 | A changed destination policy is refused | `TestStandingServeVerdictDestinationPolicy` |
+| US4-7 | A rerun records a missing fact once | `TestStandingServeRecoveryInterruptions`, `TestStandingServeAdvanceInterruptedAfterPublish` |
+| US4-8 | A rerun publishes a recorded fact without a second advancement | `TestStandingServeRecoveryInterruptions`, `TestStandingServeRecoveryCompletedRun` |
+| US5-1 | Only the rule's reviewers count | `TestStandingAutomergePreviewRuleReviewers`, `TestRuleAcceptanceLiveRuleReviewersRestrictCounting`, `TestStandingFactMatrixExecutionAdmitted` |
+| US5-2 | A change request from any trusted reviewer blocks | `TestStandingAutomergePreviewRuleReviewers`, `TestRuleAcceptanceLiveChangeRequestVetoes` |
+| US5-3 | The author's own approval never counts | `TestStandingAutomergePreviewRuleReviewers`, `TestRuleAcceptanceLiveAuthorApprovalByMode` |
+| US5-4 | A maintainers-mode rule with reviewers records an acceptance merge fact | `TestStandingQualityMaintainersModeReviewersExecution`, `TestStandingAutomergePreviewRuleReviewers`, `TestRuleAcceptanceLiveMaintainersModeWithReviewers` |
+| US6-1 | A maintainer rejection refuses execution | `TestStandingAutomergePreviewVetoesAndBlockers`, `TestStandingAutomergeContainmentBlockersAtExecution`, `TestStandingServeVerdictRuleNotSatisfied` |
+| US6-2 | Change requests, failures and missing results refuse execution | `TestStandingAutomergePreviewVetoesAndBlockers`, `TestStandingAutomergeContainmentBlockersAtExecution`, `TestStandingServeVerdictVetoes` |
+| US6-3 | An author or path outside the rule refuses execution | `TestStandingAutomergePreviewVetoesAndBlockers`, `TestStandingAutomergeContainmentBlockersAtExecution` |
+| US6-4 | Policy and protected-check changes take the manual path | `TestStandingAutomergeContainmentManualPath` |
+| US6-5 | Repository state refusals still apply | `TestStandingAutomergeContainmentRepositoryState` |
+| US6-6 | The executing actor gains no other authority | `TestStandingAutomergeContainmentForbiddenCommands`, `TestStandingServeAdvanceForbiddenCommands` |
+| US6-7 | A result answering an unlisted requester does not count | `TestStandingAutomergePreviewVetoesAndBlockers`, `TestRuleAcceptanceLiveRequesterAuthorization` |
+| US7-1 | Repositories that do not opt in are unchanged | `TestStandingCompatOlderClient`, `TestStandingAutomergePreviewMaintainersRuleOptOut` |
+| US7-2 | An older client rejects the new policy fields | `TestStandingCompatOlderClient` |
+| US7-3 | An older client rejects rule-only facts | `TestStandingCompatOlderClient` |
+| US7-4 | Both clients accept a maintainer merge with a rule claim | `TestStandingCompatOlderClient` |
+| US7-5 | Both clients accept legacy history | `TestStandingCompatOlderClient` |
