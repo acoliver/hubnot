@@ -933,7 +933,12 @@ audit packs. The number of Git processes the read starts does not grow with
 the number of audit facts. The exact membership, closure and shape checks
 read the objects the pack parser decoded, identical packs are checked once,
 and Git's object syntax check indexes the hosted packs together in one
-temporary repository, with one `git index-pack` per 64 MiB of packs.
+temporary repository, with one `git index-pack` per 64 MiB of packs. The read
+holds the decoded commits and trees of one pack at a time: once a pack is
+checked against every fact that carries it, only its object IDs and its
+entries in the stored pack are kept. The bytes the packs expand to are
+bounded by the `hosted-audit-expanded-bytes` ceiling under
+[Hosted fact ceilings](#hosted-fact-ceilings).
 
 The server's acceptance is never evidence. A client that fetches from this
 server validates every fact again before it uses it, and a signed fact is
@@ -1079,7 +1084,7 @@ selection. Repositories with long histories may need a higher
 ### Hosted fact ceilings
 
 Every push that updates a fact ref or a protected branch reads all hosted
-actor chains into memory to check the push against them. Two ceilings bound
+actor chains into memory to check the push against them. Three ceilings bound
 that read for the whole repository. They are fixed in this build and are
 the same aggregate limits `hn` uses when it reads issue history in a clone:
 
@@ -1087,6 +1092,7 @@ the same aggregate limits `hn` uses when it reads issue history in a clone:
 |----|----|----|
 | `hosted-fact-events` | 100000 | events in all hosted actor chains together |
 | `hosted-fact-bytes` | 268435456 (256 MiB) | bytes of every hosted event's `event.json`, `signature` and attachments together: run logs, audit packs and audit result logs |
+| `hosted-audit-expanded-bytes` | 1073741824 (1 GiB) | bytes the objects of every hosted audit event's `audit.pack` expand to, each event's pack counted in full even when another event carries the same pack |
 
 A single object may use the whole byte ceiling, so any event and attachment
 the five budgets admit can be read back, whatever the budgets were when it
@@ -1094,12 +1100,13 @@ was admitted. A run log of up to 16 MiB is accepted with the default budgets and
 stays readable on every later push.
 
 The server checks the ceilings before it accepts an actor chain. A push that
-would bring the hosted facts above either ceiling is rejected with
-`over-budget`, `budget=hosted-fact-events` or `budget=hosted-fact-bytes`, the
-ceiling as `limit` and the total the hosted facts would reach as `measured`.
-Like the budgets, the ceilings are inclusive and the events ceiling is
-checked first. The check runs after the five budgets. Because of it, an
-accepted push can never make the hosted facts unreadable for the next push.
+would bring the hosted facts above any ceiling is rejected with
+`over-budget`, `budget=hosted-fact-events`, `budget=hosted-fact-bytes` or
+`budget=hosted-audit-expanded-bytes`, the ceiling as `limit` and the total the
+hosted facts would reach as `measured`. Like the budgets, the ceilings are
+inclusive, and they are checked in the order of the table. The check runs
+after the five budgets. Because of it, an accepted push can never make the
+hosted facts unreadable for the next push.
 The ceilings do not apply to proposal code refs and memory streams, which
 the hosted fact read does not load.
 
@@ -1107,8 +1114,9 @@ A repository that reaches a ceiling accepts no further actor events. Other
 refs, including ordinary branches, tags, proposal code refs and memory
 streams, are still checked as usual. Signed history cannot be removed, so
 start a new hosted repository for further collaboration when a repository
-approaches 256 MiB of facts. `hn serve repo show` does not print the
-ceilings because they cannot be changed.
+approaches 256 MiB of facts or 1 GiB of expanded audit snapshots.
+`hn serve repo show` does not print the ceilings because they cannot be
+changed.
 
 If the hosted facts cannot be read for any other reason, for example damaged
 objects, the server refuses every fact ref and protected update as described
@@ -1964,7 +1972,7 @@ git diff --check
 | FR-022 | Protected-update serialization | `TestServeSessionPushWaitsForLockAndFetchDoesNot`, `TestServeProtectedNotFastForwardAndStaleTip`, `TestServeAdvanceConcurrentMaintainers` |
 | FR-023 | Documentation with tested examples | `TestServeQualityDocumentedExamplesAreExecuted`, `TestServeQualityTraceabilityTestsExist`, `TestServeReasonsDocsTableMatchesCatalogue` |
 | NFR-001 | Push verdict time | `TestServeQualityPushVerdictTimeNFR001`, `TestIssueReadAuditHistoryProcessCount` |
-| NFR-002 | Bounded incoming data | `TestServeFactsBudgetsAreInclusive`, `TestServeFactsBudgetPriorityWithSeveralExceeded`, `TestServePushOverRefUpdateBudgetRejectsEveryRef`, `TestServeAuditBudgetsCountPacksAndExpandedObjects`, `TestServeAuditHostedCeilingsCountAuditAttachments` |
+| NFR-002 | Bounded incoming data | `TestServeFactsBudgetsAreInclusive`, `TestServeFactsBudgetPriorityWithSeveralExceeded`, `TestServePushOverRefUpdateBudgetRejectsEveryRef`, `TestServeAuditBudgetsCountPacksAndExpandedObjects`, `TestServeAuditHostedCeilingsCountAuditAttachments`, `TestServeAuditHostedCeilingCountsExpandedSnapshots`, `TestIssueReadAuditAmplifiedPacksStayBounded` |
 | NFR-003 | Fail-closed handling | `TestServeSessionUnknownKeyRefused`, `TestServeStateValidationRefusesEachLayoutDefect`, `TestServeSessionUnsafeAndUnhostedPathsRefused`, `TestServeFactsAlteredEventIsInvalid`, `TestServeFactsDependencyMissing`, `TestServeProtectedPolicyInvalid`, `TestServeAuditTamperedAttachmentsRefusedByPushAndReaders`, `TestIssueReadAuditBatchKeepsPerPackChecks`, `TestIssueReadAuditPackTrailerFormatParity` |
 | NFR-004 | Least privilege | `TestServeQualityEnforcedWriteBoundary`, `TestServeQualityWrittenPathsAndModes`, `TestServeLFSEnforcedWriteBoundary`, `TestServeLFSWrittenPathsAndModes`, `TestServeAdminRefusesRoot`, `TestServeStateRootRefusalPrecedesEveryStateAccess` |
 | NFR-005 | Race safety | `TestServeAdvanceRaceNFR005` |

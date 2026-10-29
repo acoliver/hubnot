@@ -164,6 +164,16 @@ Malformed/unknown event tree members, missing packs, corrupt packs, extra pack
 objects, oversized logs, missing event dependencies, and invalid historical
 permissions refuse accepted visibility.
 
+A read of issue history counts the bytes every audit event's pack expands to,
+each event's pack in full, and refuses with `resource_limit` a history whose
+packs expand past 1 GiB, before it inflates the object that crosses the limit.
+It decodes each distinct pack once and holds the decoded commits and trees of
+one pack at a time; after a pack is checked against every fact that carries it,
+only its object IDs and its entries in the stored pack are kept for the
+combined syntax check and installation. `hn serve` refuses a push that would
+take its hosted facts past the same limit (see the `hosted-audit-expanded-bytes`
+ceiling in [serve-v0.md](serve-v0.md#hosted-fact-ceilings)).
+
 Existing per-selection replication limits also count expanded dependency objects
 and bytes before unpacking. Repeated objects within an actor history count once;
 only the previously accepted history is discounted. Default transport attachment

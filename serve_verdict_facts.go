@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"crypto/sha256"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -109,8 +110,14 @@ const (
 	// logs.
 	serveHostedFactBytesCeiling = 256 << 20
 
-	serveHostedFactEventsBudget = "hosted-fact-events"
-	serveHostedFactBytesBudget  = "hosted-fact-bytes"
+	// serveHostedAuditExpandedCeiling is the client reader's audit
+	// expansion limit: the bytes every hosted audit event's audit.pack
+	// expands to, each event's pack counted in full.
+	serveHostedAuditExpandedCeiling = maxAuditReadExpanded
+
+	serveHostedFactEventsBudget    = "hosted-fact-events"
+	serveHostedFactBytesBudget     = "hosted-fact-bytes"
+	serveHostedAuditExpandedBudget = "hosted-audit-expanded-bytes"
 )
 
 // serveHostedFactCeilings bounds the hosted facts of one repository: how
@@ -127,22 +134,26 @@ func defaultServeHostedFactCeilings() serveHostedFactCeilings {
 // readLimits turns the ceilings into reader limits. A single object may
 // use the whole byte ceiling, so every object the five budgets admit stays
 // readable, whatever the budgets are or were when it was admitted; the
-// memory the read uses stays bounded by the byte ceiling. Each hosted
-// actor ref reaches at least its own events, so there are never more refs
-// than events.
+// memory the read keeps stays bounded by the byte ceiling, and audit
+// verification adds the decoded commits and trees of one pack at a time.
+// Each hosted actor ref reaches at least its own events, so there are
+// never more refs than events. The audit expansion limit is the default
+// ceiling; the hosted read uses the context's HostedAuditExpansion.
 func (ceilings serveHostedFactCeilings) readLimits() issueReadLimits {
-	return issueReadLimits{events: int(ceilings.Events), refs: int(ceilings.Events), object: ceilings.Bytes, total: ceilings.Bytes}
+	return issueReadLimits{events: int(ceilings.Events), refs: int(ceilings.Events), object: ceilings.Bytes, total: ceilings.Bytes, auditExpanded: serveHostedAuditExpandedCeiling}
 }
 
 // serveFactUsage is what the hosted fact reader spends on a set of events:
-// one event each, and the bytes of each event.json, signature and typed
-// attachment: a run log, an audit pack or an audit result log.
+// one event each, the bytes of each event.json, signature and typed
+// attachment: a run log, an audit pack or an audit result log, and the
+// bytes each audit pack expands to.
 type serveFactUsage struct {
-	Events, Bytes int64
+	Events, Bytes      int64
+	AuditExpandedBytes int64
 }
 
 func (usage serveFactUsage) plus(other serveFactUsage) serveFactUsage {
-	return serveFactUsage{Events: usage.Events + other.Events, Bytes: usage.Bytes + other.Bytes}
+	return serveFactUsage{Events: usage.Events + other.Events, Bytes: usage.Bytes + other.Bytes, AuditExpandedBytes: usage.AuditExpandedBytes + other.AuditExpandedBytes}
 }
 
 // hostedFactUsage measures the hosted events the way the reader counts
@@ -158,7 +169,11 @@ func (ctx *serveVerdictContext) hostedFactUsage() (serveFactUsage, error) {
 	if err != nil {
 		return serveFactUsage{}, err
 	}
-	usage := serveFactUsage{Events: int64(len(hosted))}
+	expanded, err := ctx.hostedAuditExpansion()
+	if err != nil {
+		return serveFactUsage{}, err
+	}
+	usage := serveFactUsage{Events: int64(len(hosted)), AuditExpandedBytes: expanded}
 	for _, event := range hosted {
 		usage.Bytes += int64(len(event.Payload)) + objects[event.Commit].SignatureBytes
 		for _, attachment := range event.Attachments {
@@ -166,6 +181,46 @@ func (ctx *serveVerdictContext) hostedFactUsage() (serveFactUsage, error) {
 		}
 	}
 	return usage, nil
+}
+
+// hostedAuditExpansion is the bytes the audit packs of the hosted events
+// expand to, each event's pack counted in full as the reader counts it,
+// computed at most once per hook run and once per distinct pack.
+func (ctx *serveVerdictContext) hostedAuditExpansion() (int64, error) {
+	if !ctx.hostedExpansionLoaded {
+		ctx.hostedExpansionLoaded = true
+		hosted, err := ctx.HostedEvents()
+		if err != nil {
+			ctx.hostedExpansionErr = err
+		} else {
+			ctx.hostedExpansion, ctx.hostedExpansionErr = serveAuditExpansion(hosted)
+		}
+	}
+	return ctx.hostedExpansion, ctx.hostedExpansionErr
+}
+
+// serveAuditExpansion sums the bytes the audit pack of each event expands
+// to, parsing each distinct pack once.
+func serveAuditExpansion(events []StoredEvent) (int64, error) {
+	sizes := map[[32]byte]int64{}
+	total := int64(0)
+	for _, event := range events {
+		pack, ok := event.Attachments["audit.pack"]
+		if !ok {
+			continue
+		}
+		digest := sha256.Sum256(pack)
+		size, seen := sizes[digest]
+		if !seen {
+			var err error
+			if size, err = auditPackExpandedBytes(pack, len(event.Commit)); err != nil {
+				return 0, fmt.Errorf("measure audit snapshot of %s: %w", event.ID, err)
+			}
+			sizes[digest] = size
+		}
+		total += size
+	}
+	return total, nil
 }
 
 // serveHostedEventObjects is what one hosted event commit reaches besides
@@ -287,7 +342,9 @@ func serveBlobSizes(gitDir string, paths []string) ([]int64, error) {
 // serveAppendedFactUsage measures the appended commits the way the reader
 // will count them once they are hosted. event.json and signature must be
 // present; log.txt and audit.pack count wherever they are, which chain
-// validation later allows only for the kinds that carry them.
+// validation later allows only for the kinds that carry them. Each
+// appended audit.pack is read, one at a time and within the protocol's
+// pack bound, for the bytes it expands to.
 func serveAppendedFactUsage(gitDir string, commits []string) (serveFactUsage, error) {
 	paths := make([]string, 0, 4*len(commits))
 	for _, commit := range commits {
@@ -306,19 +363,36 @@ func serveAppendedFactUsage(gitDir string, commits []string) (serveFactUsage, er
 			return serveFactUsage{}, fmt.Errorf("%s is not a blob", paths[index])
 		}
 		usage.Bytes += size
+		if strings.HasSuffix(paths[index], ":audit.pack") {
+			if size > maxAuditPack {
+				return serveFactUsage{}, fmt.Errorf("audit dependency pack exceeds bounds")
+			}
+			pack, err := gitOutputAt(gitDir, "cat-file", "blob", paths[index])
+			if err != nil {
+				return serveFactUsage{}, err
+			}
+			commit := strings.TrimSuffix(paths[index], ":audit.pack")
+			expanded, err := auditPackExpandedBytes(pack, len(commit))
+			if err != nil {
+				return serveFactUsage{}, fmt.Errorf("measure audit snapshot of %s: %w", commit, err)
+			}
+			usage.AuditExpandedBytes += expanded
+		}
 	}
 	return usage, nil
 }
 
 // serveHostedCeilingRejection refuses an actor update that would take the
-// hosted facts past a ceiling, events first. Limits are inclusive.
-func serveHostedCeilingRejection(ref string, ceilings serveHostedFactCeilings, after serveFactUsage) *serveRejection {
+// hosted facts past a ceiling: events, then bytes, then the bytes the
+// audit packs expand to, below auditExpansion. Limits are inclusive.
+func serveHostedCeilingRejection(ref string, ceilings serveHostedFactCeilings, auditExpansion int64, after serveFactUsage) *serveRejection {
 	checks := []struct {
 		name, unit         string
 		limit, measurement int64
 	}{
 		{serveHostedFactEventsBudget, "events", ceilings.Events, after.Events},
 		{serveHostedFactBytesBudget, "bytes", ceilings.Bytes, after.Bytes},
+		{serveHostedAuditExpandedBudget, "expanded audit snapshot bytes", auditExpansion, after.AuditExpandedBytes},
 	}
 	for _, check := range checks {
 		if check.measurement > check.limit {
@@ -450,7 +524,7 @@ func checkServeActorUpdate(ctx *serveVerdictContext, update serveRefUpdate) *ser
 	if err != nil {
 		return serveHostedFactsRejection()
 	}
-	if rejection := serveHostedCeilingRejection(update.Ref, ctx.HostedCeilings, hostedUsage.plus(ctx.pushFactUsage).plus(appendedUsage)); rejection != nil {
+	if rejection := serveHostedCeilingRejection(update.Ref, ctx.HostedCeilings, ctx.HostedAuditExpansion, hostedUsage.plus(ctx.pushFactUsage).plus(appendedUsage)); rejection != nil {
 		return rejection
 	}
 

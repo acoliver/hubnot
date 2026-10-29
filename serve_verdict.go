@@ -141,6 +141,12 @@ type serveVerdictContext struct {
 	// past it, so every accepted push stays readable by the next one.
 	HostedCeilings serveHostedFactCeilings
 
+	// HostedAuditExpansion bounds the bytes the audit packs of the hosted
+	// facts expand to, each audit event's pack counted in full. The
+	// actor-ref rule refuses any append that would take the hosted facts
+	// past it, as it does for HostedCeilings.
+	HostedAuditExpansion int64
+
 	loadHostedEvents    func() ([]StoredEvent, error)
 	hostedLoaded        bool
 	hostedEvents        []StoredEvent
@@ -152,6 +158,10 @@ type serveVerdictContext struct {
 	pushFactUsage       serveFactUsage
 	maintainersLoaded   bool
 	maintainers         []string
+
+	hostedExpansionLoaded bool
+	hostedExpansion       int64
+	hostedExpansionErr    error
 }
 
 func newServeVerdictContext(gitDir, actor, key string, config serveRepoConfig, owners serveBranchOwners) *serveVerdictContext {
@@ -162,11 +172,15 @@ func newServeVerdictContext(gitDir, actor, key string, config serveRepoConfig, o
 		Config:         config,
 		Owners:         owners,
 		HostedCeilings: defaultServeHostedFactCeilings(),
+
+		HostedAuditExpansion: serveHostedAuditExpandedCeiling,
 	}
 	ctx.loadHostedEvents = func() ([]StoredEvent, error) {
 		// The hook runs with GIT_DIR naming the hosted repository and the
 		// quarantine variables set, which collectIssueEventsWithLimits uses.
-		events, _, err := collectIssueEventsWithLimits(ctx.HostedCeilings.readLimits())
+		limits := ctx.HostedCeilings.readLimits()
+		limits.auditExpanded = ctx.HostedAuditExpansion
+		events, _, err := collectIssueEventsWithLimits(limits)
 		return events, err
 	}
 	return ctx

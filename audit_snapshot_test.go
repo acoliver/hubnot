@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -317,5 +318,92 @@ func TestIssueReadAuditPackTrailerFormatParity(t *testing.T) {
 				t.Fatalf("the batched reader gave %v for the other format's trailer, want invalid_history naming %s", err, shortID(request.ID))
 			}
 		})
+	}
+}
+
+// auditAmplifiedPacks is the reviewer's round-2 case: twelve valid audit
+// packs of about 9 KB each, whose code commits carry 8 MiB messages that
+// zlib compresses about a thousandfold.
+const (
+	auditAmplifiedPacks   = 12
+	auditAmplifiedMessage = 8 << 20
+)
+
+// A read of many small, valid, highly compressed audit packs keeps the
+// decoded commits and trees of one pack at a time: what verifyAuditPacks
+// keeps for twelve packs that decode to 96 MiB of commits is smaller than
+// one decoded pack. The read also counts the bytes every audit event's
+// pack expands to against its budget: at exactly the expanded total the
+// read succeeds, and one byte below it the read is refused as
+// resource_limit before the crossing object is inflated.
+func TestIssueReadAuditAmplifiedPacksStayBounded(t *testing.T) {
+	_, id, at := auditFixture(t)
+	auth := auditAuthorizeFixture(t, id, at)
+	mustGit(t, "switch", "-qc", "amplified")
+	messagePath := filepath.Join(t.TempDir(), "message")
+	filler := strings.Repeat("a", auditAmplifiedMessage)
+	var targets []string
+	for i := 0; i < auditAmplifiedPacks; i++ {
+		if err := os.WriteFile(messagePath, []byte(fmt.Sprintf("amplified %d\n\n%s", i, filler)), 0600); err != nil {
+			t.Fatal(err)
+		}
+		mustGit(t, "commit", "-q", "--allow-empty", "--cleanup=verbatim", "-F", messagePath)
+		targets = append(targets, mustGitText(t, "rev-parse", "HEAD"))
+	}
+	mustGit(t, "switch", "-q", "main")
+	commits := []string{auth.Commit}
+	facts := []auditPackFact{{Pack: auth.Attachments["audit.pack"], Event: auth.Event}}
+	compressed := int64(0)
+	for _, target := range targets {
+		request, err := AuditRequest(target, "check", "", id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		commits = append(commits, request.Commit)
+		facts = append(facts, auditPackFact{Pack: request.Attachments["audit.pack"], Event: request.Event})
+		compressed += int64(len(request.Attachments["audit.pack"]))
+	}
+	structural, expanded := int64(0), int64(0)
+	for _, fact := range facts {
+		decoded, err := decodeAuditSnapshot(fact.Pack, len(at))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, object := range decoded.objects {
+			structural += int64(len(object.content))
+			expanded += object.size
+		}
+	}
+	if structural < auditAmplifiedPacks*auditAmplifiedMessage {
+		t.Fatalf("the packs decode to %d bytes of commits and trees, want at least %d", structural, auditAmplifiedPacks*auditAmplifiedMessage)
+	}
+
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	snapshots, failed, err := verifyAuditPacks(facts)
+	if err != nil {
+		t.Fatalf("fact %d: %v", failed, err)
+	}
+	runtime.GC()
+	runtime.ReadMemStats(&after)
+	retained := int64(after.HeapAlloc) - int64(before.HeapAlloc)
+	runtime.KeepAlive(snapshots)
+	t.Logf("packs=%d compressed=%d decoded commits and trees=%d expanded=%d retained by verifyAuditPacks=%d", auditAmplifiedPacks, compressed, structural, expanded, retained)
+	if retained >= auditAmplifiedMessage {
+		t.Fatalf("verifyAuditPacks retains %d bytes for %d packs, at least one decoded pack of %d", retained, auditAmplifiedPacks, auditAmplifiedMessage)
+	}
+
+	exact := defaultIssueReadLimits()
+	exact.auditExpanded = expanded
+	if _, err := issueReadStoredEvents(commits, exact); err != nil {
+		t.Fatalf("the read at exactly its expansion budget: %v", err)
+	}
+	below := exact
+	below.auditExpanded = expanded - 1
+	var readErr *IssueReadError
+	_, err = issueReadStoredEvents(commits, below)
+	if !errors.As(err, &readErr) || readErr.Code != "resource_limit" || !strings.Contains(err.Error(), fmt.Sprintf("past its %d-byte budget", expanded-1)) {
+		t.Fatalf("the read one byte below its expansion budget gave %v, want resource_limit", err)
 	}
 }

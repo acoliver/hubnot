@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -182,5 +183,78 @@ func TestServeAuditHostedCeilingsCountAuditAttachments(t *testing.T) {
 	}
 	if _, err := verdictContext(serveHostedFactCeilings{Events: full.Events, Bytes: full.Bytes - 1}).HostedEvents(); err == nil {
 		t.Fatal("hosted audit facts loaded one byte below their measured usage")
+	}
+}
+
+// The hosted audit expansion ceiling bounds the bytes every hosted audit
+// event's pack expands to, as the reader counts them. In A's clone with a
+// real authorization hosted and a request and result appended, a ceiling
+// one byte below the expanded total is over-budget with that total as the
+// measurement, the exact total is accepted, and the hosted facts then load
+// at exactly that ceiling and are refused as resource_limit one byte below
+// it, so an accepted push stays readable by the next one.
+func TestServeAuditHostedCeilingCountsExpandedSnapshots(t *testing.T) {
+	f := newServeAuditFixture(t)
+	serveAuditID(t, f.audit("A", "rule", "authorize", "check", "--source", "pipeline", "--at", f.Policy))
+	f.pushOwn("A")
+	request := serveAuditID(t, f.audit("A", "request", "--at", f.Target, "--rule", "check", "--intent", "expansion"))
+	f.audit("A", "execute", request, "--backend", "host", "--allow-unsafe-host-execution")
+	ref := f.actorRef("A")
+	oldHead, newHead := f.hostedRef(ref), f.localHead("A", ref)
+	t.Chdir(f.work["A"])
+	gitDir, err := requireGitRepository()
+	if err != nil {
+		t.Fatal(err)
+	}
+	full, packs := int64(0), 0
+	for _, commit := range strings.Fields(mustGitText(t, "rev-list", "--glob=refs/hn/actors/*")) {
+		stored, err := loadStoredEventAt("", commit)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if pack, ok := stored.Attachments["audit.pack"]; ok {
+			expanded, err := auditPackExpandedBytes(pack, len(commit))
+			if err != nil {
+				t.Fatal(err)
+			}
+			full += expanded
+			packs++
+		}
+	}
+	if packs != 3 {
+		t.Fatalf("the fixture chain holds %d audit packs, want the authorization's, the request's and the result's", packs)
+	}
+	mustGit(t, "update-ref", ref, oldHead)
+
+	config, err := newServeRepoConfig("r", []string{"refs/heads/main"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	verdictContext := func(expansion int64) *serveVerdictContext {
+		ctx := newServeVerdictContext(gitDir, f.actors["A"], serveTestFingerprint("audit-expansion"), config, emptyServeBranchOwners())
+		ctx.HostedAuditExpansion = expansion
+		return ctx
+	}
+	verdict := func(expansion int64) []serveRejection {
+		t.Helper()
+		updates := []serveRefUpdate{{Old: oldHead, New: newHead, Ref: ref}}
+		classifyServeRefUpdates(config, updates)
+		return evaluateServePush(verdictContext(expansion), updates, servePushOptions{})
+	}
+	rejections := verdict(full - 1)
+	if len(rejections) != 1 {
+		t.Fatalf("ceiling %d expanded bytes: rejections %+v, want one", full-1, rejections)
+	}
+	requireServeOverBudget(t, rejections[0], serveHostedAuditExpandedBudget, full-1, full)
+	if rejections := verdict(full); len(rejections) != 0 {
+		t.Fatalf("an append to exactly the expansion ceiling was rejected: %+v", rejections)
+	}
+	mustGit(t, "update-ref", ref, newHead)
+	if _, err := verdictContext(full).HostedEvents(); err != nil {
+		t.Fatalf("hosted audit facts at exactly the expansion ceiling do not load: %v", err)
+	}
+	var readErr *IssueReadError
+	if _, err := verdictContext(full - 1).HostedEvents(); !errors.As(err, &readErr) || readErr.Code != "resource_limit" {
+		t.Fatalf("hosted audit facts one expanded byte above the ceiling gave %v, want resource_limit", err)
 	}
 }

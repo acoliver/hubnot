@@ -31,7 +31,10 @@ type auditPackObject struct {
 }
 
 // auditSnapshot is a decoded audit pack: its sorted object IDs, the same
-// IDs in pack order and its objects by ID.
+// IDs in pack order and its objects by ID, with the contents of its
+// commits and trees. Those contents can expand to maxAuditExpanded bytes
+// from a pack of a few kilobytes, so verifyAuditPacks holds one decoded
+// pack at a time and keeps only its verifiedAuditSnapshot.
 type auditSnapshot struct {
 	ids     []string
 	order   []string
@@ -40,7 +43,7 @@ type auditSnapshot struct {
 
 func decodeAuditSnapshot(pack []byte, oidLength int) (*auditSnapshot, error) {
 	s := &auditSnapshot{objects: map[string]auditPackObject{}}
-	ids, err := walkAuditPack(pack, oidLength, true, func(oid string, object auditPackObject) {
+	ids, _, err := walkAuditPack(pack, oidLength, maxAuditExpanded, true, func(oid string, object auditPackObject) {
 		s.order = append(s.order, oid)
 		s.objects[oid] = object
 	})
@@ -51,8 +54,26 @@ func decodeAuditSnapshot(pack []byte, oidLength int) (*auditSnapshot, error) {
 	return s, nil
 }
 
+// verifiedAuditSnapshot is what remains of a verified audit pack for Git's
+// syntax check and installation: its object IDs and entries in pack order.
+// The entries are slices of the pack, which the caller holds already, so a
+// snapshot costs an ID and a slice header per object and nothing that
+// grows with the expanded contents.
+type verifiedAuditSnapshot struct {
+	order   []string
+	entries [][]byte
+}
+
+func (s *auditSnapshot) verified() *verifiedAuditSnapshot {
+	v := &verifiedAuditSnapshot{order: s.order, entries: make([][]byte, len(s.order))}
+	for index, oid := range s.order {
+		v.entries[index] = s.objects[oid].entry
+	}
+	return v
+}
+
 // verifyAuditPacks checks each fact's audit.pack against its signed fact
-// and installs nothing. It returns the decoded snapshot of each fact, or
+// and installs nothing. It returns the verified snapshot of each fact, or
 // the index of the first fact that fails with its error, or -1 with an
 // error no fact explains.
 //
@@ -61,41 +82,67 @@ func decodeAuditSnapshot(pack []byte, oidLength int) (*auditSnapshot, error) {
 // snapshot and path closure and the object shapes are computed per pack
 // from that pack's objects alone, as a private repository holding only the
 // pack would answer. Identical packs are decoded once and a pack bound to
-// the same snapshot roots is checked once. The syntax check indexes every
-// verified pack with git index-pack --fsck-objects in one private
-// temporary repository per object format, with one index-pack per
+// the same snapshot roots is checked once. A decoded pack is checked
+// against every fact that carries it, and then only its object IDs and
+// entries are kept, so the decoded commit and tree contents of one pack
+// at a time are in memory, whatever the number of packs. The syntax check
+// indexes every verified pack with git index-pack --fsck-objects in one
+// private temporary repository per object format, with one index-pack per
 // maxAuditPack bytes of packs (see fsckAuditSnapshots), so the number of
 // Git processes grows with the bytes verified, never with the number of
 // facts.
-func verifyAuditPacks(facts []auditPackFact) ([]*auditSnapshot, int, error) {
-	snapshots := make([]*auditSnapshot, len(facts))
-	decoded := map[string]*auditSnapshot{}
-	bound := map[string]bool{}
-	owners := map[*auditSnapshot]int{}
-	formats := map[int][]*auditSnapshot{}
+func verifyAuditPacks(facts []auditPackFact) ([]*verifiedAuditSnapshot, int, error) {
+	keys := make([]string, len(facts))
+	lengths := make([]int, len(facts))
+	invalid := make([]error, len(facts))
+	carriers := map[string][]int{}
 	for index, fact := range facts {
 		oidLength, err := auditObjectIDLength(fact.Event)
 		if err != nil {
-			return nil, index, err
+			invalid[index] = err
+			continue
 		}
 		digest := sha256.Sum256(fact.Pack)
-		key := fmt.Sprintf("%d:%x", oidLength, digest)
-		snapshot, seen := decoded[key]
-		if !seen {
-			var err error
-			if snapshot, err = decodeAuditSnapshot(fact.Pack, oidLength); err != nil {
-				return nil, index, err
-			}
-			decoded[key] = snapshot
-			owners[snapshot] = index
-			formats[oidLength] = append(formats[oidLength], snapshot)
+		keys[index] = fmt.Sprintf("%d:%x", oidLength, digest)
+		lengths[index] = oidLength
+		carriers[keys[index]] = append(carriers[keys[index]], index)
+	}
+	snapshots := make([]*verifiedAuditSnapshot, len(facts))
+	bindings := make([]error, len(facts))
+	verified := map[string]*verifiedAuditSnapshot{}
+	owners := map[*verifiedAuditSnapshot]int{}
+	formats := map[int][]*verifiedAuditSnapshot{}
+	// A pack's bindings are all checked while its first carrier is visited,
+	// but each fact reports its result only when it is reached, so the
+	// first failing fact in order is the one reported.
+	for index, fact := range facts {
+		if invalid[index] != nil {
+			return nil, index, invalid[index]
 		}
-		binding := key + "\x00" + strings.Join(auditSnapshotRoots(fact.Event), "\x00")
-		if !bound[binding] {
-			if err := validateAuditPackBinding(snapshot, fact.Event); err != nil {
+		key := keys[index]
+		snapshot, seen := verified[key]
+		if !seen {
+			decoded, err := decodeAuditSnapshot(fact.Pack, lengths[index])
+			if err != nil {
 				return nil, index, err
 			}
-			bound[binding] = true
+			checked := map[string]error{}
+			for _, carrier := range carriers[key] {
+				binding := strings.Join(auditSnapshotRoots(facts[carrier].Event), "\x00")
+				result, done := checked[binding]
+				if !done {
+					result = validateAuditPackBinding(decoded, facts[carrier].Event)
+					checked[binding] = result
+				}
+				bindings[carrier] = result
+			}
+			snapshot = decoded.verified()
+			verified[key] = snapshot
+			owners[snapshot] = index
+			formats[lengths[index]] = append(formats[lengths[index]], snapshot)
+		}
+		if err := bindings[index]; err != nil {
+			return nil, index, err
 		}
 		snapshots[index] = snapshot
 	}
@@ -259,7 +306,7 @@ func auditSnapshotTree(s *auditSnapshot, id string) ([]auditTreeEntry, error) {
 // refused, its snapshots are indexed one at a time and the index of the
 // first refused one is returned with its error, or of the first one of
 // the combined pack when none is refused alone.
-func fsckAuditSnapshots(oidLength int, snapshots []*auditSnapshot) (int, error) {
+func fsckAuditSnapshots(oidLength int, snapshots []*verifiedAuditSnapshot) (int, error) {
 	if len(snapshots) == 0 {
 		return -1, nil
 	}
@@ -292,11 +339,7 @@ func fsckAuditSnapshots(oidLength int, snapshots []*auditSnapshot) (int, error) 
 			return first, err
 		}
 		for alone := first; alone < end; alone++ {
-			own := make([][]byte, 0, len(snapshots[alone].order))
-			for _, oid := range snapshots[alone].order {
-				own = append(own, snapshots[alone].objects[oid].entry)
-			}
-			if aloneErr := index(own); aloneErr != nil {
+			if aloneErr := index(snapshots[alone].entries); aloneErr != nil {
 				return alone, aloneErr
 			}
 		}
@@ -308,9 +351,9 @@ func fsckAuditSnapshots(oidLength int, snapshots []*auditSnapshot) (int, error) 
 	}
 	for current, snapshot := range snapshots {
 		added := 0
-		for _, oid := range snapshot.order {
+		for position, oid := range snapshot.order {
 			if !members[oid] {
-				added += len(snapshot.objects[oid].entry)
+				added += len(snapshot.entries[position])
 			}
 		}
 		if len(entries) > 0 && 12+size+added+trailer > maxAuditPack {
@@ -319,11 +362,11 @@ func fsckAuditSnapshots(oidLength int, snapshots []*auditSnapshot) (int, error) 
 			}
 			first, entries, members, size = current, nil, map[string]bool{}, 0
 		}
-		for _, oid := range snapshot.order {
+		for position, oid := range snapshot.order {
 			if !members[oid] {
 				members[oid] = true
-				entries = append(entries, snapshot.objects[oid].entry)
-				size += len(snapshot.objects[oid].entry)
+				entries = append(entries, snapshot.entries[position])
+				size += len(snapshot.entries[position])
 			}
 		}
 	}
@@ -356,8 +399,8 @@ func buildAuditPack(entries [][]byte, oidLength int) []byte {
 // inherited environment, the objects of snapshots it lacks, so a read of
 // already installed history writes nothing. Inside a receive hook the
 // objects land in the push quarantine. The snapshots must be verified.
-func installAuditObjects(gitDir string, snapshots []*auditSnapshot) error {
-	formats := map[int][]*auditSnapshot{}
+func installAuditObjects(gitDir string, snapshots []*verifiedAuditSnapshot) error {
+	formats := map[int][]*verifiedAuditSnapshot{}
 	var names []string
 	listed := map[string]bool{}
 	for _, snapshot := range snapshots {
@@ -401,12 +444,12 @@ func installAuditObjects(gitDir string, snapshots []*auditSnapshot) error {
 			return err
 		}
 		for _, snapshot := range group {
-			for _, oid := range snapshot.order {
+			for position, oid := range snapshot.order {
 				if !missing[oid] {
 					continue
 				}
 				delete(missing, oid)
-				entry := snapshot.objects[oid].entry
+				entry := snapshot.entries[position]
 				if len(entries) > 0 && 12+size+len(entry)+trailer > maxAuditPack {
 					if err := install(); err != nil {
 						return err

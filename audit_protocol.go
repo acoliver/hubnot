@@ -22,6 +22,12 @@ const (
 	maxAuditObjects  = 100000
 	maxAuditObject   = 16 << 20
 	maxAuditExpanded = 128 << 20
+	// maxAuditReadExpanded bounds the bytes the audit packs of one read of
+	// issue history expand to, each audit event's pack counted in full, as
+	// the hosted fact byte ceiling counts each event's pack bytes. 1 GiB is
+	// what 256 MiB of packs, that ceiling, expand to at four to one, and the
+	// default max-total-bytes budget.
+	maxAuditReadExpanded = 1 << 30
 )
 
 type AuditSource struct {
@@ -235,11 +241,31 @@ func auditObjectIDLength(e Event) (int, error) {
 	return 0, fmt.Errorf("audit requires exact authority policy commit")
 }
 
+// auditExpansionExceeded refuses audit packs that would expand past the
+// budget a caller passes to walkAuditPack. Measured is the expanded size
+// the pack reached when it crossed the budget, before the crossing object
+// was inflated.
+type auditExpansionExceeded struct {
+	Measured int64
+}
+
+func (e auditExpansionExceeded) Error() string {
+	return "audit snapshots expand past the read budget"
+}
+
 // Packs deliberately forbid deltas. Bound both the compressed input and each
 // expanded object before handing hostile bytes to Git's checksum/object parser.
-func validateAuditPack(pack []byte, oidLength int) error {
-	_, err := auditPackObjectIDs(pack, oidLength)
-	return err
+// validateAuditPack returns the bytes pack expands to; a pack that would
+// expand past budget is refused with auditExpansionExceeded.
+func validateAuditPack(pack []byte, oidLength int, budget int64) (int64, error) {
+	_, expanded, err := walkAuditPack(pack, oidLength, budget, false, nil)
+	return expanded, err
+}
+
+// auditPackExpandedBytes is the sum of the expanded sizes of the objects
+// of pack, the quantity maxAuditExpanded caps for one pack.
+func auditPackExpandedBytes(pack []byte, oidLength int) (int64, error) {
+	return validateAuditPack(pack, oidLength, maxAuditExpanded)
 }
 
 func auditPackObjectIDs(pack []byte, oidLength int) ([]string, error) {
@@ -251,7 +277,8 @@ func auditPackObjectIDsAndSizes(pack []byte, oidLength int, sizes map[string]int
 	if sizes != nil {
 		visit = func(oid string, object auditPackObject) { sizes[oid] = object.size }
 	}
-	return walkAuditPack(pack, oidLength, false, visit)
+	ids, _, err := walkAuditPack(pack, oidLength, maxAuditExpanded, false, visit)
+	return ids, err
 }
 
 // walkAuditPack parses pack, bounded as validateAuditPack describes, and
@@ -260,16 +287,18 @@ func auditPackObjectIDsAndSizes(pack []byte, oidLength int, sizes map[string]int
 // set. oidLength names the object format, and the trailer must be that
 // format's checksum of the pack, with that format's length, as git
 // index-pack requires in a repository of that format; it is checked before
-// any object is inflated. It returns the pack's sorted object IDs once the
-// absence of duplicates is checked; on an error the visited objects are
-// not a valid pack's.
-func walkAuditPack(pack []byte, oidLength int, keepContents bool, visit func(string, auditPackObject)) ([]string, error) {
+// any object is inflated. A pack whose expanded objects would pass budget,
+// but not maxAuditExpanded, is refused with auditExpansionExceeded before
+// the crossing object is inflated. It returns the pack's sorted object IDs
+// and its expanded bytes once the absence of duplicates is checked; on an
+// error the visited objects are not a valid pack's.
+func walkAuditPack(pack []byte, oidLength int, budget int64, keepContents bool, visit func(string, auditPackObject)) ([]string, int64, error) {
 	if oidLength != 40 && oidLength != 64 {
-		return nil, fmt.Errorf("unsupported audit object format")
+		return nil, 0, fmt.Errorf("unsupported audit object format")
 	}
 	trailer := oidLength / 2
 	if len(pack) < 12+trailer || len(pack) > maxAuditPack || string(pack[:4]) != "PACK" || binary.BigEndian.Uint32(pack[4:8]) != 2 {
-		return nil, fmt.Errorf("invalid bounded audit dependency pack")
+		return nil, 0, fmt.Errorf("invalid bounded audit dependency pack")
 	}
 	body := pack[:len(pack)-trailer]
 	var checksum hash.Hash = sha1.New()
@@ -278,11 +307,11 @@ func walkAuditPack(pack []byte, oidLength int, keepContents bool, visit func(str
 	}
 	_, _ = checksum.Write(body)
 	if !bytes.Equal(checksum.Sum(nil), pack[len(body):]) {
-		return nil, fmt.Errorf("audit pack checksum mismatch: the trailer is not the pack's checksum in the audit's object format")
+		return nil, 0, fmt.Errorf("audit pack checksum mismatch: the trailer is not the pack's checksum in the audit's object format")
 	}
 	count := binary.BigEndian.Uint32(pack[8:12])
 	if count == 0 || count > maxAuditObjects {
-		return nil, fmt.Errorf("audit dependency object count exceeded")
+		return nil, 0, fmt.Errorf("audit dependency object count exceeded")
 	}
 	ids := []string{}
 	r := bytes.NewReader(body[12:])
@@ -291,32 +320,35 @@ func walkAuditPack(pack []byte, oidLength int, keepContents bool, visit func(str
 		start := len(body) - r.Len()
 		b, err := r.ReadByte()
 		if err != nil {
-			return nil, err
+			return nil, total, err
 		}
 		kind := (b >> 4) & 7
 		size := uint64(b & 15)
 		shift := uint(4)
 		for b&128 != 0 {
 			if shift > 60 {
-				return nil, fmt.Errorf("audit object size overflow")
+				return nil, total, fmt.Errorf("audit object size overflow")
 			}
 			b, err = r.ReadByte()
 			if err != nil {
-				return nil, err
+				return nil, total, err
 			}
 			size |= uint64(b&127) << shift
 			shift += 7
 		}
 		if kind < 1 || kind > 4 || size > maxAuditObject {
-			return nil, fmt.Errorf("audit pack contains delta or oversized object")
+			return nil, total, fmt.Errorf("audit pack contains delta or oversized object")
 		}
 		total += int64(size)
 		if total > maxAuditExpanded {
-			return nil, fmt.Errorf("expanded audit pack too large")
+			return nil, total, fmt.Errorf("expanded audit pack too large")
+		}
+		if total > budget {
+			return nil, total, auditExpansionExceeded{Measured: total}
 		}
 		z, err := zlib.NewReader(r)
 		if err != nil {
-			return nil, err
+			return nil, total, err
 		}
 		var h hash.Hash = sha1.New()
 		if oidLength == 64 {
@@ -333,7 +365,7 @@ func walkAuditPack(pack []byte, oidLength int, keepContents bool, visit func(str
 		n, err := io.Copy(sink, io.LimitReader(z, int64(size)+1))
 		closeErr := z.Close()
 		if err != nil || closeErr != nil || n != int64(size) {
-			return nil, fmt.Errorf("audit dependency object size mismatch")
+			return nil, total, fmt.Errorf("audit dependency object size mismatch")
 		}
 		oid := hex.EncodeToString(h.Sum(nil))
 		ids = append(ids, oid)
@@ -346,12 +378,12 @@ func walkAuditPack(pack []byte, oidLength int, keepContents bool, visit func(str
 		}
 	}
 	if r.Len() != 0 {
-		return nil, fmt.Errorf("audit pack has unexpected trailing data")
+		return nil, total, fmt.Errorf("audit pack has unexpected trailing data")
 	}
 	if len(sortedUniqueStrings(ids...)) != len(ids) {
-		return nil, fmt.Errorf("duplicate audit pack object")
+		return nil, total, fmt.Errorf("duplicate audit pack object")
 	}
-	return sortedUniqueStrings(ids...), nil
+	return sortedUniqueStrings(ids...), total, nil
 }
 
 func auditAttachments(e Event, log []byte) (map[string][]byte, error) {
@@ -367,7 +399,7 @@ func auditAttachments(e Event, log []byte) (map[string][]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := validateAuditPack(pack, oidLength); err != nil {
+	if _, err := validateAuditPack(pack, oidLength, maxAuditExpanded); err != nil {
 		return nil, err
 	}
 	result := map[string][]byte{"audit.pack": pack}
@@ -378,25 +410,35 @@ func auditAttachments(e Event, log []byte) (map[string][]byte, error) {
 }
 
 func validateAuditAttachments(e Event, attachments map[string][]byte) error {
+	_, err := validateAuditAttachmentsWithin(e, attachments, maxAuditExpanded)
+	return err
+}
+
+// validateAuditAttachmentsWithin is validateAuditAttachments for a reader
+// with budget expanded bytes left. It returns the bytes the audit pack
+// expands to, and refuses one that would pass budget with
+// auditExpansionExceeded before inflating past it.
+func validateAuditAttachmentsWithin(e Event, attachments map[string][]byte, budget int64) (int64, error) {
 	oidLength, err := auditObjectIDLength(e)
 	if err != nil {
-		return err
+		return 0, err
 	}
-	if err := validateAuditPack(attachments["audit.pack"], oidLength); err != nil {
-		return err
+	expanded, err := validateAuditPack(attachments["audit.pack"], oidLength, budget)
+	if err != nil {
+		return expanded, err
 	}
 	want := 1
 	if e.Kind == "audit.result" {
 		want++
 		log, ok := attachments["log.txt"]
 		if !ok || len(log) > maxRunLogSize || eventID(log) != e.Audit.Log {
-			return fmt.Errorf("audit result requires bounded matching log.txt")
+			return 0, fmt.Errorf("audit result requires bounded matching log.txt")
 		}
 	}
 	if len(attachments) != want {
-		return fmt.Errorf("unsupported audit attachments")
+		return 0, fmt.Errorf("unsupported audit attachments")
 	}
-	return nil
+	return expanded, nil
 }
 
 // importAuditPack runs only in an already selected object database. Fetched
