@@ -1,6 +1,9 @@
 package main
 
 import (
+	"bytes"
+	"crypto/sha1"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"os"
@@ -242,6 +245,76 @@ func TestAuditSnapshotClosureMatchesGit(t *testing.T) {
 				if err := verifyAuditPack(attachments["audit.pack"], event); err != nil {
 					t.Fatalf("%s: %v", event.Kind, err)
 				}
+			}
+		})
+	}
+}
+
+// An audit pack must end in the checksum of its own object format, as git
+// index-pack requires in a repository of that format. For SHA-1 and
+// SHA-256 alike, a pack whose trailer is the valid checksum of the other
+// format is refused by Git, verifyAuditPack, loadStoredEventAt and the
+// batched reader, which names the fact, and the pack with its own trailer
+// is accepted by all four.
+func TestIssueReadAuditPackTrailerFormatParity(t *testing.T) {
+	for _, format := range []string{"sha1", "sha256"} {
+		t.Run(format, func(t *testing.T) {
+			t.Setenv("GIT_DEFAULT_HASH", format)
+			_, id, at := auditFixture(t)
+			auth := auditAuthorizeFixture(t, id, at)
+			request, err := AuditRequest(at, "check", "", id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			pack := request.Attachments["audit.pack"]
+			body := pack[:len(pack)-len(at)/2]
+			var other []byte
+			if format == "sha1" {
+				sum := sha256.Sum256(body)
+				other = sum[:]
+			} else {
+				sum := sha1.Sum(body)
+				other = sum[:]
+			}
+			wrong := append(slices.Clone(body), other...)
+			gitIndex := func(candidate []byte) error {
+				dir := t.TempDir()
+				if out, err := exec.Command("git", "init", "--bare", "--quiet", "--object-format="+format, dir).CombinedOutput(); err != nil {
+					t.Fatalf("git init: %v: %s", err, out)
+				}
+				cmd := exec.Command("git", "--git-dir="+dir, "index-pack", "--stdin", "--fsck-objects")
+				cmd.Stdin = bytes.NewReader(candidate)
+				if out, err := cmd.CombinedOutput(); err != nil {
+					return fmt.Errorf("%v: %s", err, out)
+				}
+				return nil
+			}
+			if err := gitIndex(pack); err != nil {
+				t.Fatalf("Git refuses the pack with its own trailer: %v", err)
+			}
+			if err := gitIndex(wrong); err == nil {
+				t.Fatal("Git accepts the pack with the other format's trailer")
+			}
+			if err := verifyAuditPack(pack, request.Event); err != nil {
+				t.Fatalf("verifyAuditPack refuses the pack with its own trailer: %v", err)
+			}
+			if err := verifyAuditPack(wrong, request.Event); err == nil {
+				t.Fatal("verifyAuditPack accepts the pack with the other format's trailer")
+			}
+			if _, err := loadStoredEventAt("", request.Commit); err != nil {
+				t.Fatalf("loadStoredEventAt refuses the pack with its own trailer: %v", err)
+			}
+			bad := serveAuditVariant(t, request.Commit, map[string][]byte{"audit.pack": wrong})
+			if _, err := loadStoredEventAt("", bad); err == nil {
+				t.Fatal("loadStoredEventAt accepts the pack with the other format's trailer")
+			}
+			if _, err := issueReadStoredEvents([]string{auth.Commit, request.Commit}, defaultIssueReadLimits()); err != nil {
+				t.Fatalf("the batched reader refuses the pack with its own trailer: %v", err)
+			}
+			var readErr *IssueReadError
+			_, err = issueReadStoredEvents([]string{auth.Commit, bad}, defaultIssueReadLimits())
+			if !errors.As(err, &readErr) || readErr.Code != "invalid_history" || !strings.Contains(err.Error(), "audit "+shortID(request.ID)+" ") {
+				t.Fatalf("the batched reader gave %v for the other format's trailer, want invalid_history naming %s", err, shortID(request.ID))
 			}
 		})
 	}

@@ -146,7 +146,10 @@ be represented as a full-history bundle.
 Packs use Git pack version 2 with nondelta commit/tree/blob objects. Limits are
 64 MiB compressed, 100,000 objects, 16 MiB per expanded object, and 128 MiB total
 expanded bytes. The parser checks expansion, checksum, count, object types and
-hashes. Both local writes and imported reads first use isolated temporary object
+hashes. The trailer must be the pack's checksum in the audit's own object
+format, the format of its policy commit: SHA-1 for a SHA-1 audit and SHA-256
+for a SHA-256 audit, as `git index-pack` requires in a repository of that
+format. The parser checks it before it inflates any object. Both local writes and imported reads first use isolated temporary object
 storage with Git's `index-pack --fsck-objects` syntax checks (including required
 author/committer headers, identities, dates and tree encoding/order). Independent
 object-type lookup verifies commit-tree links, included parent links and tree

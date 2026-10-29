@@ -74,12 +74,9 @@ func verifyAuditPacks(facts []auditPackFact) ([]*auditSnapshot, int, error) {
 	owners := map[*auditSnapshot]int{}
 	formats := map[int][]*auditSnapshot{}
 	for index, fact := range facts {
-		if fact.Event.Audit == nil {
-			return nil, index, fmt.Errorf("audit fact required")
-		}
-		oidLength := len(fact.Event.Audit.PolicyCommit)
-		if oidLength != 40 && oidLength != 64 {
-			return nil, index, fmt.Errorf("audit requires exact authority policy commit")
+		oidLength, err := auditObjectIDLength(fact.Event)
+		if err != nil {
+			return nil, index, err
 		}
 		digest := sha256.Sum256(fact.Pack)
 		key := fmt.Sprintf("%d:%x", oidLength, digest)

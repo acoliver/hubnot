@@ -223,10 +223,22 @@ func auditObjectRoots(e Event) []string {
 	return sortedUniqueStrings(roots...)
 }
 
+// auditObjectIDLength is the object ID length of e's object format, the
+// length of its exact policy commit: 40 for SHA-1 and 64 for SHA-256.
+func auditObjectIDLength(e Event) (int, error) {
+	if e.Audit == nil {
+		return 0, fmt.Errorf("audit fact required")
+	}
+	if n := len(e.Audit.PolicyCommit); n == 40 || n == 64 {
+		return n, nil
+	}
+	return 0, fmt.Errorf("audit requires exact authority policy commit")
+}
+
 // Packs deliberately forbid deltas. Bound both the compressed input and each
 // expanded object before handing hostile bytes to Git's checksum/object parser.
-func validateAuditPack(pack []byte) error {
-	_, err := auditPackObjectIDs(pack, 40)
+func validateAuditPack(pack []byte, oidLength int) error {
+	_, err := auditPackObjectIDs(pack, oidLength)
 	return err
 }
 
@@ -245,22 +257,38 @@ func auditPackObjectIDsAndSizes(pack []byte, oidLength int, sizes map[string]int
 // walkAuditPack parses pack, bounded as validateAuditPack describes, and
 // calls visit, when not nil, with each object in pack order as soon as it
 // is hashed, with the contents of commits and trees when keepContents is
-// set. It returns the pack's sorted object IDs once the trailer and the
-// absence of duplicates are checked; on an error the visited objects are
+// set. oidLength names the object format, and the trailer must be that
+// format's checksum of the pack, with that format's length, as git
+// index-pack requires in a repository of that format; it is checked before
+// any object is inflated. It returns the pack's sorted object IDs once the
+// absence of duplicates is checked; on an error the visited objects are
 // not a valid pack's.
 func walkAuditPack(pack []byte, oidLength int, keepContents bool, visit func(string, auditPackObject)) ([]string, error) {
-	if len(pack) < 32 || len(pack) > maxAuditPack || string(pack[:4]) != "PACK" || binary.BigEndian.Uint32(pack[4:8]) != 2 {
+	if oidLength != 40 && oidLength != 64 {
+		return nil, fmt.Errorf("unsupported audit object format")
+	}
+	trailer := oidLength / 2
+	if len(pack) < 12+trailer || len(pack) > maxAuditPack || string(pack[:4]) != "PACK" || binary.BigEndian.Uint32(pack[4:8]) != 2 {
 		return nil, fmt.Errorf("invalid bounded audit dependency pack")
+	}
+	body := pack[:len(pack)-trailer]
+	var checksum hash.Hash = sha1.New()
+	if oidLength == 64 {
+		checksum = sha256.New()
+	}
+	_, _ = checksum.Write(body)
+	if !bytes.Equal(checksum.Sum(nil), pack[len(body):]) {
+		return nil, fmt.Errorf("audit pack checksum mismatch: the trailer is not the pack's checksum in the audit's object format")
 	}
 	count := binary.BigEndian.Uint32(pack[8:12])
 	if count == 0 || count > maxAuditObjects {
 		return nil, fmt.Errorf("audit dependency object count exceeded")
 	}
 	ids := []string{}
-	r := bytes.NewReader(pack[12:])
+	r := bytes.NewReader(body[12:])
 	total := int64(0)
 	for i := uint32(0); i < count; i++ {
-		start := len(pack) - r.Len()
+		start := len(body) - r.Len()
 		b, err := r.ReadByte()
 		if err != nil {
 			return nil, err
@@ -310,24 +338,15 @@ func walkAuditPack(pack []byte, oidLength int, keepContents bool, visit func(str
 		oid := hex.EncodeToString(h.Sum(nil))
 		ids = append(ids, oid)
 		if visit != nil {
-			object := auditPackObject{kind: typ, size: int64(size), entry: pack[start : len(pack)-r.Len()]}
+			object := auditPackObject{kind: typ, size: int64(size), entry: body[start : len(body)-r.Len()]}
 			if content != nil {
 				object.content = content.Bytes()
 			}
 			visit(oid, object)
 		}
 	}
-	if r.Len() != 20 && r.Len() != 32 {
+	if r.Len() != 0 {
 		return nil, fmt.Errorf("audit pack has unexpected trailing data")
-	}
-	trailer := r.Len()
-	var checksum hash.Hash = sha1.New()
-	if trailer == 32 {
-		checksum = sha256.New()
-	}
-	_, _ = checksum.Write(pack[:len(pack)-trailer])
-	if !bytes.Equal(checksum.Sum(nil), pack[len(pack)-trailer:]) {
-		return nil, fmt.Errorf("audit pack checksum mismatch")
 	}
 	if len(sortedUniqueStrings(ids...)) != len(ids) {
 		return nil, fmt.Errorf("duplicate audit pack object")
@@ -336,6 +355,10 @@ func walkAuditPack(pack []byte, oidLength int, keepContents bool, visit func(str
 }
 
 func auditAttachments(e Event, log []byte) (map[string][]byte, error) {
+	oidLength, err := auditObjectIDLength(e)
+	if err != nil {
+		return nil, err
+	}
 	objects, err := auditDependencyObjectIDsAt("", e)
 	if err != nil {
 		return nil, err
@@ -344,7 +367,7 @@ func auditAttachments(e Event, log []byte) (map[string][]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := validateAuditPack(pack); err != nil {
+	if err := validateAuditPack(pack, oidLength); err != nil {
 		return nil, err
 	}
 	result := map[string][]byte{"audit.pack": pack}
@@ -355,7 +378,11 @@ func auditAttachments(e Event, log []byte) (map[string][]byte, error) {
 }
 
 func validateAuditAttachments(e Event, attachments map[string][]byte) error {
-	if err := validateAuditPack(attachments["audit.pack"]); err != nil {
+	oidLength, err := auditObjectIDLength(e)
+	if err != nil {
+		return err
+	}
+	if err := validateAuditPack(attachments["audit.pack"], oidLength); err != nil {
 		return err
 	}
 	want := 1
