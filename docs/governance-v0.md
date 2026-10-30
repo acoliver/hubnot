@@ -429,7 +429,10 @@ fingerprints of the reviewers in the rule's `reviewers` field, or reads `all
 trusted reviewers` when the rule has no such field. `Counted approvals:` gives
 the current approvals the rule counts and the `proposals.requiredApprovals`
 threshold, as `N/M`. Under acceptance mode `rule` it adds `(author approvals do
-not count)`, because the candidate author's approval never counts there.
+not count)`, because the candidate author's approval never counts there. When
+the threshold is 0 it reads `(none required; author approvals do not count)`
+instead, for example `Counted approvals: 0/0 (none required; author approvals
+do not count)`.
 
 Under acceptance mode `rule`, two blockers change. The readiness blocker
 `current approval, protected check or CI evidence is not ready` is replaced by
@@ -734,10 +737,22 @@ at least `proposals.requiredApprovals` entries. A current change request from
 any trusted reviewer still blocks the rule, whether or not the reviewer is in
 the list. Without the field, approvals from every trusted reviewer count.
 
+A standing rule uses the existing `proposals.requiredApprovals` as its
+approval threshold. A value from 1 to 64 requires that many counted
+approvals. The value 0 means the rule needs no approval, so an ordinary change
+merges on its pipeline results alone, with no review from another session.
+Every other condition still applies at 0: a current change request from any
+trusted reviewer, a current maintainer rejection, and a missing or failed
+required pipeline result each block the rule, as do its author, path and
+executing-actor limits, the manual path for policy and protected-check
+changes, and the target-policy check. Approvals from counted reviewers are
+optional at 0; when present they still count and the merge fact cites them.
+
 Policy validation adds three limits to a standing rule:
 
-- `proposals.requiredApprovals` must be at least 1, so every proposal merged
-  under the rule carries at least one independent approval.
+- When `proposals.requiredApprovals` is 0, the policy must define at least one
+  pipeline. Every pipeline requires at least one passing trusted result, so a
+  proposal merged under the rule always carries pipeline evidence.
 - No path selector may be `.hn` or `.hn/` or start with `.hn/`. Policy and
   pipeline definitions stay under maintainer acceptance, so a standing rule
   cannot change the rules that govern it.
@@ -774,10 +789,10 @@ draft with the message on its `refusal:` line and changes nothing.
 
 <!-- example: standing-policy-refusals -->
 ```text
-# A standing rule needs at least one required approval.
+# A standing rule without required approvals needs a pipeline.
 rule: {"acceptance": "rule", "actors": ["<executor-actor>"]}
 proposals: {"requiredApprovals": 0}
-refusal: automerge rule "ordinary" has acceptance "rule", which requires proposals.requiredApprovals of at least 1
+refusal: automerge rule "ordinary" has acceptance "rule" and proposals.requiredApprovals 0, which requires at least one pipeline
 
 # A present reviewers list needs 1 to 64 entries.
 rule: {"acceptance": "rule", "actors": ["<executor-actor>"], "reviewers": []}
@@ -920,7 +935,7 @@ The full regression gate of NFR-007 also runs `gofmt -l`, `go vet ./...`,
 | FR-001 | Acceptance mode field | `TestStandingPolicyFieldsRefusals`, `TestStandingPolicyFieldsAcceptedValues`, `TestStandingPolicyFieldsFoldedKeyCaseIsStillValidated` |
 | FR-002 | Non-maintainer executing actors | `TestStandingPolicyFieldsRefusals`, `TestStandingPolicyFieldsAcceptedValues`, `TestStandingPolicyFieldsLegacyRuleKeepsCheckOrder` |
 | FR-003 | Path safety for standing acceptance | `TestStandingPolicyFieldsRefusals`, `TestStandingPolicyFieldsSelectorOverlap`, `TestStandingPolicyDocumentedRefusals`, `TestStandingQualityCaseVariantDirectoryIsOrdinaryContent` |
-| FR-004 | Minimum independent review | `TestStandingPolicyFieldsRefusals`, `TestStandingPolicyDocumentedRefusals` |
+| FR-004 | Approval threshold of a standing rule; `proposals.requiredApprovals` 0 merges on the pipeline gate alone (decision `01M66YE8SNSPCYB1ER757D9251`, superseding the original minimum of one approval) | `TestStandingPolicyFieldsRefusals`, `TestStandingPolicyFieldsAcceptedValues`, `TestStandingPolicyFieldsPolicyCheckRefusals`, `TestStandingPolicyDocumentedRefusals`, `TestStandingZeroApprovalExecuteGateOnly`, `TestStandingZeroApprovalBlockers`, `TestStandingZeroApprovalServeAdvance`, `TestStandingCompatOlderClient` |
 | FR-005 | Rule reviewers | `TestStandingPolicyFieldsRefusals`, `TestRuleAcceptanceLiveRuleReviewersRestrictCounting`, `TestRuleAcceptanceLiveChangeRequestVetoes`, `TestStandingAutomergePreviewRuleReviewers` |
 | FR-006 | Author approval under standing acceptance | `TestRuleAcceptanceLiveAuthorApprovalByMode`, `TestStandingAutomergePreviewRuleReviewers` |
 | FR-007 | Policy inspection | `TestStandingPolicyInspectionShow`, `TestStandingPolicyInspectionCheck`, `TestStandingPolicyDocumentedRule`, `TestStandingPolicyFieldsPolicyCheckRefusals` |

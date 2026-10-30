@@ -251,8 +251,12 @@ func validateAutomergeRuleFields(policy PolicyDocument, r AutomergeRule) error {
 			return err
 		}
 	}
-	if mode == automergeAcceptanceRule && policy.Proposals.RequiredApprovals == 0 {
-		return fmt.Errorf("automerge rule %q has acceptance %q, which requires proposals.requiredApprovals of at least 1", r.Name, automergeAcceptanceRule)
+	// proposals.requiredApprovals 0 lets a standing rule merge on its
+	// pipeline gate alone (decision 01M66YE8SNSPCYB1ER757D9251, superseding
+	// OQ-1). Every pipeline needs at least one passing result, so one
+	// pipeline is the gate; without any, a rule merge would cite no evidence.
+	if mode == automergeAcceptanceRule && policy.Proposals.RequiredApprovals == 0 && len(policy.Pipelines) == 0 {
+		return fmt.Errorf("automerge rule %q has acceptance %q and proposals.requiredApprovals 0, which requires at least one pipeline", r.Name, automergeAcceptanceRule)
 	}
 	if !r.Reviewers.IsZero() {
 		if len(reviewers) < 1 || len(reviewers) > maxPolicyRules {

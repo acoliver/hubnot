@@ -243,9 +243,16 @@ Policy amendments and protected-check changes stay manual under both acceptance
 modes, even after review (`TestStandingAutomergeContainmentManualPath`). Policy
 validation refuses a standing rule whose paths cover `.hn` or overlap a
 protected-check path (`TestStandingPolicyFieldsRefusals`). A standing rule
-needs at least one independent approval: `proposals.requiredApprovals` must be
-at least 1, and the candidate author's own approval never counts, even when
-`allowAuthorApproval` is true (`TestRuleAcceptanceLiveAuthorApprovalByMode`).
+needs `proposals.requiredApprovals` counted approvals, and the candidate
+author's own approval never counts, even when `allowAuthorApproval` is true
+(`TestRuleAcceptanceLiveAuthorApprovalByMode`). Maintainers may set the
+threshold to 0, so that ordinary changes merge on the pipeline gate alone; the
+policy must then define at least one pipeline, and trusted change requests,
+maintainer rejections and missing or failed results still block
+(`TestStandingZeroApprovalBlockers`). At 0 no second identity reviews the
+change, so the trusted runners, the pipeline definitions and the rule's
+authors and paths are the whole control; accepting such a rule accepts that
+risk.
 Every verifier re-derives the rule from the candidate's base policy, its base
 and head commits and the evidence the merge fact lists, and refuses the fact
 when any check fails (`TestStandingFactMatrixAgreement`). An eligible preview

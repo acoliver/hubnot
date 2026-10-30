@@ -99,6 +99,16 @@ func standingPolicyFieldsRequiredApprovals(n int) standingPolicyFieldsEdit {
 	}
 }
 
+// standingPolicyFieldsPipeline adds pipeline test with one required result
+// from runner.
+func standingPolicyFieldsPipeline(runner string) standingPolicyFieldsEdit {
+	return func(policy, _ map[string]any) {
+		policy["pipelines"] = map[string]any{
+			"test": map[string]any{"requiredResults": 1, "trustedRunners": []string{runner}},
+		}
+	}
+}
+
 func standingPolicyFieldsProtected(reviewer string, paths ...string) standingPolicyFieldsEdit {
 	return func(policy, _ map[string]any) {
 		policy["protectedChecks"] = map[string]any{
@@ -151,9 +161,12 @@ func standingPolicyFieldsRefusals(actors standingPolicyFieldsActors) []standingP
 			Message: maintainerMessage,
 		},
 		standingPolicyFieldsCase{
-			Name:    "row4 rule without required approvals",
+			// Decision 01M66YE8SNSPCYB1ER757D9251: zero required approvals
+			// are allowed, but only behind at least one pipeline gate. The
+			// draft defines no pipeline.
+			Name:    "row4 rule without required approvals or pipelines",
 			Edit:    standingPolicyFieldsWith(standing, standingPolicyFieldsRequiredApprovals(0)),
-			Message: "automerge rule " + rule + ` has acceptance "rule", which requires proposals.requiredApprovals of at least 1`,
+			Message: "automerge rule " + rule + ` has acceptance "rule" and proposals.requiredApprovals 0, which requires at least one pipeline`,
 		},
 		standingPolicyFieldsCase{
 			Name:    "row5 empty reviewers",
@@ -240,6 +253,9 @@ func TestStandingPolicyFieldsAcceptedValues(t *testing.T) {
 		{"absent fields", nil, "maintainers", nil},
 		{"explicit maintainers", standingPolicyFieldsSet("acceptance", "maintainers"), "maintainers", nil},
 		{"rule with non-maintainer executor", standing, "rule", nil},
+		{"rule with zero required approvals behind a pipeline", standingPolicyFieldsWith(standing, standingPolicyFieldsRequiredApprovals(0), standingPolicyFieldsPipeline(actors.Untrusted)), "rule", nil},
+		{"rule reviewers with zero required approvals", standingPolicyFieldsWith(standing, standingPolicyFieldsRequiredApprovals(0), standingPolicyFieldsPipeline(actors.Untrusted), standingPolicyFieldsSet("reviewers", []string{actors.Reviewer})), "rule", []string{actors.Reviewer}},
+		{"maintainers mode with zero required approvals and no pipeline", standingPolicyFieldsRequiredApprovals(0), "maintainers", nil},
 		{"reviewers in maintainers mode", standingPolicyFieldsSet("reviewers", []string{actors.Reviewer}), "maintainers", []string{actors.Reviewer}},
 		{"reviewers in rule mode", standingPolicyFieldsWith(standing, standingPolicyFieldsSet("reviewers", []string{actors.Reviewer2, actors.Reviewer})), "rule", []string{actors.Reviewer2, actors.Reviewer}},
 		{"rule path .hnx", standingPolicyFieldsWith(standing, standingPolicyFieldsSet("paths", []string{".hnx/"})), "rule", nil},
@@ -519,5 +535,14 @@ func TestStandingPolicyFieldsPolicyCheckRefusals(t *testing.T) {
 		if !strings.Contains(output, "The base policy governs this amendment candidate.") {
 			t.Fatalf("valid standing draft output:\n%s", output)
 		}
+	})
+	t.Run("valid zero-approval standing draft", func(t *testing.T) {
+		draft := standingPolicyFieldsDraft(t, repo.Actors, standingPolicyFieldsWith(
+			standingPolicyFieldsStanding(repo.Actors.Executor),
+			standingPolicyFieldsRequiredApprovals(0),
+			standingPolicyFieldsPipeline(repo.Actors.Untrusted),
+		))
+		output := repo.Check(t, draft, true)
+		assertOperationalContains(t, output, "  required approvals: changed (1 -> 0)\n", "The base policy governs this amendment candidate.")
 	})
 }

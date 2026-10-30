@@ -586,7 +586,10 @@ func printAutomergeRuleAcceptance(a *ruleAcceptance) {
 		fmt.Println("Counted reviewers: all trusted reviewers")
 	}
 	fmt.Printf("Counted approvals: %d/%d", len(a.Approvals), a.RequiredApprovals)
-	if a.Standing {
+	switch {
+	case a.Standing && a.RequiredApprovals == 0:
+		fmt.Print(" (none required; author approvals do not count)")
+	case a.Standing:
 		fmt.Print(" (author approvals do not count)")
 	}
 	fmt.Println()

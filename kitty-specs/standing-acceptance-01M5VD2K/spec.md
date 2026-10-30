@@ -74,7 +74,7 @@ A maintainer drafts a policy amendment that adds a rule with acceptance mode `ru
 3. **Given** a proposal whose head adds a rule with acceptance mode `rule`, **When** that proposal's author or the newly listed executing actor tries to use the new rule for that same proposal, **Then** it is refused because the rule does not exist in the signed base policy.
 4. **Given** drafts where a rule with acceptance mode `rule` lists the path `.hn`, `.hn/`, `.hn/pipelines/` or `.hn/policy.json`, **When** policy validation runs, **Then** each is rejected with a message naming the rule and the path.
 5. **Given** `protectedChecks.paths` containing `scripts/lint.sh`, **When** a rule with acceptance mode `rule` lists `scripts/`, or `protectedChecks.paths` contains `scripts/` and the rule lists `scripts/lint/run.sh`, **Then** validation rejects the rule as overlapping a protected path.
-6. **Given** drafts with `acceptance` set to `"Rule"`, `""`, `null` or `1`; `reviewers` empty, containing a duplicate, containing an actor outside `proposals.trustedReviewers`, or with fewer members than `proposals.requiredApprovals`; acceptance mode `rule` with `proposals.requiredApprovals` equal to 0; or acceptance mode `maintainers` (explicit or absent) with a non-maintainer executing actor, **When** validation runs, **Then** each draft is rejected with a message naming the rule and field.
+6. **Given** drafts with `acceptance` set to `"Rule"`, `""`, `null` or `1`; `reviewers` empty, containing a duplicate, containing an actor outside `proposals.trustedReviewers`, or with fewer members than `proposals.requiredApprovals`; acceptance mode `rule` with `proposals.requiredApprovals` equal to 0 in a policy without pipelines (decision `01M66YE8SNSPCYB1ER757D9251`); or acceptance mode `maintainers` (explicit or absent) with a non-maintainer executing actor, **When** validation runs, **Then** each draft is rejected with a message naming the rule and field.
 
 ---
 
@@ -221,7 +221,7 @@ Path (a) is today's check, unchanged and run first on every surface. Path (b) ru
 | FR-001 | Acceptance mode field | Each automerge rule may carry `acceptance` with exactly the string `maintainers` or `rule`. Absence and `maintainers` behave as today. `null`, an empty string, other strings and non-string values are rejected (OQ-3). | High | Open |
 | FR-002 | Non-maintainer executing actors | Under acceptance mode `rule`, a rule's `actors` need not be maintainers. Under acceptance mode `maintainers`, every executing actor must still be a base-policy maintainer. | High | Open |
 | FR-003 | Path safety for standing acceptance | Policy validation rejects a rule with acceptance mode `rule` when any of its path selectors equals `.hn` or `.hn/`, lies inside `.hn/`, or overlaps any `protectedChecks.paths` selector as equal, ancestor or descendant. The refusal names the rule and the selector (OQ-4). | High | Open |
-| FR-004 | Minimum independent review | Policy validation rejects a rule with acceptance mode `rule` when `proposals.requiredApprovals` is 0 (OQ-1). | High | Open |
+| FR-004 | Approval threshold under standing acceptance | A rule with acceptance mode `rule` uses `proposals.requiredApprovals` as its approval threshold. A value of 1 to 64 requires that many counted approvals; 0 means the rule needs no approval and merges on the pipeline gate alone, and policy validation then rejects the rule only when the policy defines no pipeline. Every other condition and veto still applies. Amended by decision `01M66YE8SNSPCYB1ER757D9251`, which supersedes the original refusal of 0 (OQ-1). | High | Open |
 | FR-005 | Rule reviewers | Each rule may carry `reviewers`: 1 to 64 distinct full actor fingerprints, each also listed in `proposals.trustedReviewers`, with at least `proposals.requiredApprovals` members. When set, only approvals from those actors count toward the rule's approval threshold, in both acceptance modes. A current change request from any `proposals.trustedReviewers` actor still blocks the rule (OQ-3). | High | Open |
 | FR-006 | Author approval under standing acceptance | Under acceptance mode `rule`, the candidate author's own approval never counts toward the rule, even when `allowAuthorApproval` is true (OQ-2). | High | Open |
 | FR-007 | Policy inspection | `hn policy show` prints each rule's acceptance mode and full reviewer list. `hn policy check` reports added, removed and changed acceptance modes and reviewers per rule, in deterministic order. | Medium | Open |
@@ -297,7 +297,7 @@ Path (a) is today's check, unchanged and run first on every surface. Path (b) ru
 
 ## Assumptions
 
-- Policy actors are distinct full fingerprints. Validation does not forbid one actor from being both an executing actor and a reviewer or author; independence comes from counting approvals that exclude the author (OQ-2) and from the minimum of one approval (OQ-1).
+- Policy actors are distinct full fingerprints. Validation does not forbid one actor from being both an executing actor and a reviewer or author; independence comes from counting approvals that exclude the author (OQ-2) and from `proposals.requiredApprovals` when it is at least 1 (OQ-1, amended by decision `01M66YE8SNSPCYB1ER757D9251`).
 - The set of required pipelines is every pipeline in the base policy, as today.
 - The advancement request can carry a rule name through the existing `hn serve` push-option channel; the exact wire form is a planning decision documented in `docs/serve-v0.md`.
 - Older-client behavior in User Story 7 is demonstrated with an `hn` binary built from commit `7a47e69`, the older-client reference, inside `go test`. The pre-existing test audit uses the separate implementation-start snapshot `d881d9b`.
@@ -324,6 +324,22 @@ Each item was decided by the specifying agent because the brief does not settle 
 
 Confirmed by the maintainer (delegated) on 2026-10-26: OQ-1 through OQ-11 are
 accepted as recommended. Requirements marked Open above are confirmed.
+
+Superseded by the maintainer (Andrew) on 2026-10-30: OQ-1 is reversed by
+decision `01M66YE8SNSPCYB1ER757D9251`. Ordinary changes must be able to merge
+on the gate alone, with no approval from another session, configured through
+the existing `proposals.requiredApprovals` field. The value 0 is now allowed
+with a rule in acceptance mode `rule` and means the rule needs no approval;
+1 to 64 keep the confirmed behavior, and no policy field is added. A current
+trusted change request, a current maintainer rejection, a failed or missing
+required pipeline result, the author, path and executing-actor limits, the
+manual path for policy and protected-check changes and the target-policy check
+all still block. The implementer added one validation under the delegated
+instruction: a standing rule with `requiredApprovals` 0 needs at least one
+pipeline, so a rule merge fact always cites a passing result. FR-004 above, the
+FR-004 row of `contracts/policy-rule-fields.md` and the policy-level rule of
+`data-model.md` carry the amended wording; the OQ-1 text above keeps its
+original wording as confirmed at spec review.
 
 ## Analysis remediation decisions
 

@@ -806,6 +806,7 @@ func TestStandingCompatOlderClient(t *testing.T) {
 	t.Run("OptOut", func(t *testing.T) { standingCompatOptOut(t, older, newer) })
 	t.Run("PolicyFields", func(t *testing.T) { standingCompatPolicyFields(t, older, newer) })
 	t.Run("RuleOnlyFacts", func(t *testing.T) { standingCompatRuleOnlyFacts(t, older, newer, report) })
+	t.Run("ZeroApprovalRuleOnlyFact", func(t *testing.T) { standingZeroApprovalOlderClient(t, older, newer, report) })
 	t.Run("MaintainerMergeAgreement", func(t *testing.T) { standingCompatMaintainerMergeAgreement(t, older, newer, report) })
 	t.Run("LegacyHistory", func(t *testing.T) { standingCompatLegacyHistory(t, older, newer, report) })
 }

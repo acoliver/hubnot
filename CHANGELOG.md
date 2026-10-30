@@ -17,6 +17,21 @@ experimental; alpha releases do not promise stable compatibility.
   readiness already ignores results whose request signer does not count; see
   `docs/ci-v0.md`.
 
+### Changed
+
+- An automerge rule with `"acceptance": "rule"` now accepts
+  `proposals.requiredApprovals` 0, which means the rule needs no approval: an
+  ordinary change merges on its passing pipeline results alone, locally and
+  through `hn serve`, and its rule merge fact may cite run results only.
+  Policy validation previously refused every such rule; it now refuses one
+  only when the policy defines no pipeline. A current trusted change request,
+  a current maintainer rejection, a missing or failed required result, the
+  rule's author, path and executing-actor limits, the manual path for policy
+  and protected-check changes and the target-policy check still block. Values
+  1 to 64 behave as before, and the preview reads `Counted approvals: N/0
+  (none required; author approvals do not count)`. Clients that predate the
+  rule fields still reject these facts. See `docs/governance-v0.md`.
+
 ### Fixed
 
 - Linked Git worktrees of a clone share its identity. The private keyring now

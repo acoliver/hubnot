@@ -36,7 +36,7 @@ Validation runs inside `validateOptionalPolicy` for each rule in document order,
 | 1 | `acceptance` present and `null`, not a string, or a string other than `maintainers` or `rule` | `automerge rule <rule> acceptance must be "maintainers" or "rule"` |
 | 2 | `reviewers` present and `null` or not an array of strings | `automerge rule <rule> reviewers must be an array of actor fingerprints` |
 | 3 | Acceptance mode `maintainers` and an actor is not a maintainer | `automerge rule <rule> actor <actor> is not a maintainer` (existing text) |
-| 4 | Acceptance mode `rule` and `proposals.requiredApprovals` is 0 | `automerge rule <rule> has acceptance "rule", which requires proposals.requiredApprovals of at least 1` |
+| 4 | Acceptance mode `rule`, `proposals.requiredApprovals` is 0 and the policy defines no pipeline (decision `01M66YE8SNSPCYB1ER757D9251`, superseding the refusal of every rule with 0) | `automerge rule <rule> has acceptance "rule" and proposals.requiredApprovals 0, which requires at least one pipeline` |
 | 5 | `reviewers` present with 0 or more than 64 entries | `automerge rule <rule> requires 1 to 64 reviewers when reviewers is present` |
 | 6 | `reviewers` contains an invalid or duplicate actor | `automerge reviewers contains invalid actor ...` or `automerge reviewers contains duplicate actor ...` (from `validateActorList`) |
 | 7 | A reviewer is not in `proposals.trustedReviewers` | `automerge rule <rule> reviewer <actor> is not a trusted reviewer` |

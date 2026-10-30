@@ -1588,8 +1588,11 @@ The rule's acceptance mode decides what the advancement asks of the server:
   Once the branch is at the head, step 8 evaluates the rule again and your
   client signs a rule merge fact with `commit` equal to the head, `rule` set
   to `NAME`, and the rule's counted approvals and passing results as
-  `evidence`. Step 9 publishes it in your actor chain. The server judges the
-  fact like any other fact it receives and signs nothing itself.
+  `evidence`. When `proposals.requiredApprovals` is 0 the rule needs no
+  approval, and a candidate without one is advanced on its passing results,
+  which are then the whole `evidence`. Step 9 publishes it in your actor
+  chain. The server judges the fact like any other fact it receives and signs
+  nothing itself.
 
 A rule advancement prints the preview and the output of `hn sync`, followed
 by these two lines:

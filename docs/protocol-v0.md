@@ -281,8 +281,9 @@ the signer must be one of that rule's executing actors. `policy` is the base
 policy digest. `evidence` lists exactly the qualifying approval and passing
 run-result IDs: at most one approval per counting reviewer and one result per
 trusted runner per pipeline. Any other item, including a `proposal.decision`,
-fails the rule check. `commit` is either a two-parent merge commit or the head
-itself after an `hn serve` fast-forward.
+fails the rule check. When `proposals.requiredApprovals` is 0 and no counted
+reviewer approved, `evidence` lists passing run results only. `commit` is either
+a two-parent merge commit or the head itself after an `hn serve` fast-forward.
 
 The fact below is what the executing actor `integrator` records under rule
 `ordinary` after a local merge of a candidate with one counted approval and
@@ -399,11 +400,12 @@ all apply. In acceptance mode `rule`, the maintainer-accepted amendment that
 adopted the rule stands in for per-proposal maintainer acceptance, and the
 current review and run requirements still apply.
 
-A rule's optional `acceptance` field is `"maintainers"` or `"rule"`. Its optional
-`reviewers` field lists the trusted reviewers whose approvals count toward the
-rule. A rule in mode `rule` requires at least one approval and may not cover
-`.hn` or overlap a protected-check path. Clients that predate these fields
-reject a policy that contains either one. See
+A rule's optional `acceptance` field is `"maintainers"` or `"rule"`. Its
+optional `reviewers` field lists the trusted reviewers whose approvals count
+toward the rule. A rule in mode `rule` uses `proposals.requiredApprovals` as its
+approval threshold; at 0 it needs no approval, and the policy must then define
+at least one pipeline. It may not cover `.hn` or overlap a protected-check path.
+Clients that predate these fields reject a policy that contains either one. See
 [Standing acceptance rule fields](governance-v0.md#standing-acceptance-rule-fields)
 for the limits and inspection output.
 

@@ -37,7 +37,7 @@ erDiagram
 | `Acceptance` | `acceptance` | `AutomergeAcceptance` | New, optional. Exactly `"maintainers"` or `"rule"`. Absent means `maintainers`. `null`, `""`, other strings and non-strings are refused |
 | `Reviewers` | `reviewers` | `AutomergeReviewers` | New, optional. When present: 1 to 64 distinct full fingerprints, each in `proposals.trustedReviewers`, with at least `proposals.requiredApprovals` members. `null` and `[]` are refused. Allowed in both modes |
 
-Policy-level rule, new: a policy that contains a rule with acceptance mode `rule` must have `proposals.requiredApprovals` of at least 1 (FR-004). The policy digest stays `eventID` of the exact file bytes, so adding or removing fields always changes the digest.
+Policy-level rule, new: a policy that contains a rule with acceptance mode `rule` and `proposals.requiredApprovals` 0 must define at least one pipeline (FR-004, as amended by decision `01M66YE8SNSPCYB1ER757D9251`; the original rule required `proposals.requiredApprovals` of at least 1). The policy digest stays `eventID` of the exact file bytes, so adding or removing fields always changes the digest.
 
 ### Acceptance mode
 
