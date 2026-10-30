@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 )
 
@@ -66,6 +67,13 @@ func createIdentity(name string) (*Identity, string, error) {
 		return nil, "", err
 	}
 	if err := initializeActiveIdentity(identity.Actor); err != nil {
+		// A concurrent initialization, for example in another worktree of
+		// the clone, may have activated a different actor first. The record
+		// written here holds a fresh key that nothing has used, so it is
+		// removed unless the pointer names it after all.
+		if active, activeErr := loadActiveActor(); activeErr == nil && active != identity.Actor {
+			_ = os.Remove(path)
+		}
 		return nil, "", err
 	}
 	return identity, path, nil

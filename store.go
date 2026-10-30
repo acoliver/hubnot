@@ -171,6 +171,13 @@ func appendEventWithAttachments(event Event, identity *Identity, attachments map
 		updateArgs = append(updateArgs, "")
 	}
 	if _, err := gitOutput(updateArgs...); err != nil {
+		// The compare-and-swap above is what serializes appends for one
+		// actor, including from other worktrees of the clone, which share
+		// actor refs. Report a lost race as such, so the caller retries.
+		current, exists, refErr := refValue(ref)
+		if refErr == nil && (exists != hasPrevious || current != previousCommit) {
+			return nil, fmt.Errorf("actor history changed while creating event; retry the command")
+		}
 		return nil, fmt.Errorf("append event: %w", err)
 	}
 

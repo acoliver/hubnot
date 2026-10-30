@@ -7,6 +7,13 @@ experimental; alpha releases do not promise stable compatibility.
 
 ### Fixed
 
+- Linked Git worktrees of a clone share its identity. The private keyring now
+  lives in the Git common directory, so `hn init` in any worktree serves the
+  main checkout and every other worktree. A worktree that already holds a
+  keyring in its own private Git directory keeps it, and an unreadable
+  worktree keyring is an error. Concurrent `hn init` commands activate exactly
+  one identity, and an append that loses a race for the actor ref reports a
+  retryable concurrent update. See `docs/identity-v0.md`.
 - Migration sessions and internal project/archive/imported-record spools share
   a path policy that handles verified macOS system temporary-directory aliases
   while retaining rejection of arbitrary symlinks and unsafe private paths.

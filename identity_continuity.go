@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"reflect"
 	"sort"
 	"strings"
@@ -727,7 +726,7 @@ func identityRotationCommandPath() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(paths.root, "rotation-command.json"), nil
+	return paths.rotationCommand, nil
 }
 
 func validateIdentityRotationCommand(command identityRotationCommandState) error {

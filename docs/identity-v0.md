@@ -157,7 +157,10 @@ IDs, never arrival order.
 
 ## Local keyring and permissions
 
-Current local state is rooted below the repository's private Git directory:
+Current local state is rooted in `hn/` below the clone's Git common
+directory, the directory `git rev-parse --git-common-dir` reports. In an
+ordinary clone that is `.git/hn/`; in a bare repository it is `hn/` inside the
+repository directory:
 
 ```text
 .git/hn/
@@ -169,15 +172,45 @@ Current local state is rooted below the repository's private Git directory:
 └── rotation-command.json     # only while rotation/retry is incomplete
 ```
 
-The actual Git directory may be worktree-specific; the paths above are logical
-and must never be committed or copied into documentation evidence. Private
-directories must be regular directories with mode `0700`. Private records,
-the active pointer, and transaction journals must be regular non-symlink files
-with mode `0600`. Unknown fields, trailing JSON, oversized state, wrong actor
+Linked worktrees created with `git worktree add` share the common directory,
+so every worktree of a clone uses this one keyring and signs as the clone's
+actor. `hn init` run first in a linked worktree creates the keyring in the
+common directory, where the main checkout and the other worktrees find it.
+`GIT_DIR` and `GIT_COMMON_DIR` select the directories as they do for Git.
+The worktrees also share the actor ref, which `hn` advances with a
+compare-and-swap. When commands in two worktrees append for the actor at the
+same time, one appends and the other fails without appending (issue commands
+report `concurrent_update`); retrying the failed command succeeds. When two
+first-time `hn init` commands race, exactly one identity becomes active; the
+other command reports that an identity already exists and deletes the unused
+key it generated.
+
+Earlier releases kept the keyring in each linked worktree's own private Git
+directory, `.git/worktrees/<name>/hn/`. A linked worktree whose private
+directory still holds identity state keeps using that keyring as a whole,
+including legacy migration and rotation, while the main checkout and other
+worktrees keep the clone's keyring. Identity state here means an `active`
+pointer, `identity.json`, either rotation journal, or a `*.json` record in
+`identities/`. The two locations are never combined: a worktree keyring with
+a record but no `active` pointer reports no identity and does not borrow the
+common pointer. Other private state, such as the memory index, may create
+`hn/` in the worktree's directory; that directory alone does not select a
+worktree keyring. If the worktree's private `hn/` or `hn/identities/` cannot
+be inspected, or is a symbolic link or not a directory, identity commands in
+that worktree fail with an error naming that location and never use the
+common keyring instead. `hn` does not move or merge a per-worktree keyring. Its actor stays distinct, and can be
+related to the clone's actor with `hn identity authorize` and
+`hn identity accept` like any other device.
+
+The paths above are logical and must never be committed or copied into
+documentation evidence. Private directories must be regular directories with
+mode `0700`. Private records, the active pointer, and transaction journals
+must be regular non-symlink files with mode `0600`. Unknown fields, trailing JSON, oversized state, wrong actor
 paths, mismatched key pairs, symlinks, and unsafe modes fail closed.
 
 Writes use a mode-`0600` temporary file, file sync, atomic rename, and directory
-sync. Legacy `.git/hn/identity.json` migration recomputes and preserves the
+sync. The first active pointer is published with a hard link instead of a
+rename, so it never replaces a pointer that another command created first. Legacy `.git/hn/identity.json` migration recomputes and preserves the
 same actor/public/private key bytes, writes the actor record durably, and then
 creates the active pointer. Retrying does not generate a replacement actor.
 The legacy source may remain on disk; once `active` exists, ordinary loading

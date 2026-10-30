@@ -29,11 +29,12 @@ var (
 )
 
 type identityKeyringLayout struct {
-	root       string
-	legacy     string
-	identities string
-	active     string
-	rotation   string
+	root            string
+	legacy          string
+	identities      string
+	active          string
+	rotation        string
+	rotationCommand string
 }
 
 type identityRecord struct {
@@ -62,19 +63,135 @@ type identityRotationState struct {
 	AcceptanceEvent    string `json:"acceptanceEvent,omitempty"`
 }
 
+// identityKeyringPaths locates the private keyring. It lives in the Git
+// common directory, so every linked worktree of a clone signs as that
+// clone's actor. A linked worktree that already holds identity state in its
+// own private Git directory, written by releases that kept the keyring
+// there, keeps using that keyring as a whole: the two locations are never
+// mixed, so the active pointer, records and rotation journals always come
+// from one place.
 func identityKeyringPaths() (identityKeyringLayout, error) {
-	gitDir, err := requireGitRepository()
+	gitDir, commonDir, err := identityGitDirectories()
 	if err != nil {
 		return identityKeyringLayout{}, err
 	}
-	root := filepath.Join(gitDir, "hn")
+	worktree := identityKeyringLayoutAt(filepath.Join(gitDir, "hn"))
+	if commonDir == gitDir {
+		return worktree, nil
+	}
+	held, err := identityKeyringPresent(worktree)
+	if err != nil {
+		return identityKeyringLayout{}, err
+	}
+	if held {
+		return worktree, nil
+	}
+	return identityKeyringLayoutAt(filepath.Join(commonDir, "hn")), nil
+}
+
+// identityGitDirectories returns the physical Git directory and Git common
+// directory of the current repository, honouring GIT_DIR and GIT_COMMON_DIR.
+// Both come from one rev-parse. Git prints a relative common directory
+// relative to its physical working directory, so a relative answer is
+// resolved against the physical working directory rather than a logical
+// one that may run through a symbolic link, and both answers are resolved
+// to physical paths so a main checkout, a bare repository and a linked
+// worktree compare reliably.
+func identityGitDirectories() (string, string, error) {
+	output, err := gitOutput("rev-parse", "--absolute-git-dir", "--git-common-dir")
+	if err != nil {
+		return "", "", fmt.Errorf("not inside a Git repository")
+	}
+	lines := strings.Split(strings.TrimSuffix(string(output), "\n"), "\n")
+	if len(lines) != 2 || lines[0] == "" || lines[1] == "" || !filepath.IsAbs(lines[0]) {
+		return "", "", fmt.Errorf("locate the Git common directory: unexpected git rev-parse output")
+	}
+	gitDir, commonDir := lines[0], lines[1]
+	if !filepath.IsAbs(commonDir) {
+		working, err := os.Getwd()
+		if err != nil {
+			return "", "", fmt.Errorf("locate the Git common directory: %w", err)
+		}
+		working, err = filepath.EvalSymlinks(working)
+		if err != nil {
+			return "", "", fmt.Errorf("locate the Git common directory: %w", err)
+		}
+		commonDir = filepath.Join(working, commonDir)
+	}
+	physicalGitDir, err := filepath.EvalSymlinks(gitDir)
+	if err != nil {
+		return "", "", fmt.Errorf("locate the Git directory: %w", err)
+	}
+	physicalCommonDir, err := filepath.EvalSymlinks(commonDir)
+	if err != nil {
+		return "", "", fmt.Errorf("locate the Git common directory: %w", err)
+	}
+	return physicalGitDir, physicalCommonDir, nil
+}
+
+func identityKeyringLayoutAt(root string) identityKeyringLayout {
 	return identityKeyringLayout{
-		root:       root,
-		legacy:     filepath.Join(root, "identity.json"),
-		identities: filepath.Join(root, "identities"),
-		active:     filepath.Join(root, "active"),
-		rotation:   filepath.Join(root, "rotation.json"),
-	}, nil
+		root:            root,
+		legacy:          filepath.Join(root, "identity.json"),
+		identities:      filepath.Join(root, "identities"),
+		active:          filepath.Join(root, "active"),
+		rotation:        filepath.Join(root, "rotation.json"),
+		rotationCommand: filepath.Join(root, "rotation-command.json"),
+	}
+}
+
+// identityKeyringPresent reports whether a keyring location holds identity
+// state: an active pointer, a legacy identity, a rotation journal (the
+// command journal carries the rotation target's private key) or an identity
+// record. The hn directory itself may exist without identity state, because
+// other private state such as the memory index lives there too. A location
+// that cannot be inspected, or whose directories are symbolic links or not
+// directories, is an error, so a worktree never silently falls back past
+// keys it may hold.
+func identityKeyringPresent(paths identityKeyringLayout) (bool, error) {
+	inspect := func(err error) error {
+		return fmt.Errorf("inspect worktree identity keyring %s: %w", paths.root, err)
+	}
+	for _, directory := range []string{paths.root, paths.identities} {
+		info, err := os.Lstat(directory)
+		if errors.Is(err, os.ErrNotExist) {
+			if directory == paths.root {
+				return false, nil
+			}
+			continue
+		}
+		if err != nil {
+			return false, inspect(err)
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return false, inspect(fmt.Errorf("private identity directory %s is a symbolic link", directory))
+		}
+		if !info.IsDir() {
+			return false, inspect(fmt.Errorf("private identity path %s is not a directory", directory))
+		}
+	}
+	for _, file := range []string{paths.active, paths.legacy, paths.rotation, paths.rotationCommand} {
+		if _, err := os.Lstat(file); err == nil {
+			return true, nil
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return false, inspect(err)
+		}
+	}
+	entries, err := os.ReadDir(paths.identities)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, inspect(err)
+	}
+	for _, entry := range entries {
+		// Match listIdentityRecords: only *.json entries are records, so an
+		// interrupted write's temporary file does not pin the worktree.
+		if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".json") {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func filepathForIdentityRecord(paths identityKeyringLayout, actor string) string {
@@ -91,13 +208,19 @@ func ensureIdentityKeyringDirectories(paths identityKeyringLayout) error {
 func ensurePrivateDirectory(path string) error {
 	info, err := os.Lstat(path)
 	if errors.Is(err, os.ErrNotExist) {
-		if err := os.Mkdir(path, 0o700); err != nil {
+		err = os.Mkdir(path, 0o700)
+		if err == nil {
+			if err := os.Chmod(path, 0o700); err != nil {
+				return fmt.Errorf("protect private identity directory: %w", err)
+			}
+			return nil
+		}
+		if !errors.Is(err, os.ErrExist) {
 			return fmt.Errorf("create private identity directory: %w", err)
 		}
-		if err := os.Chmod(path, 0o700); err != nil {
-			return fmt.Errorf("protect private identity directory: %w", err)
-		}
-		return nil
+		// A concurrent command, possibly in another worktree of the clone,
+		// created it first; validate what it created.
+		info, err = os.Lstat(path)
 	}
 	if err != nil {
 		return err
@@ -223,6 +346,53 @@ func writePrivateFileAtomicWithReplacement(path string, contents []byte, replace
 	}
 	if err := os.Rename(temporaryPath, path); err != nil {
 		return err
+	}
+	return syncPrivateDirectory(directory)
+}
+
+// createPrivateFileExclusive durably creates path with contents and fails
+// with an error matching os.ErrExist when path already exists. Readers see
+// either no file or the complete contents: the bytes are written to a
+// temporary file first and published with a hard link, which, unlike a
+// rename, never replaces an existing file. A file system without hard links
+// falls back to the replacing write after a fresh absence check.
+func createPrivateFileExclusive(path string, contents []byte) error {
+	directory := filepath.Dir(path)
+	temporary, err := os.CreateTemp(directory, ".hn-private-*")
+	if err != nil {
+		return err
+	}
+	temporaryPath := temporary.Name()
+	closed := false
+	defer func() {
+		if !closed {
+			_ = temporary.Close()
+		}
+		_ = os.Remove(temporaryPath)
+	}()
+	if err := temporary.Chmod(0o600); err != nil {
+		return err
+	}
+	if _, err := temporary.Write(contents); err != nil {
+		return err
+	}
+	if err := temporary.Sync(); err != nil {
+		return err
+	}
+	if err := temporary.Close(); err != nil {
+		return err
+	}
+	closed = true
+	if err := os.Link(temporaryPath, path); err != nil {
+		if errors.Is(err, os.ErrExist) {
+			return err
+		}
+		if _, statErr := os.Lstat(path); statErr == nil {
+			return fmt.Errorf("create private identity file %s: %w", path, os.ErrExist)
+		} else if !errors.Is(statErr, os.ErrNotExist) {
+			return statErr
+		}
+		return writePrivateFileAtomic(path, contents)
 	}
 	return syncPrivateDirectory(directory)
 }
@@ -418,7 +588,21 @@ func initializeActiveIdentity(actor string) error {
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	return writePrivateFileAtomic(paths.active, []byte(actor+"\n"))
+	// Every worktree of a clone shares this pointer, so two first-time
+	// initializations can race. Creating it without replacement lets exactly
+	// one win; the other then sees the winner like any later caller.
+	err = createPrivateFileExclusive(paths.active, []byte(actor+"\n"))
+	if !errors.Is(err, os.ErrExist) {
+		return err
+	}
+	current, err = loadActiveActor()
+	if err != nil {
+		return err
+	}
+	if current != actor {
+		return fmt.Errorf("active identity already exists for actor %s", current)
+	}
+	return nil
 }
 
 func replaceActiveIdentity(actor, expected string) error {
