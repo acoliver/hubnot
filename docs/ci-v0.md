@@ -108,13 +108,22 @@ requests. They require a local acceptance policy with two exact matches:
 
 ```text
 accepted pipeline name
-accepted request-signer fingerprint
+accepted request-signer fingerprint (--accept-actor, repeatable)
 ```
 
 The signer match uses the full 32-byte public-key fingerprint. There is no
 "accept anyone" mode. This means a trusted actor explicitly requests execution
 of a particular proposal while the runner independently chooses whether to
 honor requests from that actor.
+
+Repeating `--accept-actor` lets one runner serve several requesters, such as
+the maintainers and the `requesters` a pipeline's policy lists. The runner
+takes 1 to 64 distinct fingerprints and refuses duplicate or malformed values.
+When it lists more than one actor, it executes a request from a listed signer
+only if that signer may request the pipeline under the base policy of the
+requested proposal; it skips other requests from listed signers with a note on
+standard error. A runner with a single `--accept-actor` keeps its original
+rule and executes every matching request from that actor.
 
 `runner once` handles at most one request and publishes its result. `runner
 watch` repeats this process, waits when no work is available, survives transient

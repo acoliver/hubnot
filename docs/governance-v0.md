@@ -40,6 +40,12 @@ merge authority. Older clients reject policies that contain the field.
 }
 ```
 
+One runner serves several requesters when it repeats `--accept-actor`, as in
+`hn runner once --accept-pipeline test --accept-actor <maintainer-actor> --accept-actor <orchestrator-actor>`.
+With more than one accepted actor, the runner executes only requests whose
+signer is a maintainer or listed requester under the proposal's base policy.
+See [ci-v0.md](ci-v0.md#runner-discovery).
+
 Actor values are complete lowercase SHA-256 fingerprints of Ed25519 public
 keys. Unknown JSON fields, duplicate or malformed actors, an empty maintainer
 list, unsatisfiable thresholds, invalid pipeline names, and unsupported policy

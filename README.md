@@ -497,7 +497,7 @@ hn policy check --base REV <--head REV|--file PATH>
 hn review PROPOSAL <--approve|--request-changes> [--body TEXT]
 hn run request|list|show|logs
 hn run execute REQUEST [--backend sandbox|host] [--allow-unsafe-host-execution] [--rerun]
-hn runner once|watch --accept-pipeline NAME --accept-actor ACTOR
+hn runner once|watch --accept-pipeline NAME --accept-actor ACTOR [--accept-actor ACTOR]...
 hn decide PROPOSAL <--accept|--reject> [--body TEXT]
 hn merge PROPOSAL
 hn merge PROPOSAL --remote REMOTE [--branch BRANCH]

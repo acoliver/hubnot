@@ -121,8 +121,8 @@ Usage:
   hn run show REQUEST
   hn run execute REQUEST [--backend sandbox|host]
   hn run logs RESULT
-  hn runner once --accept-pipeline NAME --accept-actor ACTOR
-  hn runner watch --accept-pipeline NAME --accept-actor ACTOR
+  hn runner once --accept-pipeline NAME --accept-actor ACTOR [--accept-actor ACTOR]...
+  hn runner watch --accept-pipeline NAME --accept-actor ACTOR [--accept-actor ACTOR]...
   hn decide PROPOSAL <--accept|--reject> [--body TEXT]
   hn merge PROPOSAL --remote REMOTE [--branch BRANCH]
   hn merge PROPOSAL

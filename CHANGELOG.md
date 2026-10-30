@@ -5,6 +5,15 @@ experimental; alpha releases do not promise stable compatibility.
 
 ## Unreleased
 
+### Added
+
+- `hn runner once` and `hn runner watch` accept `--accept-actor` up to 64
+  times, so one runner can serve the maintainers and the requesters that a
+  pipeline's `requesters` policy lists. Duplicate and malformed fingerprints
+  are refused before synchronization. With more than one accepted actor the
+  runner executes only requests whose signer counts under the proposal's base
+  policy. A single `--accept-actor` behaves as before. See `docs/ci-v0.md`.
+
 ### Fixed
 
 - Linked Git worktrees of a clone share its identity. The private keyring now

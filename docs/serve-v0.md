@@ -1844,9 +1844,31 @@ Runner recorded passed result 9a34c097bf6b with sandbox backend
 ```
 
 `--accept-actor` takes the requester's full actor fingerprint, usually a
-maintainer's, because readiness counts a result only when a policy maintainer
-signed its run request. When nothing is pending, the command prints
-`No pending test requests from actor 9d71a3cd9c0a.` and exits 0. The default
+maintainer's, because readiness counts a result only when its run request was
+signed by a policy maintainer or by an actor that the pipeline's `requesters`
+list names. When nothing is pending, the command prints
+`No pending test requests from actor 9d71a3cd9c0a.` and exits 0.
+
+Repeat `--accept-actor` to serve several requesters from one runner, for
+example a maintainer and an orchestrator listed in `pipelines.test.requesters`:
+
+```sh
+hn runner once --accept-pipeline test --accept-actor MAINTAINER --accept-actor ORCHESTRATOR
+```
+
+The runner accepts 1 to 64 distinct full fingerprints and refuses a duplicate
+or malformed value before it synchronizes. Each invocation still executes at
+most one request, signed by any listed actor. With more than one actor, the
+runner also checks the base policy of the requested proposal and executes a
+request only when its signer is a maintainer or a listed requester of the
+pipeline. It skips any other request with
+`hn runner: skipped REQUEST: signer ACTOR is neither a maintainer nor a requester of pipeline test under the base policy`
+on standard error and leaves it unexecuted. The idle message names every
+actor: `No pending test requests from actors 9d71a3cd9c0a, 5be0c1f2a7d4.` A
+single `--accept-actor` keeps its earlier behavior and executes every pending
+request that its actor signs.
+
+The default
 `--backend sandbox` runs the steps under Bubblewrap. On a host without
 Bubblewrap, `--backend host --allow-unsafe-host-execution` runs them directly
 on the runner's host, which is safe only for proposals the runner's operator
