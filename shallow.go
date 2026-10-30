@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 )
@@ -136,7 +137,7 @@ var shallowObjectProbe = probeExactGitObject
 
 func probeExactGitObject(objectish string) (gitObjectProbe, error) {
 	if validFullGitObjectID(objectish) {
-		gitDir, err := requireGitRepository()
+		gitDir, err := requireCloneStateDirectory()
 		if err != nil {
 			return gitObjectProbe{}, err
 		}
@@ -553,12 +554,88 @@ func loadReplicationPendingAnchors(gitDir string) ([]replicationPendingAnchor, e
 	return anchors, nil
 }
 
+// replicationStateLocations returns gitDir, whose hn/replication holds the
+// clone-wide acceptance state, followed by the private Git directories of the
+// clone's linked worktrees, where releases before that state became
+// clone-wide wrote it when hn ran in a linked worktree. Callers pass the Git
+// common directory, so a quarantine or a repository without linked worktrees
+// has only its own location.
+func replicationStateLocations(gitDir string) ([]string, error) {
+	legacy, err := linkedWorktreeGitDirectories(gitDir)
+	if err != nil {
+		return nil, err
+	}
+	return append([]string{gitDir}, legacy...), nil
+}
+
+// loadCombinedReplicationJournal reads the transaction receipts and pending
+// anchors of every replication state location as one journal. The same
+// transaction may appear in two locations only with identical contents,
+// which is what an interrupted legacy migration leaves; any other overlap
+// fails closed.
+func loadCombinedReplicationJournal(locations []string) ([]replicationTransactionRecord, []replicationPendingAnchor, error) {
+	recordsByID := make(map[string]replicationTransactionRecord)
+	anchorsByID := make(map[string]replicationPendingAnchor)
+	recordSource := make(map[string]string)
+	anchorSource := make(map[string]string)
+	for _, location := range locations {
+		records, err := loadReplicationTransactionRecords(location)
+		if err != nil {
+			return nil, nil, replicationLocationError(locations, location, err)
+		}
+		for _, record := range records {
+			if existing, exists := recordsByID[record.ID]; exists {
+				if !reflect.DeepEqual(existing, record) {
+					return nil, nil, fmt.Errorf("replication transaction %s differs between %s and %s", record.ID, recordSource[record.ID], location)
+				}
+				continue
+			}
+			recordsByID[record.ID] = record
+			recordSource[record.ID] = location
+		}
+		anchors, err := loadReplicationPendingAnchors(location)
+		if err != nil {
+			return nil, nil, replicationLocationError(locations, location, err)
+		}
+		for _, anchor := range anchors {
+			if existing, exists := anchorsByID[anchor.ID]; exists {
+				if !reflect.DeepEqual(existing, anchor) {
+					return nil, nil, fmt.Errorf("replication pending anchor %s differs between %s and %s", anchor.ID, anchorSource[anchor.ID], location)
+				}
+				continue
+			}
+			anchorsByID[anchor.ID] = anchor
+			anchorSource[anchor.ID] = location
+		}
+	}
+	records := make([]replicationTransactionRecord, 0, len(recordsByID))
+	for _, record := range recordsByID {
+		records = append(records, record)
+	}
+	sort.Slice(records, func(i, j int) bool { return records[i].ID < records[j].ID })
+	anchors := make([]replicationPendingAnchor, 0, len(anchorsByID))
+	for _, anchor := range anchorsByID {
+		anchors = append(anchors, anchor)
+	}
+	sort.Slice(anchors, func(i, j int) bool { return anchors[i].ID < anchors[j].ID })
+	return records, anchors, nil
+}
+
+// replicationLocationError names a legacy linked-worktree location, so an
+// operator can find state that the clone-wide location does not hold.
+func replicationLocationError(locations []string, location string, err error) error {
+	if len(locations) == 0 || location == locations[0] {
+		return err
+	}
+	return fmt.Errorf("legacy replication state in linked worktree %s: %w", location, err)
+}
+
 func loadReplicationAcceptanceState(gitDir string) (map[string]bool, map[string]replicationTransactionRecord, error) {
-	records, err := loadReplicationTransactionRecords(gitDir)
+	locations, err := replicationStateLocations(gitDir)
 	if err != nil {
 		return nil, nil, err
 	}
-	anchors, err := loadReplicationPendingAnchors(gitDir)
+	records, anchors, err := loadCombinedReplicationJournal(locations)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -619,9 +696,15 @@ func loadReplicationAcceptanceState(gitDir string) (map[string]bool, map[string]
 		}
 	}
 	if legacyNeeded {
-		legacy, err := loadReplicationUnacceptedObjects(gitDir)
-		if err != nil {
-			return nil, nil, err
+		legacy := make(map[string]bool)
+		for _, location := range locations {
+			objects, err := loadReplicationUnacceptedObjects(location)
+			if err != nil {
+				return nil, nil, replicationLocationError(locations, location, err)
+			}
+			for id := range objects {
+				legacy[id] = true
+			}
 		}
 		if len(legacy) == 0 {
 			return nil, nil, fmt.Errorf("validated legacy replication transaction is missing durable unaccepted-object state")
@@ -789,6 +872,112 @@ func repairAnchoredReplicationReceiptsForRecovery(gitDir, remote string) error {
 	return nil
 }
 
+// migrateLegacyReplicationState moves the acceptance journals that earlier
+// releases wrote below linked worktrees' private Git directories into the
+// clone-wide location below stateDir, so that recovery and reconciliation,
+// which write only there, can complete them. Files move unchanged, so a
+// journal that needs recovery, such as an anchor whose receipt was never
+// written, is recovered by the same transaction afterwards. Each file is
+// copied before its legacy original is removed, and readers treat identical
+// copies in both places as one, so an interruption at any point leaves the
+// same combined state. A legacy file whose name already holds different
+// contents in the clone-wide location is an error.
+func migrateLegacyReplicationState(stateDir string) error {
+	legacy, err := linkedWorktreeGitDirectories(stateDir)
+	if err != nil {
+		return err
+	}
+	for _, location := range legacy {
+		for _, directories := range [][2]string{
+			{replicationTransactionsPath(location), replicationTransactionsPath(stateDir)},
+			{replicationAnchorsPath(location), replicationAnchorsPath(stateDir)},
+		} {
+			if err := migrateLegacyReplicationFiles(location, directories[0], stateDir, directories[1]); err != nil {
+				return fmt.Errorf("move legacy replication state from linked worktree %s: %w", location, err)
+			}
+		}
+		if err := migrateLegacyUnacceptedObjects(location, stateDir); err != nil {
+			return fmt.Errorf("move legacy replication state from linked worktree %s: %w", location, err)
+		}
+	}
+	return nil
+}
+
+func migrateLegacyReplicationFiles(legacyGitDir, legacyDirectory, stateDir, directory string) error {
+	entries, exists, err := readReplicationStateDirectory(legacyGitDir, legacyDirectory)
+	if err != nil || !exists {
+		return err
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
+			continue
+		}
+		source := filepath.Join(legacyDirectory, entry.Name())
+		contents, err := readPrivateFileBounded(source, maxReplicationStateBytes)
+		if err != nil {
+			return err
+		}
+		if err := ensureReplicationStateDirectory(stateDir, directory); err != nil {
+			return err
+		}
+		target := filepath.Join(directory, entry.Name())
+		existing, err := readPrivateFileBounded(target, maxReplicationStateBytes)
+		switch {
+		case err == nil && !bytes.Equal(existing, contents):
+			return fmt.Errorf("%s differs from clone-wide %s", source, target)
+		case errors.Is(err, os.ErrNotExist):
+			if err := writePrivateFileAtomic(target, contents); err != nil {
+				return err
+			}
+		case err != nil:
+			return err
+		}
+		if err := os.Remove(source); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		if err := syncPrivateDirectory(legacyDirectory); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func migrateLegacyUnacceptedObjects(legacyGitDir, stateDir string) error {
+	source := replicationUnacceptedObjectsPath(legacyGitDir)
+	if _, err := os.Lstat(source); errors.Is(err, os.ErrNotExist) {
+		return nil
+	} else if err != nil {
+		return err
+	}
+	legacy, err := loadReplicationUnacceptedObjects(legacyGitDir)
+	if err != nil {
+		return err
+	}
+	objects, err := loadReplicationUnacceptedObjects(stateDir)
+	if err != nil {
+		return err
+	}
+	changed := false
+	for id := range legacy {
+		if !objects[id] {
+			objects[id] = true
+			changed = true
+		}
+	}
+	if changed {
+		if err := ensureReplicationStateDirectory(stateDir, filepath.Dir(replicationUnacceptedObjectsPath(stateDir))); err != nil {
+			return err
+		}
+		if err := saveReplicationUnacceptedObjects(stateDir, objects); err != nil {
+			return err
+		}
+	}
+	if err := os.Remove(source); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return syncPrivateDirectory(filepath.Dir(source))
+}
+
 func repositoryIsShallow() (bool, error) {
 	value, err := gitText("rev-parse", "--is-shallow-repository")
 	if err != nil {
@@ -896,7 +1085,7 @@ type shallowGapRecord struct {
 }
 
 func shallowGapPath() (string, error) {
-	gitDir, err := requireGitRepository()
+	gitDir, err := requireCloneStateDirectory()
 	if err != nil {
 		return "", err
 	}
@@ -1184,7 +1373,7 @@ func shallowAcceptedFacts(operation string) ([]shallowEventFact, error) {
 			}
 			return nil, classifyShallowDependency(dependency, fmt.Errorf("signed actor chain begins after its required predecessor"))
 		}
-		gitDir, err := requireGitRepository()
+		gitDir, err := requireCloneStateDirectory()
 		if err != nil {
 			return nil, err
 		}
@@ -1214,7 +1403,7 @@ func collectAcceptedEventsForReplication(selection ReplicationSelection) ([]Stor
 	if err != nil {
 		return nil, err
 	}
-	gitDir, err := requireGitRepository()
+	gitDir, err := requireCloneStateDirectory()
 	if err != nil {
 		return nil, err
 	}
@@ -2167,11 +2356,7 @@ func recoverSelectedShallow(remote string) error {
 	if !explicit || selection.All {
 		return fmt.Errorf("%w: save an exact actor/proposal/memory selection and positive budgets for remote %s", errShallowRecoverySelectionRequired, remote)
 	}
-	selectionPath, err := replicationSelectionPath(remote)
-	if err != nil {
-		return err
-	}
-	selectionBytes, err := readPrivateFile(selectionPath)
+	selectionBytes, err := replicationSelectionSnapshot(remote)
 	if err != nil {
 		return err
 	}
@@ -2193,7 +2378,7 @@ func recoverSelectedShallow(remote string) error {
 	if result.hasFailures() {
 		return fmt.Errorf("selected shallow recovery failed for one or more exact selections; accepted state remains authoritative")
 	}
-	afterBytes, err := readPrivateFile(selectionPath)
+	afterBytes, err := replicationSelectionSnapshot(remote)
 	if err != nil {
 		return err
 	}

@@ -191,7 +191,11 @@ func runReplicationTransaction(selection ReplicationSelection) (replicationTrans
 	if err != nil {
 		return result, fmt.Errorf("remote %q does not exist", selection.Remote)
 	}
-	mainGitDir, err := requireGitRepository()
+	// The Git common directory holds the clone's shared objects, accepted
+	// refs and shallow boundary, and its hn/replication holds the acceptance
+	// journal that guards them, so a transaction run from any linked
+	// worktree validates against, copies into and records in one place.
+	mainGitDir, err := requireCloneStateDirectory()
 	if err != nil {
 		return result, replicationPhaseError(selection.Remote, "repository setup")
 	}
@@ -209,6 +213,9 @@ func runReplicationTransaction(selection ReplicationSelection) (replicationTrans
 		if err := ensurePrivateDirectory(directory); err != nil {
 			return result, replicationPhaseError(selection.Remote, "quarantine setup")
 		}
+	}
+	if err := migrateLegacyReplicationState(mainGitDir); err != nil {
+		return result, fmt.Errorf("%v: %w", replicationPhaseError(selection.Remote, "legacy worktree state migration"), err)
 	}
 	if err := repairAnchoredReplicationReceiptsForRecovery(mainGitDir, selection.Remote); err != nil {
 		return result, replicationPhaseError(selection.Remote, "pending acceptance reconciliation")

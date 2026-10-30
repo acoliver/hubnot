@@ -1,12 +1,14 @@
 package main
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"unicode"
@@ -102,16 +104,108 @@ func validReplicationRemote(remote string) bool {
 	return !strings.HasSuffix(remote, ".") && !strings.Contains(remote, "..")
 }
 
+// replicationSelectionPath returns the clone-wide saved selection for
+// remote. It lives below the Git common directory, because every worktree of
+// a clone imports into the same accepted refs and object database, so one
+// selection and one set of budgets govern sync from any of them.
 func replicationSelectionPath(remote string) (string, error) {
 	if !validReplicationRemote(remote) {
 		return "", fmt.Errorf("invalid replication remote name")
 	}
-	gitDir, err := requireGitRepository()
+	gitDir, err := requireCloneStateDirectory()
 	if err != nil {
 		return "", err
 	}
+	return replicationSelectionPathAt(gitDir, remote), nil
+}
+
+func replicationSelectionPathAt(gitDir, remote string) string {
 	encoded := base64.RawURLEncoding.EncodeToString([]byte(remote))
-	return filepath.Join(gitDir, "hn", "replication", "selections", encoded+".json"), nil
+	return filepath.Join(gitDir, "hn", "replication", "selections", encoded+".json")
+}
+
+// legacyReplicationSelectionPaths returns the saved selections for remote
+// that releases before selections became clone-wide wrote below the private
+// Git directories of the clone's linked worktrees.
+func legacyReplicationSelectionPaths(remote string) ([]string, error) {
+	if !validReplicationRemote(remote) {
+		return nil, fmt.Errorf("invalid replication remote name")
+	}
+	gitDir, err := requireCloneStateDirectory()
+	if err != nil {
+		return nil, err
+	}
+	worktrees, err := linkedWorktreeGitDirectories(gitDir)
+	if err != nil {
+		return nil, err
+	}
+	paths := make([]string, 0)
+	for _, worktree := range worktrees {
+		path := replicationSelectionPathAt(worktree, remote)
+		if _, err := os.Lstat(path); errors.Is(err, os.ErrNotExist) {
+			continue
+		} else if err != nil {
+			return nil, fmt.Errorf("inspect legacy replication selection %s: %w", path, err)
+		}
+		paths = append(paths, path)
+	}
+	return paths, nil
+}
+
+func readReplicationSelectionFile(path, remote string) (ReplicationSelection, error) {
+	contents, err := readPrivateFile(path)
+	if err != nil {
+		return ReplicationSelection{}, err
+	}
+	return decodeReplicationSelection(contents, remote)
+}
+
+func decodeReplicationSelection(contents []byte, remote string) (ReplicationSelection, error) {
+	var selection ReplicationSelection
+	if err := decodePrivateJSON(contents, &selection, "replication selection"); err != nil {
+		return ReplicationSelection{}, err
+	}
+	if selection.Remote != remote {
+		return ReplicationSelection{}, fmt.Errorf("replication selection remote mismatch: got %q, want %q", selection.Remote, remote)
+	}
+	if err := validateReplicationSelection(selection); err != nil {
+		return ReplicationSelection{}, fmt.Errorf("invalid saved replication selection: %w", err)
+	}
+	return selection, nil
+}
+
+func sameReplicationSelection(left, right ReplicationSelection) bool {
+	return left.Version == right.Version && left.Remote == right.Remote &&
+		slices.Equal(left.Actors, right.Actors) && slices.Equal(left.Proposals, right.Proposals) &&
+		slices.Equal(left.Memories, right.Memories) && left.All == right.All &&
+		left.AllTrusted == right.AllTrusted && left.Budgets == right.Budgets
+}
+
+// replicationSelectionSnapshot returns the exact bytes of every saved
+// selection file for remote, clone-wide and legacy, labelled by path, so a
+// caller can detect any change to the selection that governs the clone.
+func replicationSelectionSnapshot(remote string) ([]byte, error) {
+	path, err := replicationSelectionPath(remote)
+	if err != nil {
+		return nil, err
+	}
+	legacy, err := legacyReplicationSelectionPaths(remote)
+	if err != nil {
+		return nil, err
+	}
+	var snapshot bytes.Buffer
+	for _, candidate := range append([]string{path}, legacy...) {
+		contents, err := readPrivateFile(candidate)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		fmt.Fprintf(&snapshot, "%s\x00%d\x00", candidate, len(contents))
+		snapshot.Write(contents)
+	}
+	return snapshot.Bytes(), nil
 }
 
 func validateReplicationSelection(selection ReplicationSelection) error {
@@ -165,6 +259,9 @@ func validateReplicationSelection(selection ReplicationSelection) error {
 	return nil
 }
 
+// saveReplicationSelection records the clone-wide selection for a remote and
+// then removes any legacy linked-worktree copy for that remote, so the saved
+// selection is the only one that governs sync from any worktree afterwards.
 func saveReplicationSelection(selection ReplicationSelection) error {
 	if err := validateReplicationSelection(selection); err != nil {
 		return err
@@ -173,6 +270,10 @@ func saveReplicationSelection(selection ReplicationSelection) error {
 	sort.Strings(selection.Proposals)
 	sort.Strings(selection.Memories)
 	path, err := replicationSelectionPath(selection.Remote)
+	if err != nil {
+		return err
+	}
+	legacy, err := legacyReplicationSelectionPaths(selection.Remote)
 	if err != nil {
 		return err
 	}
@@ -191,35 +292,67 @@ func saveReplicationSelection(selection ReplicationSelection) error {
 	if err := writePrivateFileAtomic(path, encoded); err != nil {
 		return replicationPhaseError(selection.Remote, "selection recording")
 	}
+	for _, legacyPath := range legacy {
+		if err := os.Remove(legacyPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("saved the clone-wide replication selection for %s, but could not remove the legacy linked-worktree selection %s: %w", selection.Remote, legacyPath, err)
+		}
+		if err := syncPrivateDirectory(filepath.Dir(legacyPath)); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
+// loadReplicationSelection returns the selection that governs sync with
+// remote from any worktree of the clone and whether one was saved. The
+// clone-wide selection and any legacy copy that an earlier release saved in a
+// linked worktree's private Git directory must all agree: a single saved
+// selection, wherever it was saved, applies clone-wide, and selections that
+// differ are an error until hn replication select saves one clone-wide
+// selection, because silently preferring one could widen what another
+// worktree imports. Only when no selection was saved anywhere does the
+// compatibility default of all advertised refs apply.
 func loadReplicationSelection(remote string) (ReplicationSelection, bool, error) {
 	path, err := replicationSelectionPath(remote)
 	if err != nil {
 		return ReplicationSelection{}, false, err
 	}
+	var selection ReplicationSelection
+	source := ""
 	contents, err := readPrivateFile(path)
-	if errors.Is(err, os.ErrNotExist) {
+	if err == nil {
+		selection, err = decodeReplicationSelection(contents, remote)
+		if err != nil {
+			return ReplicationSelection{}, false, err
+		}
+		source = path
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return ReplicationSelection{}, false, replicationPhaseError(remote, "selection reading")
+	}
+	legacy, err := legacyReplicationSelectionPaths(remote)
+	if err != nil {
+		return ReplicationSelection{}, false, err
+	}
+	for _, legacyPath := range legacy {
+		candidate, err := readReplicationSelectionFile(legacyPath, remote)
+		if err != nil {
+			return ReplicationSelection{}, false, fmt.Errorf("legacy linked-worktree replication selection %s: %w", legacyPath, err)
+		}
+		if source == "" {
+			selection, source = candidate, legacyPath
+			continue
+		}
+		if !sameReplicationSelection(selection, candidate) {
+			return ReplicationSelection{}, false, fmt.Errorf("saved replication selections for remote %s differ between %s and %s; save one clone-wide selection with hn replication select %s", remote, source, legacyPath, remote)
+		}
+	}
+	if source == "" {
 		return ReplicationSelection{
 			Version: replicationSelectionVersion,
 			Remote:  remote,
 			All:     true,
 			Budgets: defaultReplicationBudgets(),
 		}, false, nil
-	}
-	if err != nil {
-		return ReplicationSelection{}, false, replicationPhaseError(remote, "selection reading")
-	}
-	var selection ReplicationSelection
-	if err := decodePrivateJSON(contents, &selection, "replication selection"); err != nil {
-		return ReplicationSelection{}, false, err
-	}
-	if selection.Remote != remote {
-		return ReplicationSelection{}, false, fmt.Errorf("replication selection remote mismatch: got %q, want %q", selection.Remote, remote)
-	}
-	if err := validateReplicationSelection(selection); err != nil {
-		return ReplicationSelection{}, false, fmt.Errorf("invalid saved replication selection: %w", err)
 	}
 	return selection, true, nil
 }

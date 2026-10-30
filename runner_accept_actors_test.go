@@ -305,3 +305,23 @@ func TestRunnerAcceptActorsRefusesDuplicateAndMalformedValues(t *testing.T) {
 		t.Fatalf("64 distinct actors: code=%d output=%q, want validation to pass and sync to need origin", code, output)
 	}
 }
+
+// TestRunnerSingleAcceptActorUnlistedResultDoesNotCount pins the reason the
+// single --accept-actor rule keeps executing a signer that the base policy
+// does not list: the result it records grants that proposal nothing, while
+// the same runner's result for a listed requester counts.
+func TestRunnerSingleAcceptActorUnlistedResultDoesNotCount(t *testing.T) {
+	project := newRunnerActorsProject(t)
+	for _, participant := range []runnerActorsParticipant{project.outsider, project.beta} {
+		output, code := project.runnerOnceWith(t, participant.actor)
+		if code != 0 {
+			t.Fatalf("single-actor runner once exited %d:\n%s", code, output)
+		}
+		assertOperationalContains(t, output, runnerAcceptedLine(participant), "Runner recorded passed result ")
+		project.assertRunnerResult(t, participant, true)
+	}
+	outsider := runOperationalCommand(t, project.binary, project.runner, "proposal", "status", project.outsider.proposal)
+	assertOperationalContains(t, outsider, "Pipeline: test 0/1 trusted passes\n")
+	beta := runOperationalCommand(t, project.binary, project.runner, "proposal", "status", project.beta.proposal)
+	assertOperationalContains(t, beta, "Pipeline: test 1/1 trusted passes\n")
+}

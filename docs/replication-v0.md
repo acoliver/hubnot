@@ -29,7 +29,10 @@ actor, candidate, or memory stream. An actor/candidate-only selection imports
 zero memory; memory selection is independent transport authorization.
 
 Selections are sorted and saved as owner-only local state below
-`.git/hn/replication/selections/`; they are never committed or published.
+`hn/replication/selections/` in the clone's Git common directory, which is
+`.git/hn/replication/selections/` in an ordinary clone; they are never
+committed or published. Every linked worktree of the clone uses the same
+selections (see [Linked worktrees](#linked-worktrees-share-selections-and-acceptance-state)).
 `show` reports whether the selection was explicitly saved, whether
 compatibility-all is active, every full selected ID, and every budget.
 
@@ -138,6 +141,42 @@ selection is refused with the existing `is not in the saved exact selection`
 diagnostic. To recover, save the exact supplier selectors next to
 `--all-trusted` and retry.
 
+### Linked worktrees share selections and acceptance state
+
+The main checkout and every linked worktree created with `git worktree add`
+share one object database and one set of accepted refs, so `hn` keeps the
+state that selects and guards them in `hn/` below the Git common directory,
+the directory `git rev-parse --git-common-dir` reports. That state is the
+saved selections, the quarantine repositories, transaction receipts, pending
+anchors, unaccepted-object records, and the shallow-gap record. A sync run in
+any worktree uses the clone's saved selection and budgets, and a pending
+acceptance left by an interrupted sync in one worktree blocks trust-sensitive
+reads in every worktree until it is recovered from any of them.
+
+Releases before this one kept this state in the private Git directory of the
+worktree that ran `hn`, `.git/worktrees/NAME/hn/`, when that was a linked
+worktree. The main checkout's state was already in the common directory.
+`hn` applies these compatibility rules to state an older release left in a
+linked worktree:
+
+- A saved selection found in any linked worktree's private directory applies
+  to the whole clone. When the clone-wide selection and the legacy copies for
+  a remote are identical, or only one exists, that selection is used. When they
+  differ, `hn replication show` and `hn sync` stop with
+  `saved replication selections for remote REMOTE differ between PATH and PATH`
+  instead of choosing one, because either choice could widen what another
+  worktree imports. `hn replication select REMOTE ...` saves one clone-wide
+  selection and removes the legacy copies for that remote.
+- Receipts, pending anchors, and unaccepted-object records found in any linked
+  worktree's private directory are read together with the clone-wide journal,
+  so they keep guarding every worktree. The same transaction may appear in
+  both places only with identical contents; anything else fails closed.
+- The next `hn sync` from any worktree moves that journal into the clone-wide
+  location before it reconciles, copying each file before removing the legacy
+  original, and then completes it like any other pending transaction.
+- A shallow-gap record left in a linked worktree is ignored.
+  `hn sync REMOTE --recover-shallow` rediscovers the gap when no record exists.
+
 ### Example
 
 <!-- example: all-trusted-select -->
@@ -233,7 +272,7 @@ state.
 ### Transport settings for the quarantine fetch
 
 Hubnot fetches each selection into a temporary bare repository under
-`.git/hn/replication/quarantine/`, and that repository has no configuration of
+`hn/replication/quarantine/` in the Git common directory, and that repository has no configuration of
 its own. So that the fetch reaches the remote the way `git fetch` in the clone
 does, Hubnot reads the clone's local and worktree configuration, includes
 followed, and passes the transport settings to the fetch: `core.sshCommand`,
@@ -378,7 +417,8 @@ after successful recovery is an idempotent accepted-projection verification.
 
 Selections, generated quarantine repositories, transaction receipts, pending
 anchors, unaccepted-object records, and shallow-gap records live below
-`.git/hn/replication/` or `.git/hn/`. Directories require mode `0700`; state
+`hn/replication/` or `hn/` in the clone's Git common directory (`.git/hn/` in
+an ordinary clone), shared by every linked worktree. Directories require mode `0700`; state
 files require mode `0600`; symlinks, unexpected entries, unknown JSON fields,
 oversized records, missing matching anchors/receipts, and unsafe modes fail
 closed.

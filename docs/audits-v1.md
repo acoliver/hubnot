@@ -34,7 +34,10 @@ no audit role.
 
 The operator must separately adopt a named local branch. The private selection
 is `.git/hn/audit/authority.json` beneath the resolved Git directory, in protected
-private directories with a regular mode-0600 file. Symlinks, unsafe permissions,
+private directories with a regular mode-0600 file. Each linked worktree has its
+own selection in its own Git directory; a worktree without one refuses audit
+writes, requests, and executions (see
+[identity-v0.md](identity-v0.md#local-keyring-and-permissions)). Symlinks, unsafe permissions,
 symbolic aliases, and selectors other than direct `refs/heads/NAME` are refused.
 Selection updates use an exclusive lock and atomic replacement, guarded by
 `absent` or the SHA-256 digest of the exact prior selection bytes. The file

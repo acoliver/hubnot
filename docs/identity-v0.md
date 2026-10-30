@@ -168,6 +168,7 @@ repository directory:
 ├── identities/
 │   └── <full-actor-fingerprint>.json
 ├── identity.json             # optional legacy migration source
+├── keyring.lock              # empty; held with flock(2) while the keyring changes
 ├── rotation.json             # only while rotation is incomplete
 └── rotation-command.json     # only while rotation/retry is incomplete
 ```
@@ -180,10 +181,33 @@ common directory, where the main checkout and the other worktrees find it.
 The worktrees also share the actor ref, which `hn` advances with a
 compare-and-swap. When commands in two worktrees append for the actor at the
 same time, one appends and the other fails without appending (issue commands
-report `concurrent_update`); retrying the failed command succeeds. When two
-first-time `hn init` commands race, exactly one identity becomes active; the
-other command reports that an identity already exists and deletes the unused
-key it generated.
+report `concurrent_update`); retrying the failed command succeeds.
+
+Commands that change the keyring take an exclusive `flock(2)` on
+`keyring.lock` in the keyring's directory, so commands in every worktree
+that share a keyring contend for one lock. The kernel releases the lock when
+a process exits, so an interrupted command never leaves it held. Publishing
+the first active pointer and replacing it during rotation hold the lock,
+waiting up to 30 seconds for another holder. When two first-time `hn init`
+commands race, exactly one identity becomes active; the other command
+reports that an identity already exists and deletes the unused key it
+generated. This holds on file systems without hard links too (see below).
+
+`hn identity rotate` holds the lock for its whole transaction: reading the
+journals and the active pointer, generating the target, writing both
+journals, appending the signed authorization and acceptance, switching the
+pointer, and removing the journals. A second rotation that finds the lock
+held does not wait, because once the first finished it would start a further
+rotation from the new identity. It fails without writing anything:
+
+```text
+hn: another identity rotation or identity update for this keyring is in progress, possibly in another worktree of this clone; retry hn identity rotate when it finishes
+```
+
+Only the lock holder writes the rotation journals, so simultaneous rotations
+leave at most one consistent pair of journals. If the rotation holding the
+lock is interrupted, the next `hn identity rotate` from any worktree completes
+that rotation with its journaled target.
 
 Earlier releases kept the keyring in each linked worktree's own private Git
 directory, `.git/worktrees/<name>/hn/`. A linked worktree whose private
@@ -200,7 +224,23 @@ be inspected, or is a symbolic link or not a directory, identity commands in
 that worktree fail with an error naming that location and never use the
 common keyring instead. `hn` does not move or merge a per-worktree keyring. Its actor stays distinct, and can be
 related to the clone's actor with `hn identity authorize` and
-`hn identity accept` like any other device.
+`hn identity accept` like any other device. Such a worktree has its own
+`keyring.lock` beside its own keyring.
+
+Other private state follows the state it guards. Replication selections and
+acceptance journals guard the clone's shared refs and objects, so they also
+live below the Git common directory; [replication-v0.md](replication-v0.md#linked-worktrees-share-selections-and-acceptance-state)
+describes them and the rules for copies an earlier release left in a linked
+worktree. Two kinds of private state stay in each worktree's own Git
+directory. The memory index (`hn/memory/index-v0.json`) is a derived cache
+that `hn` verifies against the live accepted sources and the projection
+policy before every use and rebuilds when they differ; it guards nothing,
+and worktrees on different commits would otherwise invalidate one shared
+cache in turn. The audit authority anchor (`hn/audit/authority.json`) is an
+explicit, opt-in operator selection of the branch whose policy grants audit
+roles; a worktree without one refuses every audit write, request, and
+execution, so it cannot widen what the clone accepts, and an operator may
+anchor different worktrees to different branches.
 
 The paths above are logical and must never be committed or copied into
 documentation evidence. Private directories must be regular directories with
@@ -210,7 +250,13 @@ paths, mismatched key pairs, symlinks, and unsafe modes fail closed.
 
 Writes use a mode-`0600` temporary file, file sync, atomic rename, and directory
 sync. The first active pointer is published with a hard link instead of a
-rename, so it never replaces a pointer that another command created first. Legacy `.git/hn/identity.json` migration recomputes and preserves the
+rename, so it never replaces a pointer that another command created first.
+On a file system without hard links, the pointer is published with a fresh
+absence check and an atomic rename while the command holds the keyring lock.
+Every `hn` command that writes the pointer holds that lock, so no other
+command can create the pointer between the check and the rename, and readers
+still see either no pointer or a complete one. An older `hn` release does not
+take the lock; there, only the hard-link publication is exclusive. Legacy `.git/hn/identity.json` migration recomputes and preserves the
 same actor/public/private key bytes, writes the actor record durably, and then
 creates the active pointer. Retrying does not generate a replacement actor.
 The legacy source may remain on disk; once `active` exists, ordinary loading

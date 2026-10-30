@@ -427,7 +427,8 @@ publication remain explicit separate actions.
 ## Synchronization
 
 `hn replication select` records full per-remote actor/candidate selectors and
-positive budgets below `.git/hn/`. A saved selection is authoritative. With no
+positive budgets below `hn/` in the clone's Git common directory (`.git/hn/`
+in an ordinary clone), shared by every linked worktree. A saved selection is authoritative. With no
 saved selection, version 0 uses bounded compatibility-all: it enumerates only
 advertised `refs/hn/actors/*` and `refs/hn/proposals/*`, then applies the same
 quarantine, budgets, validation, and promotion transaction.

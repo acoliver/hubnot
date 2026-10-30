@@ -12,7 +12,10 @@ experimental; alpha releases do not promise stable compatibility.
   pipeline's `requesters` policy lists. Duplicate and malformed fingerprints
   are refused before synchronization. With more than one accepted actor the
   runner executes only requests whose signer counts under the proposal's base
-  policy. A single `--accept-actor` behaves as before. See `docs/ci-v0.md`.
+  policy. A single `--accept-actor` behaves as before, because the existing
+  distributed-runner contract executes a single accepted actor's requests and
+  readiness already ignores results whose request signer does not count; see
+  `docs/ci-v0.md`.
 
 ### Fixed
 
@@ -21,8 +24,24 @@ experimental; alpha releases do not promise stable compatibility.
   main checkout and every other worktree. A worktree that already holds a
   keyring in its own private Git directory keeps it, and an unreadable
   worktree keyring is an error. Concurrent `hn init` commands activate exactly
-  one identity, and an append that loses a race for the actor ref reports a
-  retryable concurrent update. See `docs/identity-v0.md`.
+  one identity, including on file systems without hard links, and an append
+  that loses a race for the actor ref reports a retryable concurrent update.
+  Commands that change the keyring hold an `flock(2)` on `hn/keyring.lock`;
+  `hn identity rotate` holds it for the whole rotation, so a second
+  simultaneous rotation fails without writing and an interrupted rotation
+  leaves one journal that the next `hn identity rotate` completes. See
+  `docs/identity-v0.md`.
+- Replication selections and acceptance journals are clone-wide. They live in
+  `hn/replication/` below the Git common directory, so `hn sync` from any
+  linked worktree uses the clone's saved selection and budgets, as the main
+  checkout does, and a pending acceptance left
+  by an interrupted sync blocks trust-sensitive reads in every worktree. State
+  that earlier releases wrote in a linked worktree's private Git directory
+  still applies: a legacy selection governs the whole clone, differing
+  selections are an error until `hn replication select` saves one, and legacy
+  journals guard every worktree until the next `hn sync` moves and completes
+  them. The memory index and the audit authority anchor stay per worktree.
+  See `docs/replication-v0.md`.
 - Migration sessions and internal project/archive/imported-record spools share
   a path policy that handles verified macOS system temporary-directory aliases
   while retaining rejection of arbitrary symlinks and unsafe private paths.

@@ -555,6 +555,25 @@ func cmdIdentityRotate(args []string) error {
 	if flags.NArg() != 0 {
 		return usageError("usage: hn identity rotate [--name NAME]")
 	}
+	// Every worktree of a clone shares the keyring and both rotation
+	// journals, so the whole read, check and write transaction runs under
+	// the keyring lock. A second rotation does not wait: it would start a
+	// further rotation from the new identity once the first finished, which
+	// is not what two simultaneous requests for one rotation mean. Because
+	// only the holder writes the journals, an interrupted rotation always
+	// leaves one consistent journal that the next rotate command completes.
+	paths, err := identityKeyringPaths()
+	if err != nil {
+		return err
+	}
+	release, err := lockIdentityKeyring(paths, 0)
+	if errors.Is(err, errIdentityKeyringBusy) {
+		return fmt.Errorf("another identity rotation or identity update for this keyring is in progress, possibly in another worktree of this clone; retry hn identity rotate when it finishes")
+	}
+	if err != nil {
+		return err
+	}
+	defer release()
 	state, predecessor, target, completed, err := prepareIdentityRotation(*name)
 	if err != nil {
 		return err
@@ -684,6 +703,9 @@ func prepareIdentityRotation(name string) (identityRotationState, *Identity, *Id
 	}
 	predecessor, err := loadActiveIdentity()
 	if err != nil {
+		return identityRotationState{}, nil, nil, false, err
+	}
+	if err := runIdentityStorageHook("rotation-before-intent"); err != nil {
 		return identityRotationState{}, nil, nil, false, err
 	}
 	targetName := strings.TrimSpace(name)

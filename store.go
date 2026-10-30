@@ -204,7 +204,7 @@ func nextEvent(identity *Identity, kind string) (Event, error) {
 }
 
 func loadStoredEvent(commit string) (*StoredEvent, error) {
-	gitDir, err := requireGitRepository()
+	gitDir, err := requireCloneStateDirectory()
 	if err != nil {
 		return nil, err
 	}
@@ -332,7 +332,7 @@ func collectEvents() ([]StoredEvent, error) {
 		}
 	}
 
-	gitDir, err := requireGitRepository()
+	gitDir, err := requireCloneStateDirectory()
 	if err != nil {
 		return nil, err
 	}

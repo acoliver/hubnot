@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
+	"time"
 )
 
 const (
@@ -354,8 +356,13 @@ func writePrivateFileAtomicWithReplacement(path string, contents []byte, replace
 // with an error matching os.ErrExist when path already exists. Readers see
 // either no file or the complete contents: the bytes are written to a
 // temporary file first and published with a hard link, which, unlike a
-// rename, never replaces an existing file. A file system without hard links
-// falls back to the replacing write after a fresh absence check.
+// rename, never replaces an existing file.
+//
+// The caller must hold the identity keyring lock, which every hn command
+// that writes path also holds. On a file system without hard links the
+// publication therefore falls back to an absence check and an atomic rename
+// inside that lock, where no other hn command can create path between the
+// check and the rename.
 func createPrivateFileExclusive(path string, contents []byte) error {
 	directory := filepath.Dir(path)
 	temporary, err := os.CreateTemp(directory, ".hn-private-*")
@@ -383,7 +390,7 @@ func createPrivateFileExclusive(path string, contents []byte) error {
 		return err
 	}
 	closed = true
-	if err := os.Link(temporaryPath, path); err != nil {
+	if err := linkPrivateFile(temporaryPath, path); err != nil {
 		if errors.Is(err, os.ErrExist) {
 			return err
 		}
@@ -392,9 +399,158 @@ func createPrivateFileExclusive(path string, contents []byte) error {
 		} else if !errors.Is(statErr, os.ErrNotExist) {
 			return statErr
 		}
-		return writePrivateFileAtomic(path, contents)
+		if err := runIdentityStorageHook("before-active-fallback-publish"); err != nil {
+			return err
+		}
+		if err := os.Rename(temporaryPath, path); err != nil {
+			return err
+		}
 	}
 	return syncPrivateDirectory(directory)
+}
+
+// linkPrivateFile hard-links temporary to path. Tests on a file system with
+// hard links simulate one without them with HN_TEST_IDENTITY_NO_HARD_LINKS.
+func linkPrivateFile(temporary, path string) error {
+	if os.Getenv("HN_INTERNAL_TESTING") == "1" && os.Getenv("HN_TEST_IDENTITY_NO_HARD_LINKS") == "1" {
+		return &os.LinkError{Op: "link", Old: temporary, New: path, Err: errors.ErrUnsupported}
+	}
+	return os.Link(temporary, path)
+}
+
+const identityKeyringLockName = "keyring.lock"
+
+var (
+	errIdentityKeyringBusy = errors.New("the identity keyring is busy")
+
+	// heldIdentityKeyringLocks counts this process's holds of each keyring
+	// lock, so a command that holds the lock, such as a rotation, can call
+	// helpers that take it again. flock(2) locks belong to an open file
+	// description, so a second open in the same process would otherwise
+	// wait for the first.
+	heldIdentityKeyringLocks = struct {
+		sync.Mutex
+		files map[string]*os.File
+		holds map[string]int
+	}{files: map[string]*os.File{}, holds: map[string]int{}}
+)
+
+// identityKeyringLockWait is how long a short keyring update, such as
+// publishing the first active pointer, waits for another command's lock.
+// Tests may change it with HN_TEST_IDENTITY_LOCK_WAIT.
+func identityKeyringLockWait() time.Duration {
+	if os.Getenv("HN_INTERNAL_TESTING") == "1" {
+		if value, ok := os.LookupEnv("HN_TEST_IDENTITY_LOCK_WAIT"); ok {
+			if wait, err := time.ParseDuration(value); err == nil && wait >= 0 {
+				return wait
+			}
+		}
+	}
+	return 30 * time.Second
+}
+
+// lockIdentityKeyring takes an exclusive flock(2) on keyring.lock in the
+// keyring's root, waiting up to wait, and returns the function that releases
+// it. The lock is cross-process and keyring-scoped: commands in every
+// worktree that share a keyring contend for one lock, while a linked
+// worktree that keeps a legacy keyring has its own. The kernel releases it
+// when a process exits, so an interrupted command never leaves it held. A
+// lock that stays busy past wait returns an error matching
+// errIdentityKeyringBusy.
+func lockIdentityKeyring(paths identityKeyringLayout, wait time.Duration) (func(), error) {
+	if err := ensureIdentityKeyringDirectories(paths); err != nil {
+		return nil, err
+	}
+	path := filepath.Join(paths.root, identityKeyringLockName)
+	held := &heldIdentityKeyringLocks
+	held.Lock()
+	defer held.Unlock()
+	release := func() {
+		held.Lock()
+		defer held.Unlock()
+		held.holds[path]--
+		if held.holds[path] == 0 {
+			_ = held.files[path].Close()
+			delete(held.files, path)
+			delete(held.holds, path)
+		}
+	}
+	if held.holds[path] > 0 {
+		held.holds[path]++
+		return release, nil
+	}
+	file, err := openPrivateLockFile(path)
+	if err != nil {
+		return nil, err
+	}
+	deadline := time.Now().Add(wait)
+	for {
+		locked, err := tryServeFileLock(file, serveLockExclusive)
+		if err != nil {
+			_ = file.Close()
+			return nil, fmt.Errorf("lock identity keyring %s: %w", paths.root, err)
+		}
+		if locked {
+			break
+		}
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			_ = file.Close()
+			return nil, fmt.Errorf("%w: another hn command holds %s", errIdentityKeyringBusy, path)
+		}
+		time.Sleep(min(25*time.Millisecond, remaining))
+	}
+	held.files[path] = file
+	held.holds[path] = 1
+	return release, nil
+}
+
+// openPrivateLockFile opens or creates a mode-0600 regular lock file without
+// following a symbolic link at its final component.
+func openPrivateLockFile(path string) (*os.File, error) {
+	for attempt := 0; attempt < 3; attempt++ {
+		before, err := os.Lstat(path)
+		if errors.Is(err, os.ErrNotExist) {
+			file, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o600)
+			if errors.Is(err, os.ErrExist) {
+				continue
+			}
+			if err != nil {
+				return nil, err
+			}
+			if err := file.Chmod(0o600); err != nil {
+				_ = file.Close()
+				return nil, err
+			}
+			return file, nil
+		}
+		if err != nil {
+			return nil, err
+		}
+		if before.Mode()&os.ModeSymlink != 0 {
+			return nil, fmt.Errorf("private identity lock %s is a symbolic link", path)
+		}
+		if !before.Mode().IsRegular() {
+			return nil, fmt.Errorf("private identity lock %s is not a regular file", path)
+		}
+		if before.Mode().Perm() != 0o600 {
+			return nil, fmt.Errorf("private identity lock %s has unsafe permissions", path)
+		}
+		file, err := os.OpenFile(path, os.O_RDWR, 0)
+		if err != nil {
+			return nil, err
+		}
+		after, err := file.Stat()
+		if err != nil {
+			_ = file.Close()
+			return nil, err
+		}
+		if os.SameFile(before, after) {
+			return file, nil
+		}
+		_ = file.Close()
+	}
+	return nil, fmt.Errorf("private identity lock %s changed while it was being opened", path)
 }
 
 func syncPrivateDirectory(directory string) error {
@@ -576,9 +732,15 @@ func initializeActiveIdentity(actor string) error {
 	if err != nil {
 		return err
 	}
-	if err := ensureIdentityKeyringDirectories(paths); err != nil {
+	// Every worktree of a clone shares this pointer, so two first-time
+	// initializations can race. The keyring lock, which every writer of the
+	// pointer holds, serializes them: the second sees the winner like any
+	// later caller.
+	release, err := lockIdentityKeyring(paths, identityKeyringLockWait())
+	if err != nil {
 		return err
 	}
+	defer release()
 	current, err := loadActiveActor()
 	if err == nil {
 		if current == actor {
@@ -588,9 +750,6 @@ func initializeActiveIdentity(actor string) error {
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	// Every worktree of a clone shares this pointer, so two first-time
-	// initializations can race. Creating it without replacement lets exactly
-	// one win; the other then sees the winner like any later caller.
 	err = createPrivateFileExclusive(paths.active, []byte(actor+"\n"))
 	if !errors.Is(err, os.ErrExist) {
 		return err
@@ -613,6 +772,11 @@ func replaceActiveIdentity(actor, expected string) error {
 	if err != nil {
 		return err
 	}
+	release, err := lockIdentityKeyring(paths, identityKeyringLockWait())
+	if err != nil {
+		return err
+	}
+	defer release()
 	current, err := loadActiveActor()
 	if err != nil {
 		return err
@@ -838,7 +1002,19 @@ func runIdentityStorageHook(step string) error {
 	if identityStorageHook != nil {
 		return identityStorageHook(step)
 	}
-	if os.Getenv("HN_INTERNAL_TESTING") == "1" && os.Getenv("HN_TEST_ROTATION_INTERRUPT_AFTER") == step {
+	if os.Getenv("HN_INTERNAL_TESTING") != "1" {
+		return nil
+	}
+	// Concurrency tests widen a race window by pausing every process at the
+	// same step, so an unserialized interleaving becomes reliable.
+	if os.Getenv("HN_TEST_IDENTITY_PAUSE_AT") == step {
+		pause, err := time.ParseDuration(os.Getenv("HN_TEST_IDENTITY_PAUSE"))
+		if err != nil || pause < 0 {
+			pause = time.Second
+		}
+		time.Sleep(pause)
+	}
+	if os.Getenv("HN_TEST_ROTATION_INTERRUPT_AFTER") == step {
 		return fmt.Errorf("injected rotation interruption after %s", step)
 	}
 	return nil

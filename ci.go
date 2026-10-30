@@ -65,7 +65,7 @@ func loadPipeline(commit, name string) (PipelineDefinition, []byte, string, erro
 	if !validPipelineName(name) {
 		return PipelineDefinition{}, nil, "", fmt.Errorf("invalid pipeline name %q", name)
 	}
-	gitDir, err := requireGitRepository()
+	gitDir, err := requireCloneStateDirectory()
 	if err != nil {
 		return PipelineDefinition{}, nil, "", err
 	}

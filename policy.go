@@ -86,7 +86,7 @@ type ProposalEvaluation struct {
 }
 
 func loadPolicy(commit string) (PolicyDocument, []byte, string, error) {
-	gitDir, err := requireGitRepository()
+	gitDir, err := requireCloneStateDirectory()
 	if err != nil {
 		return PolicyDocument{}, nil, "", err
 	}

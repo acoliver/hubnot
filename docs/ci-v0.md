@@ -125,6 +125,18 @@ requested proposal; it skips other requests from listed signers with a note on
 standard error. A runner with a single `--accept-actor` keeps its original
 rule and executes every matching request from that actor.
 
+The single-actor rule is kept for compatibility. It predates pipeline
+`requesters`, and the established distributed-runner contract, which
+`TestDistributedPipelineRun` exercises, has a one-actor runner execute a
+request from an actor that the base policy neither lists as a maintainer nor
+as a requester. Such a result grants nothing: readiness counts a result only
+when its run request was signed by a maintainer or a listed requester under
+the proposal's base policy, so the operator's exact choice of one actor
+decides only what the runner spends its host on. Operators should note the
+consequence: reducing a runner from several `--accept-actor` values to one
+also removes the base-policy filter, and the runner then executes every
+request that the remaining actor signs.
+
 `runner once` handles at most one request and publishes its result. `runner
 watch` repeats this process, waits when no work is available, survives transient
 sync errors, and cancels active execution on SIGINT or SIGTERM.

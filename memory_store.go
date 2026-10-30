@@ -177,7 +177,7 @@ func appendMemoryAtHead(envelope MemoryEnvelope, identity *Identity, expectedHea
 }
 
 func loadStoredMemory(commit string) (*StoredMemory, error) {
-	gitDir, err := requireGitRepository()
+	gitDir, err := requireCloneStateDirectory()
 	if err != nil {
 		return nil, err
 	}
@@ -291,7 +291,7 @@ func loadMemoryStreamAt(gitDir string, source memoryStreamSource) ([]StoredMemor
 	mainGitDir := gitDir
 	if gitDir == "" {
 		var err error
-		mainGitDir, err = requireGitRepository()
+		mainGitDir, err = requireCloneStateDirectory()
 		if err != nil {
 			return nil, err
 		}

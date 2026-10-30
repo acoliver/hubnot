@@ -163,7 +163,8 @@ hn memory index rebuild
 hn memory index verify
 ```
 
-The private JSON index is `.git/hn/memory/index-v0.json`. Its source
+The private JSON index is `.git/hn/memory/index-v0.json`, below the Git
+directory of the checkout, so each linked worktree keeps its own. Its source
 fingerprint binds the exact policy digest plus sorted `(ref, head)` pairs.
 Directories are owner-only and the file is mode `0600`; symlinks, unknown
 fields, malformed records, incompatible versions, and stale sources fail

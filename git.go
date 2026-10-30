@@ -2,11 +2,14 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"slices"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -171,6 +174,51 @@ func requireGitRepository() (string, error) {
 		return "", fmt.Errorf("not inside a Git repository")
 	}
 	return gitDir, nil
+}
+
+// requireCloneStateDirectory returns the clone's physical Git common
+// directory. Private state that guards or selects the clone's shared refs
+// and objects, such as replication acceptance journals and saved replication
+// selections, lives in hn/ below it, so the main checkout and every linked
+// worktree read and write the same state. In the main checkout and a bare
+// repository it is the Git directory itself.
+func requireCloneStateDirectory() (string, error) {
+	_, commonDir, err := identityGitDirectories()
+	if err != nil {
+		return "", err
+	}
+	return commonDir, nil
+}
+
+// linkedWorktreeGitDirectories lists the private Git directories of the
+// linked worktrees registered below commonDir. Releases before replication
+// state became clone-wide wrote it below these directories when hn ran in a
+// linked worktree; readers consult them so that legacy state still guards
+// the clone. Entries that are not directories are ignored, as Git ignores
+// them.
+func linkedWorktreeGitDirectories(commonDir string) ([]string, error) {
+	root := filepath.Join(commonDir, "worktrees")
+	entries, err := os.ReadDir(root)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("list linked worktrees: %w", err)
+	}
+	directories := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		path := filepath.Join(root, entry.Name())
+		info, err := os.Lstat(path)
+		if err != nil {
+			return nil, fmt.Errorf("inspect linked worktree %s: %w", path, err)
+		}
+		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+			continue
+		}
+		directories = append(directories, path)
+	}
+	sort.Strings(directories)
+	return directories, nil
 }
 
 func refValue(ref string) (string, bool, error) {

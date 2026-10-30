@@ -55,7 +55,7 @@ func collectIssueEvents() ([]StoredEvent, string, error) {
 }
 
 func collectIssueEventsWithLimits(limits issueReadLimits) ([]StoredEvent, string, error) {
-	gitDir, err := requireGitRepository()
+	gitDir, err := requireCloneStateDirectory()
 	if err != nil {
 		return nil, "", issueReadFailure("repository_error", err)
 	}

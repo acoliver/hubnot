@@ -1866,7 +1866,9 @@ pipeline. It skips any other request with
 on standard error and leaves it unexecuted. The idle message names every
 actor: `No pending test requests from actors 9d71a3cd9c0a, 5be0c1f2a7d4.` A
 single `--accept-actor` keeps its earlier behavior and executes every pending
-request that its actor signs.
+request that its actor signs; readiness still ignores the result unless the
+request's signer counts under the base policy. See
+[ci-v0.md](ci-v0.md#runner-discovery) for why the single-actor rule remains.
 
 The default
 `--backend sandbox` runs the steps under Bubblewrap. On a host without
