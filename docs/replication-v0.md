@@ -168,6 +168,13 @@ holds it exclusively. A reader therefore never sees a journal or selection missi
 from both places while a migration or save moves it. A lock file that is a
 symbolic link, is not a regular file, or has another mode, and a lock that
 another command holds for more than 30 seconds, fail the command closed.
+Because readers take the lock too, a read command creates `hn/` and
+`hn/state.lock` when they are missing, so it needs write access to the common
+directory the first time; on a read-only common directory without them it
+fails closed. The lock serializes acceptance journals (receipts, pending
+anchors, unaccepted-object records) and saved selections; quarantine
+directories and shallow-gap bookkeeping keep their own per-transaction
+rules.
 
 Releases before this one kept this state in the private Git directory of the
 worktree that ran `hn`, `.git/worktrees/NAME/hn/`, when that was a linked
@@ -435,8 +442,8 @@ after successful recovery is an idempotent accepted-projection verification.
 Selections, generated quarantine repositories, transaction receipts, pending
 anchors, unaccepted-object records, and shallow-gap records live below
 `hn/replication/` or `hn/` in the clone's Git common directory (`.git/hn/` in
-an ordinary clone), shared by every linked worktree and serialized by
-`hn/state.lock`. Directories require mode `0700`; state
+an ordinary clone), shared by every linked worktree. Acceptance journals and saved selections
+are serialized by `hn/state.lock`. Directories require mode `0700`; state
 files require mode `0600`; symlinks, unexpected entries, unknown JSON fields,
 oversized records, missing matching anchors/receipts, and unsafe modes fail
 closed.
