@@ -152,6 +152,20 @@ func legacyReplicationSelectionPaths(remote string) ([]string, error) {
 	return paths, nil
 }
 
+// lockReplicationSelections takes the clone state lock that serializes saved
+// replication selections: shared for a reader, which must see the
+// clone-wide selection and its legacy copies as one snapshot, exclusive for
+// a save, which writes the clone-wide selection and then retires the legacy
+// copies. Without it, a reader could miss the clone-wide file before a save
+// and the legacy file after it, and fall back to compatibility-all.
+func lockReplicationSelections(kind serveLockKind) (func(), error) {
+	gitDir, err := requireCloneStateDirectory()
+	if err != nil {
+		return nil, err
+	}
+	return lockCloneState(gitDir, kind)
+}
+
 func readReplicationSelectionFile(path, remote string) (ReplicationSelection, error) {
 	contents, err := readPrivateFile(path)
 	if err != nil {
@@ -189,6 +203,11 @@ func replicationSelectionSnapshot(remote string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	release, err := lockReplicationSelections(serveLockShared)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 	legacy, err := legacyReplicationSelectionPaths(remote)
 	if err != nil {
 		return nil, err
@@ -273,6 +292,11 @@ func saveReplicationSelection(selection ReplicationSelection) error {
 	if err != nil {
 		return err
 	}
+	release, err := lockReplicationSelections(serveLockExclusive)
+	if err != nil {
+		return err
+	}
+	defer release()
 	legacy, err := legacyReplicationSelectionPaths(selection.Remote)
 	if err != nil {
 		return err
@@ -317,6 +341,11 @@ func loadReplicationSelection(remote string) (ReplicationSelection, bool, error)
 	if err != nil {
 		return ReplicationSelection{}, false, err
 	}
+	release, err := lockReplicationSelections(serveLockShared)
+	if err != nil {
+		return ReplicationSelection{}, false, err
+	}
+	defer release()
 	var selection ReplicationSelection
 	source := ""
 	contents, err := readPrivateFile(path)
@@ -329,6 +358,7 @@ func loadReplicationSelection(remote string) (ReplicationSelection, bool, error)
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return ReplicationSelection{}, false, replicationPhaseError(remote, "selection reading")
 	}
+	runCloneStateHook("between-selection-locations")
 	legacy, err := legacyReplicationSelectionPaths(remote)
 	if err != nil {
 		return ReplicationSelection{}, false, err

@@ -217,6 +217,9 @@ func runReplicationTransaction(selection ReplicationSelection) (replicationTrans
 	if err := migrateLegacyReplicationState(mainGitDir); err != nil {
 		return result, fmt.Errorf("%v: %w", replicationPhaseError(selection.Remote, "legacy worktree state migration"), err)
 	}
+	if err := runReplicationProcessHook("after-legacy-migration"); err != nil {
+		return result, replicationResidueError(selection.Remote, "interrupted after legacy worktree state migration")
+	}
 	if err := repairAnchoredReplicationReceiptsForRecovery(mainGitDir, selection.Remote); err != nil {
 		return result, replicationPhaseError(selection.Remote, "pending acceptance reconciliation")
 	}
@@ -2041,6 +2044,11 @@ func recordReplicationTransaction(mainGitDir string, result replicationTransacti
 	if !validReplicationTransactionID(result.ID) || !validReplicationRemote(result.Remote) || (state != "validated" && state != "complete") {
 		return fmt.Errorf("invalid replication transaction receipt")
 	}
+	release, err := lockCloneState(mainGitDir, serveLockExclusive)
+	if err != nil {
+		return err
+	}
+	defer release()
 	if err := validateReplicationObjectIDs(result.ID, result.pendingObjects); err != nil {
 		return err
 	}

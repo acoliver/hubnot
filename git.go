@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 )
 
 func gitOutput(args ...string) ([]byte, error) {
@@ -188,6 +189,57 @@ func requireCloneStateDirectory() (string, error) {
 		return "", err
 	}
 	return commonDir, nil
+}
+
+const cloneStateLockName = "state.lock"
+
+var errCloneStateBusy = errors.New("the clone's hn state is busy")
+
+// lockCloneState takes the clone state lock, a flock(2) on hn/state.lock
+// below stateDir, the Git common directory, and returns the function that
+// releases it. It serializes the clone-wide replication journals and saved
+// replication selections against their legacy copies below linked
+// worktrees: a reader holds it shared across its whole scan of the
+// clone-wide and legacy locations, and every command that publishes,
+// migrates, saves or removes that state holds it exclusively, so a reader
+// never sees a migration or a selection save half done. It never waits for
+// another lock while held; the identity keyring lock may be held outside
+// it, never inside it. Any failure, including a lock that stays busy past
+// 30 seconds, is an error, so callers fail closed.
+func lockCloneState(stateDir string, kind serveLockKind) (func(), error) {
+	root := filepath.Join(stateDir, "hn")
+	if err := ensurePrivateDirectory(root); err != nil {
+		return nil, fmt.Errorf("lock clone state: %w", err)
+	}
+	path := filepath.Join(root, cloneStateLockName)
+	release, locked, err := holdPrivateLock(path, kind, 30*time.Second)
+	if err != nil {
+		return nil, fmt.Errorf("lock clone state %s: %w", path, err)
+	}
+	if !locked {
+		return nil, fmt.Errorf("%w: another hn command holds %s", errCloneStateBusy, path)
+	}
+	return release, nil
+}
+
+// runCloneStateHook lets concurrency tests hold a clone state reader inside
+// its locked scan: with HN_TEST_STATE_PAUSE_AT naming step, the process
+// creates the file HN_TEST_STATE_PAUSED names and waits, for at most 20
+// seconds, until the file HN_TEST_STATE_RELEASE names exists.
+func runCloneStateHook(step string) {
+	if os.Getenv("HN_INTERNAL_TESTING") != "1" || os.Getenv("HN_TEST_STATE_PAUSE_AT") != step {
+		return
+	}
+	if paused := os.Getenv("HN_TEST_STATE_PAUSED"); paused != "" {
+		_ = os.WriteFile(paused, nil, 0o600)
+	}
+	release := os.Getenv("HN_TEST_STATE_RELEASE")
+	for deadline := time.Now().Add(20 * time.Second); release != "" && time.Now().Before(deadline); {
+		if _, err := os.Stat(release); err == nil {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 // linkedWorktreeGitDirectories lists the private Git directories of the

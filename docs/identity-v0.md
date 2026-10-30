@@ -170,6 +170,7 @@ repository directory:
 ├── identity.json             # optional legacy migration source
 ├── keyring.lock              # empty; held with flock(2) while the keyring changes
 ├── rotation.json             # only while rotation is incomplete
+├── state.lock                # empty; flock(2) for replication state, see replication-v0.md
 └── rotation-command.json     # only while rotation/retry is incomplete
 ```
 

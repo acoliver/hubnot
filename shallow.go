@@ -318,6 +318,11 @@ func loadReplicationUnacceptedObjects(gitDir string) (map[string]bool, error) {
 }
 
 func saveReplicationUnacceptedObjects(gitDir string, objects map[string]bool) error {
+	release, err := lockCloneState(gitDir, serveLockExclusive)
+	if err != nil {
+		return err
+	}
+	defer release()
 	directory := filepath.Dir(replicationUnacceptedObjectsPath(gitDir))
 	if err := ensurePrivateDirectory(directory); err != nil {
 		return err
@@ -335,6 +340,11 @@ func saveReplicationUnacceptedObjects(gitDir string, objects map[string]bool) er
 }
 
 func markReplicationObjectsUnaccepted(gitDir string, objectIDs []string) error {
+	release, err := lockCloneState(gitDir, serveLockExclusive)
+	if err != nil {
+		return err
+	}
+	defer release()
 	objects, err := loadReplicationUnacceptedObjects(gitDir)
 	if err != nil {
 		return err
@@ -360,6 +370,11 @@ func markReplicationObjectsUnaccepted(gitDir string, objectIDs []string) error {
 }
 
 func acceptReplicationObjects(gitDir string, objectIDs []string) error {
+	release, err := lockCloneState(gitDir, serveLockExclusive)
+	if err != nil {
+		return err
+	}
+	defer release()
 	objects, err := loadReplicationUnacceptedObjects(gitDir)
 	if err != nil {
 		return err
@@ -569,7 +584,8 @@ func replicationStateLocations(gitDir string) ([]string, error) {
 }
 
 // loadCombinedReplicationJournal reads the transaction receipts and pending
-// anchors of every replication state location as one journal. The same
+// anchors of every replication state location as one journal. The caller
+// holds the clone state lock across the whole scan. The same
 // transaction may appear in two locations only with identical contents,
 // which is what an interrupted legacy migration leaves; any other overlap
 // fails closed.
@@ -578,7 +594,10 @@ func loadCombinedReplicationJournal(locations []string) ([]replicationTransactio
 	anchorsByID := make(map[string]replicationPendingAnchor)
 	recordSource := make(map[string]string)
 	anchorSource := make(map[string]string)
-	for _, location := range locations {
+	for index, location := range locations {
+		if index == 1 {
+			runCloneStateHook("between-replication-locations")
+		}
 		records, err := loadReplicationTransactionRecords(location)
 		if err != nil {
 			return nil, nil, replicationLocationError(locations, location, err)
@@ -630,7 +649,17 @@ func replicationLocationError(locations []string, location string, err error) er
 	return fmt.Errorf("legacy replication state in linked worktree %s: %w", location, err)
 }
 
+// loadReplicationAcceptanceState reads the combined journal of every
+// replication state location under a shared clone state lock, so a
+// concurrent legacy migration, which holds it exclusively, cannot move a
+// journal from a location this scan has yet to read into one it has already
+// read.
 func loadReplicationAcceptanceState(gitDir string) (map[string]bool, map[string]replicationTransactionRecord, error) {
+	release, err := lockCloneState(gitDir, serveLockShared)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer release()
 	locations, err := replicationStateLocations(gitDir)
 	if err != nil {
 		return nil, nil, err
@@ -736,6 +765,11 @@ func sameReplicationObjectSet(left, right []string) bool {
 }
 
 func createReplicationPendingAnchor(gitDir string, result replicationTransactionResult) error {
+	release, err := lockCloneState(gitDir, serveLockExclusive)
+	if err != nil {
+		return err
+	}
+	defer release()
 	if !validReplicationTransactionID(result.ID) || !validReplicationRemote(result.Remote) {
 		return fmt.Errorf("invalid replication pending-anchor identity")
 	}
@@ -759,6 +793,11 @@ func createReplicationPendingAnchor(gitDir string, result replicationTransaction
 }
 
 func removeReplicationPendingAnchor(gitDir, transaction string) error {
+	release, err := lockCloneState(gitDir, serveLockExclusive)
+	if err != nil {
+		return err
+	}
+	defer release()
 	if !validReplicationTransactionID(transaction) {
 		return fmt.Errorf("invalid replication pending-anchor identity")
 	}
@@ -817,6 +856,11 @@ func (reader replicationAcceptanceReader) check(objectID string) error {
 }
 
 func reconcileCompletedReplicationTransactions(gitDir string, completed replicationTransactionResult) error {
+	release, err := lockCloneState(gitDir, serveLockExclusive)
+	if err != nil {
+		return err
+	}
+	defer release()
 	anchors, err := loadReplicationPendingAnchors(gitDir)
 	if err != nil {
 		return err
@@ -852,6 +896,11 @@ func reconcileCompletedReplicationTransactions(gitDir string, completed replicat
 }
 
 func repairAnchoredReplicationReceiptsForRecovery(gitDir, remote string) error {
+	release, err := lockCloneState(gitDir, serveLockExclusive)
+	if err != nil {
+		return err
+	}
+	defer release()
 	anchors, err := loadReplicationPendingAnchors(gitDir)
 	if err != nil {
 		return err
@@ -881,8 +930,16 @@ func repairAnchoredReplicationReceiptsForRecovery(gitDir, remote string) error {
 // copied before its legacy original is removed, and readers treat identical
 // copies in both places as one, so an interruption at any point leaves the
 // same combined state. A legacy file whose name already holds different
-// contents in the clone-wide location is an error.
+// contents in the clone-wide location is an error. The whole migration
+// holds the clone state lock exclusively, so a concurrent reader, which
+// holds it shared across its scan, sees the journals either all still in
+// their legacy locations or all moved, never missing from both places.
 func migrateLegacyReplicationState(stateDir string) error {
+	release, err := lockCloneState(stateDir, serveLockExclusive)
+	if err != nil {
+		return err
+	}
+	defer release()
 	legacy, err := linkedWorktreeGitDirectories(stateDir)
 	if err != nil {
 		return err

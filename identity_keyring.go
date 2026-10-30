@@ -423,16 +423,17 @@ const identityKeyringLockName = "keyring.lock"
 var (
 	errIdentityKeyringBusy = errors.New("the identity keyring is busy")
 
-	// heldIdentityKeyringLocks counts this process's holds of each keyring
-	// lock, so a command that holds the lock, such as a rotation, can call
-	// helpers that take it again. flock(2) locks belong to an open file
-	// description, so a second open in the same process would otherwise
-	// wait for the first.
-	heldIdentityKeyringLocks = struct {
+	// heldPrivateLocks counts this process's holds of each private lock
+	// file, such as the keyring lock and the clone state lock, so a command
+	// that holds a lock, such as a rotation, can call helpers that take it
+	// again. flock(2) locks belong to an open file description, so a second
+	// open in the same process would otherwise wait for the first.
+	heldPrivateLocks = struct {
 		sync.Mutex
 		files map[string]*os.File
 		holds map[string]int
-	}{files: map[string]*os.File{}, holds: map[string]int{}}
+		kinds map[string]serveLockKind
+	}{files: map[string]*os.File{}, holds: map[string]int{}, kinds: map[string]serveLockKind{}}
 )
 
 // identityKeyringLockWait is how long a short keyring update, such as
@@ -462,7 +463,27 @@ func lockIdentityKeyring(paths identityKeyringLayout, wait time.Duration) (func(
 		return nil, err
 	}
 	path := filepath.Join(paths.root, identityKeyringLockName)
-	held := &heldIdentityKeyringLocks
+	release, locked, err := holdPrivateLock(path, serveLockExclusive, wait)
+	if err != nil {
+		return nil, fmt.Errorf("lock identity keyring %s: %w", paths.root, err)
+	}
+	if !locked {
+		return nil, fmt.Errorf("%w: another hn command holds %s", errIdentityKeyringBusy, path)
+	}
+	return release, nil
+}
+
+// holdPrivateLock takes a shared or exclusive flock(2) on the private lock
+// file at path, waiting up to wait, and returns the function that releases
+// it. It reports false, without an error, when another process kept the
+// lock past wait. A process that already holds the lock gains another hold
+// instead of a second flock, so nested acquisitions never wait for
+// themselves; an exclusive hold also covers a nested shared request. A
+// nested exclusive request under a shared hold is an error rather than an
+// upgrade, because converting a flock(2) lock is not atomic and would let
+// another writer in between.
+func holdPrivateLock(path string, kind serveLockKind, wait time.Duration) (func(), bool, error) {
+	held := &heldPrivateLocks
 	held.Lock()
 	defer held.Unlock()
 	release := func() {
@@ -473,22 +494,26 @@ func lockIdentityKeyring(paths identityKeyringLayout, wait time.Duration) (func(
 			_ = held.files[path].Close()
 			delete(held.files, path)
 			delete(held.holds, path)
+			delete(held.kinds, path)
 		}
 	}
 	if held.holds[path] > 0 {
+		if kind == serveLockExclusive && held.kinds[path] != serveLockExclusive {
+			return nil, false, fmt.Errorf("lock %s exclusively while this command holds it shared", path)
+		}
 		held.holds[path]++
-		return release, nil
+		return release, true, nil
 	}
 	file, err := openPrivateLockFile(path)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	deadline := time.Now().Add(wait)
 	for {
-		locked, err := tryServeFileLock(file, serveLockExclusive)
+		locked, err := tryServeFileLock(file, kind)
 		if err != nil {
 			_ = file.Close()
-			return nil, fmt.Errorf("lock identity keyring %s: %w", paths.root, err)
+			return nil, false, err
 		}
 		if locked {
 			break
@@ -496,13 +521,14 @@ func lockIdentityKeyring(paths identityKeyringLayout, wait time.Duration) (func(
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
 			_ = file.Close()
-			return nil, fmt.Errorf("%w: another hn command holds %s", errIdentityKeyringBusy, path)
+			return nil, false, nil
 		}
 		time.Sleep(min(25*time.Millisecond, remaining))
 	}
 	held.files[path] = file
 	held.holds[path] = 1
-	return release, nil
+	held.kinds[path] = kind
+	return release, true, nil
 }
 
 // openPrivateLockFile opens or creates a mode-0600 regular lock file without
@@ -528,13 +554,13 @@ func openPrivateLockFile(path string) (*os.File, error) {
 			return nil, err
 		}
 		if before.Mode()&os.ModeSymlink != 0 {
-			return nil, fmt.Errorf("private identity lock %s is a symbolic link", path)
+			return nil, fmt.Errorf("private lock file %s is a symbolic link", path)
 		}
 		if !before.Mode().IsRegular() {
-			return nil, fmt.Errorf("private identity lock %s is not a regular file", path)
+			return nil, fmt.Errorf("private lock file %s is not a regular file", path)
 		}
 		if before.Mode().Perm() != 0o600 {
-			return nil, fmt.Errorf("private identity lock %s has unsafe permissions", path)
+			return nil, fmt.Errorf("private lock file %s has unsafe permissions", path)
 		}
 		file, err := os.OpenFile(path, os.O_RDWR, 0)
 		if err != nil {
@@ -550,7 +576,7 @@ func openPrivateLockFile(path string) (*os.File, error) {
 		}
 		_ = file.Close()
 	}
-	return nil, fmt.Errorf("private identity lock %s changed while it was being opened", path)
+	return nil, fmt.Errorf("private lock file %s changed while it was being opened", path)
 }
 
 func syncPrivateDirectory(directory string) error {

@@ -151,7 +151,23 @@ saved selections, the quarantine repositories, transaction receipts, pending
 anchors, unaccepted-object records, and the shallow-gap record. A sync run in
 any worktree uses the clone's saved selection and budgets, and a pending
 acceptance left by an interrupted sync in one worktree blocks trust-sensitive
-reads in every worktree until it is recovered from any of them.
+reads in every worktree until it is recovered. Recovery works the same from
+any worktree, within the limits that also apply to a single checkout: the
+next `hn sync` recovers a sync interrupted before it promoted accepted refs,
+but a sync interrupted after promotion and before its completion receipt can
+be recovered only with `hn sync REMOTE --recover-shallow`, which requires a
+shallow clone. In a full clone, `hn` has no recovery command for that state,
+and trust-sensitive reads stay blocked.
+
+Readers and writers of this state coordinate through `hn/state.lock` below
+the common directory, an empty mode-`0600` file held with `flock(2)`. Every
+command that reads replication journals or saved selections holds it shared
+while it scans the clone-wide location and the legacy linked-worktree
+locations; every command that publishes, migrates, saves, or removes them
+holds it exclusively. A reader therefore never sees a journal or selection missing
+from both places while a migration or save moves it. A lock file that is a
+symbolic link, is not a regular file, or has another mode, and a lock that
+another command holds for more than 30 seconds, fail the command closed.
 
 Releases before this one kept this state in the private Git directory of the
 worktree that ran `hn`, `.git/worktrees/NAME/hn/`, when that was a linked
@@ -173,7 +189,8 @@ linked worktree:
   both places only with identical contents; anything else fails closed.
 - The next `hn sync` from any worktree moves that journal into the clone-wide
   location before it reconciles, copying each file before removing the legacy
-  original, and then completes it like any other pending transaction.
+  original while it holds the clone state lock exclusively, and then recovers
+  it like any other pending transaction, with the same full-clone limit.
 - A shallow-gap record left in a linked worktree is ignored.
   `hn sync REMOTE --recover-shallow` rediscovers the gap when no record exists.
 
@@ -418,7 +435,8 @@ after successful recovery is an idempotent accepted-projection verification.
 Selections, generated quarantine repositories, transaction receipts, pending
 anchors, unaccepted-object records, and shallow-gap records live below
 `hn/replication/` or `hn/` in the clone's Git common directory (`.git/hn/` in
-an ordinary clone), shared by every linked worktree. Directories require mode `0700`; state
+an ordinary clone), shared by every linked worktree and serialized by
+`hn/state.lock`. Directories require mode `0700`; state
 files require mode `0600`; symlinks, unexpected entries, unknown JSON fields,
 oversized records, missing matching anchors/receipts, and unsafe modes fail
 closed.

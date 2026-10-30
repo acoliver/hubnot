@@ -1,11 +1,15 @@
 package main
 
 import (
+	"bytes"
+	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // sharedStateProject is a remote carrying two published actors, alpha and
@@ -169,6 +173,117 @@ func (project sharedStateProject) moveJournalToLegacyWorktree(t *testing.T, name
 	return legacy
 }
 
+// moveSelectionToLegacyWorktree moves the clone-wide selection for origin
+// below the linked worktree's private Git directory, where releases before
+// selections became clone-wide saved it, and returns its new path.
+func (project sharedStateProject) moveSelectionToLegacyWorktree(t *testing.T) string {
+	t.Helper()
+	legacy := replicationSelectionPathAt(project.linkedGit, "origin")
+	for _, directory := range []string{
+		filepath.Join(project.linkedGit, "hn"),
+		filepath.Join(project.linkedGit, "hn", "replication"),
+		filepath.Dir(legacy),
+	} {
+		if err := os.Mkdir(directory, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Rename(replicationSelectionPathAt(project.commonDir, "origin"), legacy); err != nil {
+		t.Fatal(err)
+	}
+	return legacy
+}
+
+type sharedStateResult struct {
+	output string
+	code   int
+}
+
+// startHN starts hn in dir in its own process and delivers its combined
+// output and exit status when it exits.
+func (project sharedStateProject) startHN(t *testing.T, dir string, env map[string]string, args ...string) <-chan sharedStateResult {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	command := exec.CommandContext(ctx, project.binary, args...)
+	command.Dir = dir
+	command.Env = operationalTestEnvironmentWith(t.TempDir(), env)
+	command.Stdin = strings.NewReader("")
+	output := &bytes.Buffer{}
+	command.Stdout = output
+	command.Stderr = output
+	if err := command.Start(); err != nil {
+		cancel()
+		t.Fatal(err)
+	}
+	done := make(chan sharedStateResult, 1)
+	go func() {
+		defer cancel()
+		err := command.Wait()
+		result := sharedStateResult{output: output.String()}
+		var exitErr *exec.ExitError
+		switch {
+		case err == nil:
+		case errors.As(err, &exitErr):
+			result.code = exitErr.ExitCode()
+		default:
+			result.code = -1
+			result.output += "\n" + err.Error()
+		}
+		done <- result
+	}()
+	return done
+}
+
+// overlapStateReader runs readerArgs paused inside its scan of clone state
+// at step, after it has read the clone-wide location and before it reads the
+// legacy linked-worktree ones, and runs writerArgs while it is paused. The
+// writer gets up to five seconds before the reader resumes: a writer that
+// does not wait for the reader's shared clone state lock finishes inside the
+// pause, so the reader then reads the legacy locations after the writer
+// changed them. It reports whether the writer finished during the pause.
+func (project sharedStateProject) overlapStateReader(t *testing.T, step, readerDir string, readerArgs []string,
+	writerDir string, writerEnv map[string]string, writerArgs []string) (sharedStateResult, sharedStateResult, bool) {
+	t.Helper()
+	control := t.TempDir()
+	paused := filepath.Join(control, "paused")
+	release := filepath.Join(control, "release")
+	readerDone := project.startHN(t, readerDir, map[string]string{
+		"HN_INTERNAL_TESTING":    "1",
+		"HN_TEST_STATE_PAUSE_AT": step,
+		"HN_TEST_STATE_PAUSED":   paused,
+		"HN_TEST_STATE_RELEASE":  release,
+	}, readerArgs...)
+	for deadline := time.Now().Add(30 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+		if _, err := os.Stat(paused); err == nil {
+			break
+		}
+		select {
+		case result := <-readerDone:
+			t.Fatalf("hn %s exited %d before pausing at %s:\n%s", strings.Join(readerArgs, " "), result.code, step, result.output)
+		default:
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("hn %s never paused at %s", strings.Join(readerArgs, " "), step)
+		}
+	}
+	writerDone := project.startHN(t, writerDir, writerEnv, writerArgs...)
+	var writer sharedStateResult
+	writerFinished := false
+	select {
+	case writer = <-writerDone:
+		writerFinished = true
+	case <-time.After(5 * time.Second):
+	}
+	if err := os.WriteFile(release, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	reader := <-readerDone
+	if !writerFinished {
+		writer = <-writerDone
+	}
+	return reader, writer, writerFinished
+}
+
 func TestWorktreeReplicationPendingStateIsCloneWide(t *testing.T) {
 	project := newSharedStateProject(t)
 
@@ -236,6 +351,75 @@ func TestWorktreeReplicationLegacyPendingStateMigratesOnSync(t *testing.T) {
 	project.assertIssuesEverywhere(t, project.alphaIssue, project.betaIssue)
 }
 
+// TestWorktreeReplicationReaderOverlappingMigrationSeesPending overlaps a
+// reader with the migration of a legacy pending journal. The reader has
+// scanned the clone-wide location, still empty, when a sync from the linked
+// worktree moves the journal there; it must still find the journal in the
+// legacy location rather than miss it in both.
+func TestWorktreeReplicationReaderOverlappingMigrationSeesPending(t *testing.T) {
+	project := newSharedStateProject(t)
+	project.interruptAfterPromotion(t, project.consumer)
+	legacy := project.moveJournalToLegacyWorktree(t, "transactions", "anchors")
+
+	reader, writer, writerFinished := project.overlapStateReader(t, "between-replication-locations",
+		project.consumer, []string{"log"},
+		project.linked, map[string]string{
+			"HN_INTERNAL_TESTING":                 "1",
+			"HN_TEST_REPLICATION_INTERRUPT_AFTER": "after-legacy-migration",
+		}, []string{"sync", "origin"})
+	if reader.code == 0 || !strings.Contains(reader.output, "replication acceptance pending; transaction=txn-") ||
+		strings.Contains(reader.output, "state=invalid") {
+		t.Fatalf("hn log overlapping a legacy journal migration: exit %d:\n%s", reader.code, reader.output)
+	}
+	if strings.Contains(reader.output, project.alphaIssue) || strings.Contains(reader.output, project.betaIssue) {
+		t.Fatalf("hn log overlapping a legacy journal migration showed pending history:\n%s", reader.output)
+	}
+	if writer.code == 0 || !strings.Contains(writer.output, "interrupted after legacy worktree state migration") {
+		t.Fatalf("hn sync migrating the legacy journal: exit %d:\n%s", writer.code, writer.output)
+	}
+	if writerFinished {
+		t.Fatal("the migration finished while the reader was inside its scan")
+	}
+	for _, name := range []string{"transactions", "anchors"} {
+		if entries := sharedStateEntries(t, filepath.Join(legacy, name)); len(entries) != 0 {
+			t.Fatalf("legacy %s after migration = %v, want none", name, entries)
+		}
+	}
+	project.assertPendingEverywhere(t)
+}
+
+// TestWorktreeReplicationSyncOverlappingSelectionSaveKeepsRestriction
+// overlaps sync's selection read with a save that moves the same legacy
+// restriction clone-wide. Sync has found no clone-wide selection when the
+// save writes it and retires the legacy copy; it must still apply the
+// restriction rather than fall back to importing every advertised actor.
+func TestWorktreeReplicationSyncOverlappingSelectionSaveKeepsRestriction(t *testing.T) {
+	project := newSharedStateProject(t)
+	project.mustHN(t, project.linked, "replication", "select", "origin", "--actor", project.alpha)
+	legacy := project.moveSelectionToLegacyWorktree(t)
+
+	reader, writer, writerFinished := project.overlapStateReader(t, "between-selection-locations",
+		project.consumer, []string{"sync", "origin"},
+		project.linked, nil, []string{"replication", "select", "origin", "--actor", project.alpha})
+	if reader.code != 0 {
+		t.Fatalf("hn sync overlapping a selection save exited %d:\n%s", reader.code, reader.output)
+	}
+	if writer.code != 0 {
+		t.Fatalf("hn replication select overlapping sync exited %d:\n%s", writer.code, writer.output)
+	}
+	if imported := project.importedActors(t); !strings.Contains(imported, project.alpha) || strings.Contains(imported, project.beta) {
+		t.Fatalf("sync overlapping a save of the same restriction imported %q, want only %s", imported, project.alpha)
+	}
+	if writerFinished {
+		t.Fatal("the selection save finished while sync was reading the selection")
+	}
+	if _, err := os.Lstat(legacy); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("legacy selection %s survived the save: %v", legacy, err)
+	}
+	assertOperationalContains(t, project.mustHN(t, project.consumer, "replication", "show", "origin"),
+		"saved: true\n", "compatibility-all: false\n", "actor: "+project.alpha+"\n")
+}
+
 func TestWorktreeReplicationSelectionIsCloneWide(t *testing.T) {
 	project := newSharedStateProject(t)
 	project.mustHN(t, project.consumer, "replication", "select", "origin", "--actor", project.alpha)
@@ -260,19 +444,7 @@ func TestWorktreeReplicationLegacySelectionAppliesCloneWide(t *testing.T) {
 	// An earlier release saved this selection below the linked worktree's
 	// private Git directory. Move it there to reproduce that layout.
 	cloneWide := replicationSelectionPathAt(project.commonDir, "origin")
-	legacy := replicationSelectionPathAt(project.linkedGit, "origin")
-	for _, directory := range []string{
-		filepath.Join(project.linkedGit, "hn"),
-		filepath.Join(project.linkedGit, "hn", "replication"),
-		filepath.Dir(legacy),
-	} {
-		if err := os.Mkdir(directory, 0o700); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := os.Rename(cloneWide, legacy); err != nil {
-		t.Fatal(err)
-	}
+	legacy := project.moveSelectionToLegacyWorktree(t)
 
 	// The only saved selection applies to the main checkout too, so sync
 	// there never silently falls back to importing every advertised actor.
@@ -321,4 +493,58 @@ func TestWorktreeReplicationLegacySelectionAppliesCloneWide(t *testing.T) {
 	}
 	assertOperationalContains(t, project.mustHN(t, project.consumer, "replication", "show", "origin"),
 		"saved: true\n", "actor: "+project.alpha+"\n")
+}
+
+// TestWorktreeCloneStateLockNestsAndFailsClosed checks that one command can take the
+// clone state lock again while it holds it, that a nested exclusive request
+// under a shared hold fails rather than upgrading, and that a lock file
+// with an unsafe mode or a symbolic link fails a reader closed.
+func TestWorktreeCloneStateLockNestsAndFailsClosed(t *testing.T) {
+	stateDir := t.TempDir()
+	outer, err := lockCloneState(stateDir, serveLockExclusive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, kind := range []serveLockKind{serveLockExclusive, serveLockShared} {
+		inner, err := lockCloneState(stateDir, kind)
+		if err != nil {
+			t.Fatalf("nested clone state lock under an exclusive hold: %v", err)
+		}
+		inner()
+	}
+	outer()
+
+	shared, err := lockCloneState(stateDir, serveLockShared)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := lockCloneState(stateDir, serveLockExclusive); err == nil {
+		t.Fatal("exclusive clone state lock under a shared hold succeeded")
+	}
+	shared()
+	release, err := lockCloneState(stateDir, serveLockExclusive)
+	if err != nil {
+		t.Fatalf("clone state lock after every hold was released: %v", err)
+	}
+	release()
+
+	path := filepath.Join(stateDir, "hn", cloneStateLockName)
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := loadReplicationAcceptanceState(stateDir); err == nil || !strings.Contains(err.Error(), "unsafe permissions") {
+		t.Fatalf("reader with a mode-0644 clone state lock: %v", err)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(stateDir, "elsewhere"), path); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := loadReplicationAcceptanceState(stateDir); err == nil || !strings.Contains(err.Error(), "symbolic link") {
+		t.Fatalf("reader with a symbolic-link clone state lock: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(stateDir, "elsewhere")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("clone state lock followed its symbolic link: %v", err)
+	}
 }

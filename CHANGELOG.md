@@ -39,9 +39,15 @@ experimental; alpha releases do not promise stable compatibility.
   that earlier releases wrote in a linked worktree's private Git directory
   still applies: a legacy selection governs the whole clone, differing
   selections are an error until `hn replication select` saves one, and legacy
-  journals guard every worktree until the next `hn sync` moves and completes
-  them. The memory index and the audit authority anchor stay per worktree.
-  See `docs/replication-v0.md`.
+  journals guard every worktree until the next `hn sync` moves and recovers
+  them. Readers hold `hn/state.lock` shared across the clone-wide and legacy
+  locations, and commands that move, publish, save, or remove that state
+  hold it exclusively, so a concurrent reader never misses a pending
+  acceptance or a saved restriction while it moves. The memory index and the
+  audit authority anchor stay per worktree. A sync interrupted after
+  promotion and before its completion receipt is still recoverable only with
+  `hn sync REMOTE --recover-shallow`, which needs a shallow clone; in a full
+  clone it stays pending, as it did before. See `docs/replication-v0.md`.
 - Migration sessions and internal project/archive/imported-record spools share
   a path policy that handles verified macOS system temporary-directory aliases
   while retaining rejection of arbitrary symlinks and unsafe private paths.
