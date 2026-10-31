@@ -34,6 +34,20 @@ experimental; alpha releases do not promise stable compatibility.
 
 ### Fixed
 
+- `hn serve` judges a standing-rule advancement by the paths it changes on
+  the branch. When the hosted tip has moved past the candidate's signed base,
+  the paths changed between the tip and the head must also be inside the
+  rule's `paths`, outside `.hn/` and outside every protected-check path;
+  otherwise the request is `protected-rule-not-satisfied` with the next
+  action `revise ID against TIP`, and no hosted ref moves. Previously only
+  the base-to-head paths were checked, so a head built on a newer tip could
+  restore an older pipeline definition and advance under the rule without
+  maintainer acceptance, and with `requiredApprovals` 0 without any
+  approval. A
+  candidate whose tip-to-head paths are all inside the rule still advances
+  without a revision. Local `hn automerge --execute` was not affected,
+  because it merges only when the target equals the signed base. See
+  `docs/serve-v0.md`.
 - Linked Git worktrees of a clone share its identity. The private keyring now
   lives in the Git common directory, so `hn init` in any worktree serves the
   main checkout and every other worktree. A worktree that already holds a

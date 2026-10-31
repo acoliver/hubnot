@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"sort"
+	"strings"
 )
 
 // The rule derivation is shared by every surface that judges standing
@@ -292,6 +293,28 @@ func ruleDisallowedPaths(rule *AutomergeRule, changed []string) []string {
 		}
 	}
 	return disallowed
+}
+
+// ruleTargetPathDefects judges the paths an advancement actually changes,
+// the hosted tip's tree against the head's, by the path conditions the rule
+// applies to the candidate's own changes: no path under .hn/, no
+// protected-check path and every path inside the rule's selectors. It
+// returns one text per offending path, in changed order. A head that
+// descends from a tip which moved past the signed base could otherwise
+// revert a newer tip change that base..head does not show.
+func ruleTargetPathDefects(policy PolicyDocument, rule *AutomergeRule, changed []string) []string {
+	var defects []string
+	for _, p := range changed {
+		switch {
+		case p == ".hn" || strings.HasPrefix(p, ".hn/"):
+			defects = append(defects, fmt.Sprintf("path %q changed between the tip and the head is under .hn/", p))
+		case len(changedProtectedPaths(policy, []string{p})) > 0:
+			defects = append(defects, fmt.Sprintf("path %q changed between the tip and the head is a protected check path", p))
+		case rule == nil || !automergePathAllowed(rule.Paths, p):
+			defects = append(defects, fmt.Sprintf("path %q changed between the tip and the head is outside the rule allowlist", p))
+		}
+	}
+	return defects
 }
 
 // ruleCurrentRejections returns the latest decision of each maintainer under

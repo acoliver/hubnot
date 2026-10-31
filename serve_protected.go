@@ -476,7 +476,8 @@ func (check *serveProtectedUpdate) protectedBaseline(candidate *StoredEvent, bas
 // preview and local execution share (FR-012), from the base policy, the
 // candidate's changed paths, the pipeline definitions at H and the facts of
 // this push, and reports the failures in the contract order: the rule
-// itself (a to c), vetoes (d), author and paths (e), thresholds (f).
+// itself (a to c), vetoes (d), author and paths (e), thresholds (f). The
+// paths of (e) include those between the tip and H (ruleTargetPaths).
 func (check *serveProtectedUpdate) ruleAcceptance(candidate *StoredEvent, basePolicy PolicyDocument, baseDigest string) *serveRejection {
 	name := check.options.Rule
 	notSatisfied := func(missing []string, details string) *serveRejection {
@@ -530,6 +531,9 @@ func (check *serveProtectedUpdate) ruleAcceptance(candidate *StoredEvent, basePo
 	if unmet := acceptance.UnmetOf(ruleUnmetAuthor, ruleUnmetManualPath, ruleUnmetPath); len(unmet) > 0 {
 		return notSatisfied(nil, unmetText(unmet))
 	}
+	if rejection := check.ruleTargetPaths(candidate, acceptance.Rule, basePolicy); rejection != nil {
+		return rejection
+	}
 	if unmet := acceptance.UnmetOf(ruleUnmetApprovals, ruleUnmetPipeline); len(unmet) > 0 {
 		var missing []string
 		for _, condition := range unmet {
@@ -548,6 +552,39 @@ func (check *serveProtectedUpdate) ruleAcceptance(candidate *StoredEvent, basePo
 	}
 	if !acceptance.Satisfied() {
 		return notSatisfied(nil, "the rule derivation did not accept it")
+	}
+	return nil
+}
+
+// ruleTargetPaths is the path condition of step 10 for the tree the
+// advancement actually changes. Step 5 made the head descend from the tip
+// T, but the candidate's changed paths are read from its signed base B,
+// and when T moved past B a head can undo a change T made, such as a
+// newer pipeline definition, while B..H shows only allowed paths. T..H
+// must therefore satisfy the rule exactly as B..H does. With no T..H path
+// under .hn/, the pipeline definitions read at H to judge the evidence are
+// T's. When T is B, T..H is B..H and was already judged.
+func (check *serveProtectedUpdate) ruleTargetPaths(candidate *StoredEvent, rule *AutomergeRule, basePolicy PolicyDocument) *serveRejection {
+	if check.tip == "" || check.tip == candidate.Event.Base {
+		return nil
+	}
+	rejection := func(details string) *serveRejection {
+		return &serveRejection{
+			Code:    serveReasonProtectedRuleNotSatisfied,
+			IDs:     []string{candidate.ID},
+			Missing: []string{serveEvidenceProposal},
+			Next:    "revise " + candidate.ID + " against " + check.tip,
+			Sentence: "candidate " + candidate.ID + " does not satisfy rule " + check.options.Rule + " at " + check.ref + " " +
+				serveShortCommit(check.tip) + ": " + details + ".",
+		}
+	}
+	// An unreadable diff never becomes an empty change list (FR-014).
+	changed, err := changedPathsAt(check.ctx.GitDir, check.tip, candidate.Event.Head)
+	if err != nil {
+		return rejection("the paths changed between the tip and the head cannot be read: " + serveDiagnostic(err, check.ctx.GitDir))
+	}
+	if defects := ruleTargetPathDefects(basePolicy, rule, changed); len(defects) > 0 {
+		return rejection(strings.Join(defects, "; "))
 	}
 	return nil
 }

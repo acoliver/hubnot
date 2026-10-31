@@ -1660,6 +1660,20 @@ judges two by the rule and skips one:
   the next action is `run hn automerge ID --rule NAME`. A current trusted
   change request or a current trusted failure is `protected-rule-veto`, and
   `ids` names the candidate and then each blocking event.
+- **Step 10, tip to head**: when the tip `T` is not the candidate's signed
+  base `B`, the server also reads the paths changed between `T` and the head
+  `H`, which are the changes the advancement makes to the branch. Every one
+  of them must be inside the rule's `paths`, none may be under `.hn/`, and
+  none may be a protected-check path, the same conditions `B..H` must meet.
+  Otherwise the request is `protected-rule-not-satisfied` with
+  `missing=proposal`, the next action `revise ID against T`, and a sentence
+  naming each offending path. This stops a head that descends from `T` from
+  undoing a change `T` made after `B`, such as a stricter pipeline
+  definition, while `B..H` shows only allowed paths. Because no `T..H` path
+  is under `.hn/`, the pipeline definitions the server reads at `H` to judge
+  the run results are those at `T`. A candidate whose `T..H` paths are all
+  inside the rule advances without a revision. A change to `.hn/policy.json`
+  between `B` and `T` is refused earlier, by step 7a.
 - **Step 11** does not run. Step 7a already made the destination policy the
   base policy, so step 11 would repeat step 10.
 - **Step 13**: the pushing actor must be listed in the rule's `actors` in the
