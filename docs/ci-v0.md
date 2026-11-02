@@ -72,7 +72,9 @@ The default Linux backend uses Bubblewrap. It:
 
 - resolves the `bwrap` executable only from the same fixed canonical system
   directories exposed through the sandbox `PATH`, ignoring ambient `PATH`;
-- extracts the requested commit into a generated temporary directory;
+- extracts the requested commit into a generated temporary directory,
+  streaming `git archive` output to disk and refusing an archive larger than
+  4 GiB (4,294,967,296 bytes) with `run archive exceeds 4294967296 bytes`;
 - rejects unsafe archive paths and unsupported archive entry types;
 - creates separate user, PID, network, IPC, UTS, and cgroup namespaces;
 - drops capabilities and does not expose the runner's normal `HOME`;

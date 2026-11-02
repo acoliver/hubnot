@@ -19,11 +19,15 @@ import (
 const (
 	pipelineVersion = "hn.pipeline/0"
 	maxPipelineSize = 1 << 20
-	maxArchiveSize  = 256 << 20
 	maxRunLogSize   = 1 << 20
 	defaultTimeout  = 300
 	maxStepTimeout  = 3600
 )
+
+// maxArchiveSize bounds the tar stream of a run commit. The stream is
+// extracted as it is read, so the bound limits disk use rather than memory.
+// A variable so tests can lower it.
+var maxArchiveSize int64 = 4 << 30
 
 type PipelineDefinition struct {
 	Version string         `json:"version"`
@@ -605,35 +609,84 @@ func (log *cappedLog) Bytes() []byte {
 }
 
 func extractCommit(commit string) (string, error) {
-	archive, err := gitOutput("archive", "--format=tar", commit)
+	// Read git archive's output as a stream: a repository's tracked files
+	// can be far larger than a sensible in-memory buffer.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	args := []string{"archive", "--format=tar", commit}
+	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd.Env = os.Environ()
+	stderr := &cappedLog{limit: 64 << 10}
+	cmd.Stderr = stderr
+	stdout, err := cmd.StdoutPipe()
 	if err != nil {
+		return "", err
+	}
+	if err := cmd.Start(); err != nil {
 		return "", fmt.Errorf("archive run commit: %w", err)
 	}
-	if len(archive) > maxArchiveSize {
-		return "", fmt.Errorf("run archive exceeds %d bytes", maxArchiveSize)
+	stream := &runArchiveReader{reader: stdout}
+	root, extractErr := extractRunArchive(stream)
+	if extractErr == nil {
+		// Read git's end-of-archive padding so it can exit normally.
+		_, extractErr = io.Copy(io.Discard, stream)
 	}
+	if extractErr != nil {
+		cancel()
+	}
+	waitErr := cmd.Wait()
+	if extractErr == nil && waitErr != nil {
+		message := strings.TrimSpace(string(stderr.Bytes()))
+		if message == "" {
+			message = waitErr.Error()
+		}
+		extractErr = fmt.Errorf("archive run commit: git %s: %s", strings.Join(args, " "), message)
+	}
+	if extractErr != nil {
+		if root != "" {
+			_ = os.RemoveAll(root)
+		}
+		return "", extractErr
+	}
+	return root, nil
+}
+
+// runArchiveReader passes a run archive through and fails once it has
+// delivered more than maxArchiveSize bytes.
+type runArchiveReader struct {
+	reader io.Reader
+	read   int64
+}
+
+func (r *runArchiveReader) Read(p []byte) (int, error) {
+	n, err := r.reader.Read(p)
+	r.read += int64(n)
+	if r.read > maxArchiveSize {
+		return n, fmt.Errorf("run archive exceeds %d bytes", maxArchiveSize)
+	}
+	return n, err
+}
+
+// extractRunArchive writes the regular files and directories of a tar
+// stream below a new temporary directory. On error it also returns the
+// directory, when one was created, for the caller to remove.
+func extractRunArchive(archive io.Reader) (string, error) {
 	root, err := os.MkdirTemp("", "hn-run-")
 	if err != nil {
 		return "", err
 	}
-	succeeded := false
-	defer func() {
-		if !succeeded {
-			_ = os.RemoveAll(root)
-		}
-	}()
-	reader := tar.NewReader(bytes.NewReader(archive))
+	reader := tar.NewReader(archive)
 	for {
 		header, err := reader.Next()
 		if errors.Is(err, io.EOF) {
 			break
 		}
 		if err != nil {
-			return "", fmt.Errorf("read run archive: %w", err)
+			return root, fmt.Errorf("read run archive: %w", err)
 		}
 		cleaned := filepath.Clean(header.Name)
 		if cleaned == "." || filepath.IsAbs(cleaned) || cleaned == ".." || strings.HasPrefix(cleaned, ".."+string(filepath.Separator)) {
-			return "", fmt.Errorf("unsafe archive path %q", header.Name)
+			return root, fmt.Errorf("unsafe archive path %q", header.Name)
 		}
 		target := filepath.Join(root, cleaned)
 		switch header.Typeflag {
@@ -641,31 +694,30 @@ func extractCommit(commit string) (string, error) {
 			continue
 		case tar.TypeDir:
 			if err := os.MkdirAll(target, 0o755); err != nil {
-				return "", err
+				return root, err
 			}
 		case tar.TypeReg, tar.TypeRegA:
 			if header.Size < 0 || header.Size > maxArchiveSize {
-				return "", fmt.Errorf("unsafe archive entry size for %q", header.Name)
+				return root, fmt.Errorf("unsafe archive entry size for %q", header.Name)
 			}
 			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
-				return "", err
+				return root, err
 			}
 			file, err := os.OpenFile(target, os.O_CREATE|os.O_EXCL|os.O_WRONLY, os.FileMode(header.Mode)&0o777)
 			if err != nil {
-				return "", err
+				return root, err
 			}
 			_, copyErr := io.CopyN(file, reader, header.Size)
 			closeErr := file.Close()
 			if copyErr != nil {
-				return "", copyErr
+				return root, copyErr
 			}
 			if closeErr != nil {
-				return "", closeErr
+				return root, closeErr
 			}
 		default:
-			return "", fmt.Errorf("unsupported archive entry %q", header.Name)
+			return root, fmt.Errorf("unsupported archive entry %q", header.Name)
 		}
 	}
-	succeeded = true
 	return root, nil
 }
