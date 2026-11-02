@@ -748,6 +748,38 @@ func loadReplicationAcceptanceState(gitDir string) (map[string]bool, map[string]
 	return denied, pending, nil
 }
 
+// loadSettledReplicationAcceptance returns the objects accepted by current
+// receipts that are complete and have no pending anchor.
+func loadSettledReplicationAcceptance(gitDir string) (map[string]bool, error) {
+	release, err := lockCloneState(gitDir, serveLockShared)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	locations, err := replicationStateLocations(gitDir)
+	if err != nil {
+		return nil, err
+	}
+	records, anchors, err := loadCombinedReplicationJournal(locations)
+	if err != nil {
+		return nil, err
+	}
+	anchored := make(map[string]bool, len(anchors))
+	for _, anchor := range anchors {
+		anchored[anchor.ID] = true
+	}
+	settled := make(map[string]bool)
+	for _, record := range records {
+		if record.Version != replicationTransactionRecordVersion || record.State != "complete" || anchored[record.ID] {
+			continue
+		}
+		for _, id := range *record.AcceptedObjects {
+			settled[id] = true
+		}
+	}
+	return settled, nil
+}
+
 func sameReplicationObjectSet(left, right []string) bool {
 	if len(left) != len(right) {
 		return false
@@ -865,8 +897,14 @@ func reconcileCompletedReplicationTransactions(gitDir string, completed replicat
 	if err != nil {
 		return err
 	}
-	accepted := make(map[string]bool, len(completed.acceptedObjects))
-	for _, id := range completed.acceptedObjects {
+	// The completed transaction validated and holds its whole required
+	// closure; its receipt records only the part no settled receipt accepts.
+	covering := completed.requiredObjects
+	if covering == nil {
+		covering = completed.acceptedObjects
+	}
+	accepted := make(map[string]bool, len(covering))
+	for _, id := range covering {
 		accepted[id] = true
 	}
 	for _, anchor := range anchors {
