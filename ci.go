@@ -635,12 +635,25 @@ func extractCommit(commit string) (string, error) {
 		cancel()
 	}
 	waitErr := cmd.Wait()
-	if extractErr == nil && waitErr != nil {
+	// A git that exited by itself with a failure status explains a broken
+	// stream; one stopped by the cancel above does not.
+	var exitErr *exec.ExitError
+	gitFailed := waitErr != nil && (extractErr == nil || (errors.As(waitErr, &exitErr) && exitErr.ExitCode() > 0))
+	switch {
+	case stream.err != nil:
+		// The size refusal, even when the tar reader reported it as a
+		// truncated header.
+		extractErr = stream.err
+	case gitFailed:
 		message := strings.TrimSpace(string(stderr.Bytes()))
 		if message == "" {
 			message = waitErr.Error()
 		}
-		extractErr = fmt.Errorf("archive run commit: git %s: %s", strings.Join(args, " "), message)
+		gitErr := fmt.Errorf("archive run commit: git %s: %s", strings.Join(args, " "), message)
+		if extractErr != nil {
+			gitErr = fmt.Errorf("%w (%v)", gitErr, extractErr)
+		}
+		extractErr = gitErr
 	}
 	if extractErr != nil {
 		if root != "" {
@@ -651,19 +664,39 @@ func extractCommit(commit string) (string, error) {
 	return root, nil
 }
 
-// runArchiveReader passes a run archive through and fails once it has
-// delivered more than maxArchiveSize bytes.
+// runArchiveReader passes at most maxArchiveSize bytes of a run archive
+// through. A byte beyond that fails the read and every later read, without
+// delivering it: the tar reader ignores an error that arrives with a complete
+// header block, so an over-limit archive of empty entries would otherwise be
+// extracted in full.
 type runArchiveReader struct {
 	reader io.Reader
 	read   int64
+	err    error
 }
 
 func (r *runArchiveReader) Read(p []byte) (int, error) {
+	if r.err != nil {
+		return 0, r.err
+	}
+	if len(p) == 0 {
+		return 0, nil
+	}
+	remaining := maxArchiveSize - r.read
+	if remaining <= 0 {
+		var probe [1]byte
+		n, err := r.reader.Read(probe[:])
+		if n > 0 {
+			r.err = fmt.Errorf("run archive exceeds %d bytes", maxArchiveSize)
+			return 0, r.err
+		}
+		return 0, err
+	}
+	if int64(len(p)) > remaining {
+		p = p[:remaining]
+	}
 	n, err := r.reader.Read(p)
 	r.read += int64(n)
-	if r.read > maxArchiveSize {
-		return n, fmt.Errorf("run archive exceeds %d bytes", maxArchiveSize)
-	}
 	return n, err
 }
 
