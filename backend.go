@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -32,7 +33,15 @@ func (hostBackend) RunStep(ctx context.Context, root string, step PipelineStep, 
 	command.Env = environment
 	command.Stdout = output
 	command.Stderr = output
-	return command.Run()
+	isolateStepProcesses(command)
+	err := command.Run()
+	reapStepProcesses(command)
+	// The step itself succeeded; only a process it left behind kept its
+	// output open past stepWaitDelay, and that process is now gone.
+	if errors.Is(err, exec.ErrWaitDelay) {
+		return nil
+	}
+	return err
 }
 
 type bubblewrapBackend struct {
