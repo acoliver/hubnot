@@ -93,9 +93,16 @@ func (c *Client) BaseURL() string { return c.base.String() }
 // can contain arbitrary private content or reflected credentials.
 type HTTPError struct {
 	StatusCode int
+	// Anonymous is set when the request carried no token. GitHub answers a
+	// private repository's unauthenticated requests with 404, which reads
+	// as "no such issue" unless the error says why.
+	Anonymous bool
 }
 
 func (e *HTTPError) Error() string {
+	if e.StatusCode == http.StatusNotFound && e.Anonymous {
+		return "GitHub API returned HTTP 404 to a request without a token; a private repository answers 404 until HN_GITHUB_TOKEN is set, for example HN_GITHUB_TOKEN=$(gh auth token)"
+	}
 	return fmt.Sprintf("GitHub API returned HTTP %d", e.StatusCode)
 }
 
@@ -232,7 +239,7 @@ func (c *Client) request(ctx context.Context, method string, u *url.URL, input a
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != want {
-		return nil, nil, &HTTPError{StatusCode: resp.StatusCode}
+		return nil, nil, &HTTPError{StatusCode: resp.StatusCode, Anonymous: c.token == ""}
 	}
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, MaxResponseBytes+1))
 	if err != nil {

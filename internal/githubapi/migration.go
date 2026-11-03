@@ -130,7 +130,7 @@ func (c *Client) ReadAttachment(ctx context.Context, rawURL string, max int64) (
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, "", &HTTPError{resp.StatusCode}
+		return nil, "", &HTTPError{StatusCode: resp.StatusCode, Anonymous: c.token == ""}
 	}
 	data, e := io.ReadAll(io.LimitReader(resp.Body, max+1))
 	if e != nil || int64(len(data)) > max {
