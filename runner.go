@@ -27,7 +27,16 @@ type runnerOptions struct {
 	Backend         executionBackend
 	Interval        time.Duration
 	ReportNoPending bool
+	// SkipStaleBase, when set, names the remote branch a proposal must still
+	// be based on: a request whose proposal base is not that branch's tip on
+	// the remote is skipped, since its result can never be used to merge.
+	SkipStaleBase string
 }
+
+// runnerReportedSkips remembers, per request ID, the reason last printed
+// for skipping it, so a watching runner reports each skip once instead of
+// on every polling cycle.
+var runnerReportedSkips = map[string]string{}
 
 // acceptedActors returns every signer whose requests the runner accepts.
 func (options runnerOptions) acceptedActors() []string {
@@ -83,6 +92,7 @@ func parseRunnerOptions(name string, args []string, watching bool) (runnerOption
 	backendName := flags.String("backend", "sandbox", "execution backend: sandbox or host")
 	allowHost := flags.Bool("allow-unsafe-host-execution", false, "permit an unsandboxed host backend")
 	interval := flags.Duration("interval", 30*time.Second, "watch polling interval")
+	skipStaleBase := flags.String("skip-stale-base", "", "skip requests whose proposal base is not this branch's tip on the remote")
 	if err := flags.Parse(args); err != nil {
 		return runnerOptions{}, err
 	}
@@ -105,6 +115,11 @@ func parseRunnerOptions(name string, args []string, watching bool) (runnerOption
 		}
 		seen[key] = true
 	}
+	if *skipStaleBase != "" {
+		if _, err := gitOutput("check-ref-format", "refs/heads/"+*skipStaleBase); err != nil {
+			return runnerOptions{}, usageError(fmt.Sprintf("runner --skip-stale-base %q is not a valid branch name", *skipStaleBase))
+		}
+	}
 	if watching && *interval < time.Second {
 		return runnerOptions{}, fmt.Errorf("runner watch interval must be at least 1s")
 	}
@@ -121,6 +136,7 @@ func parseRunnerOptions(name string, args []string, watching bool) (runnerOption
 		AcceptedActor: actors[0],
 		Backend:       backend,
 		Interval:      *interval,
+		SkipStaleBase: *skipStaleBase,
 	}
 	if len(actors) > 1 {
 		options.AcceptedActors = append([]string(nil), actors...)
@@ -150,6 +166,17 @@ func runnerOnceContext(ctx context.Context, options runnerOptions) (bool, error)
 		return false, err
 	}
 	accepted := options.acceptedActors()
+	// A request whose result can no longer be used is skipped. Both inputs
+	// fail open: when the lineage or the remote tip cannot be read, every
+	// request runs as before, because a lost gate costs more than a wasted one.
+	lineage, lineageErr := buildLineageIndex(events)
+	if lineageErr != nil {
+		lineage = nil
+	}
+	staleTip := ""
+	if options.SkipStaleBase != "" {
+		staleTip = runnerRemoteBranchTip(options.Remote, options.SkipStaleBase)
+	}
 	var firstError error
 	for index := range events {
 		request := &events[index]
@@ -179,6 +206,13 @@ func runnerOnceContext(ctx context.Context, options runnerOptions) (bool, error)
 				fmt.Fprintf(os.Stderr, "hn runner: skipped %s: signer %s is neither a maintainer nor a requester of pipeline %s under the base policy\n", shortID(request.ID), shortID(request.Event.Actor), oneLine(request.Event.Pipeline))
 				continue
 			}
+		}
+		if reason := runnerDeadRequestReason(events, lineage, request, staleTip); reason != "" {
+			if runnerReportedSkips[request.ID] != reason {
+				runnerReportedSkips[request.ID] = reason
+				fmt.Printf("Runner skipped request %s from %s: %s\n", shortID(request.ID), shortID(request.Event.Actor), reason)
+			}
+			continue
 		}
 		fmt.Printf("Runner accepted request %s from %s for pipeline %s\n", shortID(request.ID), shortID(request.Event.Actor), oneLine(request.Event.Pipeline))
 		stored, err := executeRunRequest(ctx, events, request, identity, options.Backend, false)
@@ -253,4 +287,50 @@ func runnerWatch(options runnerOptions) error {
 		case <-timer.C:
 		}
 	}
+}
+
+// runnerDeadRequestReason returns why request can no longer produce a usable
+// result, or "" when it should run. A result is unusable when the request's
+// proposal is superseded or its lineage has already merged, since neither can
+// merge again, or, when staleTip is set, when the proposal's base is not that
+// tip, since a proposal merges only onto its signed base. A request whose
+// proposal cannot be resolved runs, so the existing refusals report it.
+func runnerDeadRequestReason(events []StoredEvent, lineage *lineageIndex, request *StoredEvent, staleTip string) string {
+	proposal, err := resolveEvent(events, request.Event.Subject)
+	if err != nil || !isProposalKind(proposal.Event.Kind) {
+		return ""
+	}
+	if lineage != nil {
+		if state, err := lineage.state(proposal.ID); err == nil {
+			switch {
+			case state.Merged || state.LineageClosed:
+				return "its proposal lineage has already merged"
+			case state.Superseded:
+				successors := make([]string, 0, len(state.SuccessorIDs))
+				for _, id := range state.SuccessorIDs {
+					successors = append(successors, shortID(id))
+				}
+				return "its proposal is superseded by " + strings.Join(successors, ", ")
+			}
+		}
+	}
+	if staleTip != "" && proposal.Event.Base != staleTip {
+		return fmt.Sprintf("its proposal base %s is not the current target tip %s", shortOID(proposal.Event.Base), shortOID(staleTip))
+	}
+	return ""
+}
+
+// runnerRemoteBranchTip reads branch's tip on remote, or "" when it cannot be
+// read, which turns the stale-base check off for this cycle.
+func runnerRemoteBranchTip(remote, branch string) string {
+	ref := "refs/heads/" + branch
+	output, err := gitOutput("ls-remote", "--refs", "--", remote, ref)
+	if err != nil {
+		return ""
+	}
+	fields := strings.Fields(string(output))
+	if len(fields) != 2 || fields[1] != ref || !validFullGitObjectID(fields[0]) {
+		return ""
+	}
+	return fields[0]
 }
