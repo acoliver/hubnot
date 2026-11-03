@@ -134,3 +134,31 @@ func TestRunnerSkipStaleBaseRefusesAMalformedBranch(t *testing.T) {
 		t.Fatalf("runner executed a request despite a usage error:\n%s", output)
 	}
 }
+
+func TestRunnerSkipRequestSkipsOnlyTheNamedRequest(t *testing.T) {
+	project := newRunnerActorsProject(t)
+	listed := []string{project.alpha.actor, project.beta.actor}
+	output, code := project.runnerOnceArgs(t, []string{"--skip-request", project.alpha.request}, listed...)
+	if code != 0 {
+		t.Fatalf("runner once --skip-request exited %d:\n%s", code, output)
+	}
+	assertOperationalContains(t, output, "Runner skipped request "+operationalShortID(project.alpha.request)+" from "+
+		operationalShortID(project.alpha.actor)+": the runner was started with --skip-request for it\n")
+	assertOperationalContains(t, output, runnerAcceptedLine(project.beta))
+	if strings.Contains(output, runnerAcceptedLine(project.alpha)) {
+		t.Fatalf("runner executed the request named by --skip-request:\n%s", output)
+	}
+	project.assertRunnerResult(t, project.alpha, false)
+}
+
+func TestRunnerSkipRequestRefusesAShortID(t *testing.T) {
+	project := newRunnerActorsProject(t)
+	output, code := project.runnerOnceArgs(t, []string{"--skip-request", operationalShortID(project.alpha.request)}, project.alpha.actor)
+	if code == 0 {
+		t.Fatalf("runner once accepted a short --skip-request:\n%s", output)
+	}
+	assertOperationalContains(t, output, "runner --skip-request ")
+	if strings.Contains(output, "Runner accepted request") {
+		t.Fatalf("runner executed a request despite a usage error:\n%s", output)
+	}
+}

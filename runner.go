@@ -31,6 +31,10 @@ type runnerOptions struct {
 	// be based on: a request whose proposal base is not that branch's tip on
 	// the remote is skipped, since its result can never be used to merge.
 	SkipStaleBase string
+	// SkipRequests are full run request IDs the operator told this runner
+	// not to execute, for example one known to exceed its step timeout.
+	// hn has no cancel event, so the request stays unanswered.
+	SkipRequests map[string]bool
 }
 
 // runnerReportedSkips remembers, per request ID, the reason last printed
@@ -93,6 +97,8 @@ func parseRunnerOptions(name string, args []string, watching bool) (runnerOption
 	allowHost := flags.Bool("allow-unsafe-host-execution", false, "permit an unsandboxed host backend")
 	interval := flags.Duration("interval", 30*time.Second, "watch polling interval")
 	skipStaleBase := flags.String("skip-stale-base", "", "skip requests whose proposal base is not this branch's tip on the remote")
+	var skipRequests repeatedStringFlag
+	flags.Var(&skipRequests, "skip-request", "never execute this full run request ID; repeatable")
 	if err := flags.Parse(args); err != nil {
 		return runnerOptions{}, err
 	}
@@ -120,6 +126,13 @@ func parseRunnerOptions(name string, args []string, watching bool) (runnerOption
 			return runnerOptions{}, usageError(fmt.Sprintf("runner --skip-stale-base %q is not a valid branch name", *skipStaleBase))
 		}
 	}
+	skipped := make(map[string]bool, len(skipRequests))
+	for _, id := range skipRequests {
+		if err := requireFullEventID(id); err != nil {
+			return runnerOptions{}, usageError(fmt.Sprintf("runner --skip-request %q: %v", id, err))
+		}
+		skipped[id] = true
+	}
 	if watching && *interval < time.Second {
 		return runnerOptions{}, fmt.Errorf("runner watch interval must be at least 1s")
 	}
@@ -137,6 +150,7 @@ func parseRunnerOptions(name string, args []string, watching bool) (runnerOption
 		Backend:       backend,
 		Interval:      *interval,
 		SkipStaleBase: *skipStaleBase,
+		SkipRequests:  skipped,
 	}
 	if len(actors) > 1 {
 		options.AcceptedActors = append([]string(nil), actors...)
@@ -207,7 +221,11 @@ func runnerOnceContext(ctx context.Context, options runnerOptions) (bool, error)
 				continue
 			}
 		}
-		if reason := runnerDeadRequestReason(events, lineage, request, staleTip); reason != "" {
+		reason := runnerDeadRequestReason(events, lineage, request, staleTip)
+		if reason == "" && options.SkipRequests[request.ID] {
+			reason = "the runner was started with --skip-request for it"
+		}
+		if reason != "" {
 			if runnerReportedSkips[request.ID] != reason {
 				runnerReportedSkips[request.ID] = reason
 				fmt.Printf("Runner skipped request %s from %s: %s\n", shortID(request.ID), shortID(request.Event.Actor), reason)
