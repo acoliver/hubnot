@@ -62,7 +62,7 @@ func serveRemoteIdentifies(remote string) (bool, string) {
 	// accept blank lines or stray spaces that are not exactly one line.
 	output, err := gitOutput("ls-remote", "--refs", "--", remote, serveMarkerRef)
 	if err != nil {
-		return false, "cannot list " + serveMarkerRef + " on the remote"
+		return false, "cannot list " + serveMarkerRef + " on the remote: " + transportReason(err)
 	}
 	advertised := string(output)
 	if advertised == "" {
@@ -135,4 +135,45 @@ func gitPushStderr(args ...string) (string, error) {
 	cmd.Stderr = &stderr
 	err := cmd.Run()
 	return stderr.String(), err
+}
+
+// transportReason is the first informative line of a git error, without
+// gitRun's "git ARGS: " prefix and git's generic remote-access advice,
+// bounded and with control characters replaced. For an SSH remote it is
+// ssh's own reason, such as "Permission denied (publickey)".
+func transportReason(err error) string {
+	reason := ""
+	for index, line := range strings.Split(err.Error(), "\n") {
+		line = strings.TrimSpace(line)
+		if index == 0 && strings.HasPrefix(line, "git ") {
+			if _, rest, found := strings.Cut(line, ": "); found {
+				line = strings.TrimSpace(rest)
+			}
+		}
+		if line == "" || strings.HasPrefix(line, "fatal: Could not read from remote repository") ||
+			strings.HasPrefix(line, "Please make sure you have the correct access rights") || line == "and the repository exists." {
+			continue
+		}
+		reason = line
+		break
+	}
+	if reason == "" {
+		reason = "git ls-remote failed"
+	}
+	if runes := []rune(reason); len(runes) > 240 {
+		reason = string(runes[:240]) + "..."
+	}
+	return safeText(reason)
+}
+
+// identificationLostError is the import error of a sync whose all-trusted
+// selection could not confirm the remote is hn serve. A remote that could
+// not be listed at all is an access problem, such as a missing SSH key, and
+// says so; reselecting would not help. A remote that answered without the
+// marker no longer identifies.
+func identificationLostError(remote, reason string) error {
+	if strings.HasPrefix(reason, "cannot list ") {
+		return fmt.Errorf("cannot reach remote %s to confirm it is hn serve (%s); hosted facts were not imported", remote, reason)
+	}
+	return fmt.Errorf("remote %s no longer identifies as hn serve; reselect with hn replication select", remote)
 }

@@ -91,16 +91,16 @@ func cmdSync(args []string) error {
 	}
 	// Only all-trusted selections depend on identification, and it is rechecked
 	// on every sync. Losing it skips the import, while publication still runs.
-	identificationLost := false
+	identificationLost, lostReason := false, ""
 	if selection.AllTrusted {
-		identified, _ := serveRemoteIdentifies(remote)
-		identificationLost = !identified
+		identified, reason := serveRemoteIdentifies(remote)
+		identificationLost, lostReason = !identified, reason
 	}
 	var result replicationTransactionResult
 	var importErr error
 	if identificationLost {
 		result = replicationTransactionResult{Remote: remote}
-		importErr = fmt.Errorf("remote %s no longer identifies as hn serve; reselect with hn replication select", remote)
+		importErr = identificationLostError(remote, lostReason)
 	} else {
 		result, importErr = runReplicationTransaction(selection)
 	}
