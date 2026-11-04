@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -205,7 +206,7 @@ func runnerOnceContext(ctx context.Context, options runnerOptions) (bool, error)
 		staleTip = runnerRemoteBranchTip(options.Remote, options.SkipStaleBase)
 	}
 	var firstError error
-	for index := range events {
+	for _, index := range runnerRequestOrder(events, lineage, options.Pipeline) {
 		request := &events[index]
 		if request.Event.Kind != "run.request" || request.Event.Pipeline != options.Pipeline || !actorListed(request.Event.Actor, accepted) {
 			continue
@@ -351,6 +352,62 @@ func runnerPolicyOnlyRequest(events []StoredEvent, request *StoredEvent) bool {
 		}
 	}
 	return true
+}
+
+// runnerRequestOrder returns the indexes of events in the order the runner
+// considers them: pipeline requests first, by when their proposal's lineage
+// first requested the pipeline, so a proposal revised after its base moved
+// keeps its place instead of going behind every newer request; then
+// everything else in store order. A request whose lineage cannot be read
+// is keyed by its own timestamp, which is the previous order.
+func runnerRequestOrder(events []StoredEvent, lineage *lineageIndex, pipeline string) []int {
+	root := func(request *StoredEvent) string {
+		if lineage == nil {
+			return request.ID
+		}
+		state, err := lineage.state(request.Event.Subject)
+		if err != nil || state.RootID == "" {
+			return request.ID
+		}
+		return state.RootID
+	}
+	type entry struct {
+		index int
+		root  string
+		at    time.Time
+	}
+	var requests []entry
+	var rest []int
+	first := map[string]time.Time{}
+	for index := range events {
+		event := &events[index]
+		if event.Event.Kind != "run.request" || event.Event.Pipeline != pipeline {
+			rest = append(rest, index)
+			continue
+		}
+		key := root(event)
+		// An unreadable timestamp sorts last rather than first.
+		at, err := time.Parse(time.RFC3339Nano, event.Event.Timestamp)
+		if err != nil {
+			at = time.Unix(1<<40, 0)
+		}
+		requests = append(requests, entry{index: index, root: key, at: at})
+		if earliest, ok := first[key]; !ok || at.Before(earliest) {
+			first[key] = at
+		}
+	}
+	sort.SliceStable(requests, func(i, j int) bool {
+		a, b := first[requests[i].root], first[requests[j].root]
+		if !a.Equal(b) {
+			return a.Before(b)
+		}
+		return requests[i].at.Before(requests[j].at)
+	})
+	order := make([]int, 0, len(events))
+	for _, request := range requests {
+		order = append(order, request.index)
+	}
+	return append(order, rest...)
 }
 
 // runnerDeferBehindPassed returns why request should wait, or "" when it
