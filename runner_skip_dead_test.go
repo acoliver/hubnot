@@ -162,3 +162,52 @@ func TestRunnerSkipRequestRefusesAShortID(t *testing.T) {
 		t.Fatalf("runner executed a request despite a usage error:\n%s", output)
 	}
 }
+
+// openPolicyOnlyProposal opens a proposal from participant that changes only
+// a file below .hn/, requests pipeline test on it and publishes both. It
+// returns the run request ID.
+func openPolicyOnlyProposal(t *testing.T, project runnerActorsProject, participant runnerActorsParticipant) string {
+	t.Helper()
+	repository := participant.repository
+	runOperationalGit(t, repository, "switch", "-q", "-c", "policy-note", "main")
+	if err := os.WriteFile(filepath.Join(repository, ".hn", "note.txt"), []byte("policy only\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runOperationalGit(t, repository, "add", ".hn/note.txt")
+	runOperationalGit(t, repository, "commit", "-q", "-m", "policy-only change")
+	head := runOperationalGit(t, repository, "rev-parse", "HEAD")
+	runOperationalGit(t, repository, "switch", "-q", "main")
+	runOperationalCommand(t, project.binary, repository, "proposal", "open", "--base", "main", "--head", head, "Policy only")
+	proposal := latestOperationalEvent(t, repository, operationalActorRef(participant.actor))
+	runOperationalCommand(t, project.binary, repository, "run", "request", proposal.ID, "test")
+	request := latestOperationalEvent(t, repository, operationalActorRef(participant.actor))
+	if request.Kind != "run.request" || request.Subject != proposal.ID {
+		t.Fatalf("policy-only run request binding mismatch: %#v", request)
+	}
+	runOperationalCommand(t, project.binary, repository, "sync", "origin")
+	return request.ID
+}
+
+func TestRunnerOnlyPolicyChangesRunsOnlyPolicyOnlyRequests(t *testing.T) {
+	project := newRunnerActorsProject(t)
+	listed := []string{project.alpha.actor, project.beta.actor}
+	policyRequest := openPolicyOnlyProposal(t, project, project.beta)
+
+	output, code := project.runnerOnceArgs(t, []string{"--only-policy-changes"}, listed...)
+	if code != 0 {
+		t.Fatalf("runner once --only-policy-changes exited %d:\n%s", code, output)
+	}
+	assertOperationalContains(t, output, "Runner accepted request "+operationalShortID(policyRequest)+" ")
+	for _, participant := range []runnerActorsParticipant{project.alpha, project.beta} {
+		if strings.Contains(output, runnerAcceptedLine(participant)) {
+			t.Fatalf("policy-only runner executed an ordinary request:\n%s", output)
+		}
+	}
+	project.assertRunnerResult(t, project.alpha, false)
+
+	// Without the flag the ordinary requests run as before.
+	output, code = project.runnerOnceWith(t, listed...)
+	if code != 0 || !strings.Contains(output, runnerAcceptedLine(project.alpha)) {
+		t.Fatalf("runner without --only-policy-changes did not run the ordinary request (exit %d):\n%s", code, output)
+	}
+}

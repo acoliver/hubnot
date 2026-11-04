@@ -35,6 +35,10 @@ type runnerOptions struct {
 	// not to execute, for example one known to exceed its step timeout.
 	// hn has no cancel event, so the request stays unanswered.
 	SkipRequests map[string]bool
+	// OnlyPolicyChanges limits the runner to requests whose proposal changes
+	// nothing outside .hn/, so a policy amendment can be served at once
+	// while another runner holds the machine for a long build.
+	OnlyPolicyChanges bool
 }
 
 // runnerReportedSkips remembers, per request ID, the reason last printed
@@ -97,6 +101,7 @@ func parseRunnerOptions(name string, args []string, watching bool) (runnerOption
 	allowHost := flags.Bool("allow-unsafe-host-execution", false, "permit an unsandboxed host backend")
 	interval := flags.Duration("interval", 30*time.Second, "watch polling interval")
 	skipStaleBase := flags.String("skip-stale-base", "", "skip requests whose proposal base is not this branch's tip on the remote")
+	onlyPolicy := flags.Bool("only-policy-changes", false, "only execute requests whose proposal changes nothing outside .hn/")
 	var skipRequests repeatedStringFlag
 	flags.Var(&skipRequests, "skip-request", "never execute this full run request ID; repeatable")
 	if err := flags.Parse(args); err != nil {
@@ -152,6 +157,7 @@ func parseRunnerOptions(name string, args []string, watching bool) (runnerOption
 		SkipStaleBase: *skipStaleBase,
 		SkipRequests:  skipped,
 	}
+	options.OnlyPolicyChanges = *onlyPolicy
 	if len(actors) > 1 {
 		options.AcceptedActors = append([]string(nil), actors...)
 	}
@@ -224,6 +230,10 @@ func runnerOnceContext(ctx context.Context, options runnerOptions) (bool, error)
 		reason := runnerDeadRequestReason(events, lineage, request, staleTip)
 		if reason == "" && options.SkipRequests[request.ID] {
 			reason = "the runner was started with --skip-request for it"
+		}
+		if reason == "" && options.OnlyPolicyChanges && !runnerPolicyOnlyRequest(events, request) {
+			// Not reported: every other request is passed over on purpose.
+			continue
 		}
 		if reason != "" {
 			if runnerReportedSkips[request.ID] != reason {
@@ -305,6 +315,26 @@ func runnerWatch(options runnerOptions) error {
 		case <-timer.C:
 		}
 	}
+}
+
+// runnerPolicyOnlyRequest reports whether request's proposal changes at
+// least one path and only paths below .hn/. Any failure to tell is false,
+// so a policy-only runner never executes an ordinary request.
+func runnerPolicyOnlyRequest(events []StoredEvent, request *StoredEvent) bool {
+	proposal, err := resolveEvent(events, request.Event.Subject)
+	if err != nil || !isProposalKind(proposal.Event.Kind) {
+		return false
+	}
+	changed, err := changedPathsAt("", proposal.Event.Base, proposal.Event.Head)
+	if err != nil || len(changed) == 0 {
+		return false
+	}
+	for _, path := range changed {
+		if !strings.HasPrefix(path, ".hn/") {
+			return false
+		}
+	}
+	return true
 }
 
 // runnerDeadRequestReason returns why request can no longer produce a usable
