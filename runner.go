@@ -31,6 +31,11 @@ type runnerOptions struct {
 	// be based on: a request whose proposal base is not that branch's tip on
 	// the remote is skipped, since its result can never be used to merge.
 	SkipStaleBase string
+	// DeferBehindPassed, when positive, defers a request while another live
+	// proposal on the same base has a result this runner passed within that
+	// long: that proposal is about to merge and move the base, which would
+	// make this request's result useless.
+	DeferBehindPassed time.Duration
 	// SkipRequests are full run request IDs the operator told this runner
 	// not to execute, for example one known to exceed its step timeout.
 	// hn has no cancel event, so the request stays unanswered.
@@ -100,6 +105,7 @@ func parseRunnerOptions(name string, args []string, watching bool) (runnerOption
 	backendName := flags.String("backend", "sandbox", "execution backend: sandbox or host")
 	allowHost := flags.Bool("allow-unsafe-host-execution", false, "permit an unsandboxed host backend")
 	interval := flags.Duration("interval", 30*time.Second, "watch polling interval")
+	deferBehind := flags.Duration("defer-behind-passed", 0, "defer a request while another proposal on the same base passed within this long and has not merged (0 disables)")
 	skipStaleBase := flags.String("skip-stale-base", "", "skip requests whose proposal base is not this branch's tip on the remote")
 	onlyPolicy := flags.Bool("only-policy-changes", false, "only execute requests whose proposal changes nothing outside .hn/")
 	var skipRequests repeatedStringFlag
@@ -149,13 +155,14 @@ func parseRunnerOptions(name string, args []string, watching bool) (runnerOption
 		return runnerOptions{}, err
 	}
 	options := runnerOptions{
-		Remote:        *remote,
-		Pipeline:      *pipeline,
-		AcceptedActor: actors[0],
-		Backend:       backend,
-		Interval:      *interval,
-		SkipStaleBase: *skipStaleBase,
-		SkipRequests:  skipped,
+		Remote:            *remote,
+		Pipeline:          *pipeline,
+		AcceptedActor:     actors[0],
+		Backend:           backend,
+		Interval:          *interval,
+		SkipStaleBase:     *skipStaleBase,
+		DeferBehindPassed: *deferBehind,
+		SkipRequests:      skipped,
 	}
 	options.OnlyPolicyChanges = *onlyPolicy
 	if len(actors) > 1 {
@@ -228,6 +235,15 @@ func runnerOnceContext(ctx context.Context, options runnerOptions) (bool, error)
 			}
 		}
 		reason := runnerDeadRequestReason(events, lineage, request, staleTip)
+		if reason == "" && options.DeferBehindPassed > 0 {
+			if deferral := runnerDeferBehindPassed(events, lineage, request, identity.Actor, options.DeferBehindPassed, time.Now()); deferral != "" {
+				if runnerReportedSkips[request.ID] != deferral {
+					runnerReportedSkips[request.ID] = deferral
+					fmt.Printf("Runner deferred request %s from %s: %s\n", shortID(request.ID), shortID(request.Event.Actor), deferral)
+				}
+				continue
+			}
+		}
 		if reason == "" && options.SkipRequests[request.ID] {
 			reason = "the runner was started with --skip-request for it"
 		}
@@ -335,6 +351,54 @@ func runnerPolicyOnlyRequest(events []StoredEvent, request *StoredEvent) bool {
 		}
 	}
 	return true
+}
+
+// runnerDeferBehindPassed returns why request should wait, or "" when it
+// should run. It waits while another proposal, outside its lineage and not
+// merged, superseded or closed, has the same signed base and a passed result
+// from this runner (actor) recorded within window: that proposal merges next,
+// moves the base, and leaves this request's result unusable. The wait ends
+// when the other proposal merges (the request then has a stale base) or when
+// window has passed since its result. Anything that cannot be read means
+// run, as with the other skips.
+func runnerDeferBehindPassed(events []StoredEvent, lineage *lineageIndex, request *StoredEvent, actor string, window time.Duration, now time.Time) string {
+	if lineage == nil {
+		return ""
+	}
+	proposal, err := resolveEvent(events, request.Event.Subject)
+	if err != nil || !isProposalKind(proposal.Event.Kind) {
+		return ""
+	}
+	own, err := lineage.state(proposal.ID)
+	if err != nil {
+		return ""
+	}
+	for index := range events {
+		other := &events[index]
+		if other.Event.Kind != "run.request" || other.Event.Pipeline != request.Event.Pipeline || other.Event.Subject == proposal.ID {
+			continue
+		}
+		candidate, err := resolveEvent(events, other.Event.Subject)
+		if err != nil || !isProposalKind(candidate.Event.Kind) || candidate.Event.Base != proposal.Event.Base {
+			continue
+		}
+		state, err := lineage.state(candidate.ID)
+		if err != nil || state.Merged || state.Superseded || state.LineageClosed || state.RootID == own.RootID {
+			continue
+		}
+		for _, result := range currentRunResults(events, other.ID) {
+			if result.Event.Actor != actor || result.Event.Outcome != "passed" {
+				continue
+			}
+			at, err := time.Parse(time.RFC3339Nano, result.Event.Timestamp)
+			if err != nil || now.Sub(at) >= window || now.Before(at.Add(-time.Minute)) {
+				continue
+			}
+			return fmt.Sprintf("proposal %s on the same base passed at %s and merges first; waiting until it merges or until %s",
+				shortID(candidate.ID), at.UTC().Format("15:04Z"), at.Add(window).UTC().Format("15:04Z"))
+		}
+	}
+	return ""
 }
 
 // runnerDeadRequestReason returns why request can no longer produce a usable
