@@ -102,10 +102,13 @@ func cmdSync(args []string) error {
 		result = replicationTransactionResult{Remote: remote}
 		importErr = identificationLostError(remote, lostReason)
 	} else {
-		result, importErr = runReplicationTransaction(selection)
+		result, importErr = runReplicationTransactionWith(selection, true)
 	}
+	unchanged := 0
 	for _, outcome := range result.Outcomes {
-		if outcome.Status == replicationPromoted {
+		if outcome.Status == replicationUnchanged {
+			unchanged++
+		} else if outcome.Status == replicationPromoted {
 			fmt.Printf("Replication %s %s: promoted\n", outcome.Kind, outcome.ID)
 		} else if outcome.Status == replicationNotAdvertised {
 			fmt.Printf("Replication %s %s: not advertised yet\n", outcome.Kind, outcome.ID)
@@ -116,14 +119,19 @@ func cmdSync(args []string) error {
 
 	verifiedActorHeads := make(map[string]string)
 	for _, outcome := range result.Outcomes {
-		if outcome.Kind == replicationActor && outcome.Status == replicationPromoted {
+		// An unchanged actor's tip was verified when it was accepted.
+		if outcome.Kind == replicationActor && (outcome.Status == replicationPromoted || outcome.Status == replicationUnchanged) {
 			verifiedActorHeads[outcome.request.SourceRef] = outcome.request.OID
 		}
 	}
 	publicationErr := publishLocalFacts(remote, verifiedActorHeads)
 	events, collectErr := collectEvents()
 	if collectErr == nil {
-		fmt.Printf("Synchronized %d verified events with %s; promoted %d selections\n", len(events), remote, result.Promoted)
+		suffix := ""
+		if unchanged > 0 {
+			suffix = fmt.Sprintf("; %d unchanged", unchanged)
+		}
+		fmt.Printf("Synchronized %d verified events with %s; promoted %d selections%s\n", len(events), remote, result.Promoted, suffix)
 	}
 	if importErr != nil {
 		if publicationErr != nil {

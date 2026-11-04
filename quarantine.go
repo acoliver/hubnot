@@ -22,6 +22,10 @@ const (
 	replicationRelationshipBad   = "relationship-invalid"
 	replicationPromotable        = "promotable"
 	replicationPromoted          = "promoted"
+	// replicationUnchanged marks a selection whose advertised tip already is
+	// its accepted root: it was verified when it was accepted, and there is
+	// nothing to fetch or verify again.
+	replicationUnchanged = "unchanged"
 	// replicationNotAdvertised marks an exact actor or proposal selector of an
 	// all-trusted selection that the remote does not advertise yet. It is not a
 	// failure: nothing is requested and nothing is promoted.
@@ -75,7 +79,7 @@ type replicationTransactionResult struct {
 
 func (result replicationTransactionResult) hasFailures() bool {
 	for _, outcome := range result.Outcomes {
-		if outcome.Status != replicationPromoted && outcome.Status != replicationNotAdvertised {
+		if outcome.Status != replicationPromoted && outcome.Status != replicationNotAdvertised && outcome.Status != replicationUnchanged {
 			return true
 		}
 	}
@@ -231,6 +235,15 @@ func parseAcceptedProposalRef(ref string) (string, string, bool) {
 }
 
 func runReplicationTransaction(selection ReplicationSelection) (replicationTransactionResult, error) {
+	return runReplicationTransactionWith(selection, false)
+}
+
+// runReplicationTransactionWith runs one replication transaction. With
+// skipUnchanged, a selection whose advertised tip equals its accepted root is
+// reported as unchanged without a fetch or any verification. Shallow
+// recovery never skips, since it exists to refetch objects below an
+// accepted root.
+func runReplicationTransactionWith(selection ReplicationSelection, skipUnchanged bool) (replicationTransactionResult, error) {
 	result := replicationTransactionResult{Remote: selection.Remote}
 	if err := validateReplicationSelection(selection); err != nil {
 		return result, err
@@ -296,6 +309,13 @@ func runReplicationTransaction(selection ReplicationSelection) (replicationTrans
 
 	fetched := make([]replicationRequest, 0, len(requests))
 	for _, request := range requests {
+		if skipUnchanged {
+			accepted, exists, err := refValue(acceptedRefForRequest(selection.Remote, request))
+			if err == nil && exists && accepted == request.OID {
+				result.Outcomes = append(result.Outcomes, ReplicationOutcome{Kind: request.Kind, ID: request.ID, Status: replicationUnchanged, request: request})
+				continue
+			}
+		}
 		if _, err := gitInputWithDirectory(quarantineDir, nil, transportEnv, "fetch", "--no-tags", "--no-write-fetch-head", "--", remoteURL,
 			"+"+request.SourceRef+":"+request.QuarantineRef); err != nil {
 			result.Outcomes = append(result.Outcomes, failedReplicationOutcome(request, replicationStructuralInvalid,
