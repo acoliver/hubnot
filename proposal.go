@@ -16,14 +16,18 @@ func cmdProposal(args []string) error {
 	case "revise":
 		return cmdProposalRevise(args[1:])
 	case "list":
-		if len(args) != 1 {
-			return usageError("usage: hn proposal list")
+		asJSON := len(args) == 2 && args[1] == "--json"
+		if len(args) != 1 && !asJSON {
+			return usageError("usage: hn proposal list [--json]")
 		}
 		if err := prepareShallowVerification(shallowVerificationScope{Operation: "proposal list"}); err != nil {
 			return err
 		}
 		if err := guardShallowEventClosure("proposal list"); err != nil {
 			return err
+		}
+		if asJSON {
+			return cmdProposalListJSON()
 		}
 		return cmdProposalList()
 	case "show":
