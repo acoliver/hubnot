@@ -82,6 +82,9 @@ func cmdProposalRevise(args []string) error {
 	if base == head {
 		return fmt.Errorf("proposal revision base and head resolve to the same commit")
 	}
+	if err := requireHeadDescendsFromBase("proposal revision", base, head); err != nil {
+		return err
+	}
 	if err := guardCandidateCreationDependencies("proposal revision", base, head); err != nil {
 		return err
 	}
@@ -165,6 +168,9 @@ func cmdProposalOpen(args []string) error {
 	}
 	if base == head {
 		return fmt.Errorf("proposal base and head resolve to the same commit")
+	}
+	if err := requireHeadDescendsFromBase("proposal open", base, head); err != nil {
+		return err
 	}
 	if err := guardCandidateCreationDependencies("proposal open", base, head); err != nil {
 		return err
@@ -483,5 +489,22 @@ func cmdReview(args []string) error {
 		return err
 	}
 	fmt.Printf("Recorded %s review %s on proposal %s\n", event.Verdict, shortID(stored.ID), shortID(proposal.ID))
+	return nil
+}
+
+// requireHeadDescendsFromBase refuses a candidate the hub would refuse to
+// publish: once signed, such an event blocks every later event of the actor
+// from replicating until the local chain is rewound.
+func requireHeadDescendsFromBase(operation, base, head string) error {
+	ancestor, missing, err := exactCommitAncestor(base, head)
+	if err != nil {
+		return err
+	}
+	if missing != "" {
+		return fmt.Errorf("%s: cannot verify that head %s descends from base %s; commit %s is missing locally (fetch it first)", operation, shortOID(head), shortOID(base), shortOID(missing))
+	}
+	if !ancestor {
+		return fmt.Errorf("%s: head %s does not descend from base %s; merge or rebase the branch onto the base first", operation, shortOID(head), shortOID(base))
+	}
 	return nil
 }
