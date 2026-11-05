@@ -664,6 +664,22 @@ func loadReplicationAcceptanceState(gitDir string) (map[string]bool, map[string]
 	if err != nil {
 		return nil, nil, err
 	}
+	// The journal is read under the shared lock; a fingerprint of every
+	// file it is built from decides whether the last parse still holds.
+	fingerprint, fingerprintErr := replicationJournalFingerprint(locations)
+	if fingerprintErr == nil {
+		if denied, pending, ok := replicationAcceptanceCacheGet(gitDir, fingerprint); ok {
+			return denied, pending, nil
+		}
+	}
+	denied, pending, err := loadReplicationAcceptanceStateLocked(locations)
+	if err == nil && fingerprintErr == nil {
+		replicationAcceptanceCachePut(gitDir, fingerprint, denied, pending)
+	}
+	return denied, pending, err
+}
+
+func loadReplicationAcceptanceStateLocked(locations []string) (map[string]bool, map[string]replicationTransactionRecord, error) {
 	records, anchors, err := loadCombinedReplicationJournal(locations)
 	if err != nil {
 		return nil, nil, err
