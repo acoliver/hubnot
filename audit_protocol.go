@@ -790,6 +790,9 @@ func selectAuditWorkflow(revision string, events []StoredEvent) (*workflowSelect
 // auditDependencyObjectIDsAt retains the target snapshot, policy path proofs,
 // and source path proofs. Commit parents are deliberately not traversed. Their
 // absence cannot authorize work; current ancestry is checked in the local anchor.
+// auditMetaFiles are the blobs Git's fsck reads from any tree that names them.
+var auditMetaFiles = [2]string{".gitattributes", ".gitmodules"}
+
 func auditDependencyObjectIDsAt(gitdir string, e Event) ([]string, error) {
 	f := e.Audit
 	objects := []string{}
@@ -799,6 +802,25 @@ func auditDependencyObjectIDsAt(gitdir string, e Event) ([]string, error) {
 			return err
 		}
 		objects = append(objects, commit, tree)
+		// Git's fsck refuses a pack whose tree names a .gitattributes or
+		// .gitmodules blob it does not carry, so each tree on the path
+		// brings those blobs along.
+		addMeta := func(tree string) error {
+			listed, err := gitTextAt(gitdir, "ls-tree", tree, "--", auditMetaFiles[0], auditMetaFiles[1])
+			if err != nil {
+				return err
+			}
+			for _, line := range strings.Split(listed, "\n") {
+				fields := strings.Fields(line)
+				if len(fields) >= 3 && (fields[0] == "100644" || fields[0] == "100755") {
+					objects = append(objects, fields[2])
+				}
+			}
+			return nil
+		}
+		if err := addMeta(tree); err != nil {
+			return err
+		}
 		parts := strings.Split(path, "/")
 		for index := range parts {
 			selected := strings.Join(parts[:index+1], "/")
@@ -817,6 +839,11 @@ func auditDependencyObjectIDsAt(gitdir string, e Event) ([]string, error) {
 				return fmt.Errorf("audit dependency parent must be a tree")
 			}
 			objects = append(objects, fields[2])
+			if index < len(parts)-1 {
+				if err := addMeta(fields[2]); err != nil {
+					return err
+				}
+			}
 		}
 		return nil
 	}

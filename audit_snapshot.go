@@ -211,6 +211,12 @@ func auditSnapshotDependencies(s *auditSnapshot, e Event) ([]string, error) {
 					break
 				}
 			}
+			for _, candidate := range entries {
+				if (candidate.name == auditMetaFiles[0] || candidate.name == auditMetaFiles[1]) &&
+					(candidate.mode == "100644" || candidate.mode == "100755") {
+					objects = append(objects, candidate.oid)
+				}
+			}
 			if !found {
 				return fmt.Errorf("audit dependency path missing: %s", strings.Join(parts[:index+1], "/"))
 			}
