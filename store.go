@@ -223,6 +223,12 @@ func loadStoredEventAt(gitDir, commit string) (*StoredEvent, error) {
 	if err != nil {
 		return nil, err
 	}
+	return storedEventFromBlobs(gitDir, commit, payload, signatureEncoded)
+}
+
+// storedEventFromBlobs verifies and completes an event whose event.json and
+// signature blobs were already read.
+func storedEventFromBlobs(gitDir, commit string, payload, signatureEncoded []byte) (*StoredEvent, error) {
 	signature, err := base64.RawStdEncoding.DecodeString(strings.TrimSpace(string(signatureEncoded)))
 	if err != nil {
 		return nil, fmt.Errorf("invalid signature encoding in %s", commit)
@@ -340,12 +346,23 @@ func collectEvents() ([]StoredEvent, error) {
 	if err != nil {
 		return nil, err
 	}
-	events := make([]StoredEvent, 0, len(commits))
+	// Every commit is admitted before any of its objects is read, as before.
+	admitted := make([]string, 0, len(commits))
 	for commit := range commits {
 		if err := acceptance.check(commit); err != nil {
 			return nil, err
 		}
-		stored, err := loadStoredEventAt("", commit)
+		admitted = append(admitted, commit)
+	}
+	blobs := prefetchEventBlobs(admitted)
+	events := make([]StoredEvent, 0, len(admitted))
+	for _, commit := range admitted {
+		var stored *StoredEvent
+		if pair, ok := blobs[commit]; ok {
+			stored, err = storedEventFromBlobs("", commit, pair[0], pair[1])
+		} else {
+			stored, err = loadStoredEventAt("", commit)
+		}
 		if err != nil {
 			return nil, err
 		}

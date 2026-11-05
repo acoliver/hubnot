@@ -100,6 +100,35 @@ func identityKeyringPaths() (identityKeyringLayout, error) {
 // to physical paths so a main checkout, a bare repository and a linked
 // worktree compare reliably.
 func identityGitDirectories() (string, string, error) {
+	key, keyErr := gitDirectoriesCacheKey()
+	if keyErr == nil {
+		if hit, ok := gitDirectoriesCache.Load(key); ok {
+			dirs := hit.([2]string)
+			return dirs[0], dirs[1], nil
+		}
+	}
+	gitDir, commonDir, err := identityGitDirectoriesUncached()
+	if err == nil && keyErr == nil {
+		gitDirectoriesCache.Store(key, [2]string{gitDir, commonDir})
+	}
+	return gitDir, commonDir, err
+}
+
+// The answer depends only on the working directory and the Git routing
+// variables, and successful answers are reused for the life of the process:
+// one command asked about 150 times. A failure is never cached, so a
+// repository created later in the same process is still found.
+var gitDirectoriesCache sync.Map
+
+func gitDirectoriesCacheKey() (string, error) {
+	working, err := os.Getwd()
+	if err != nil {
+		return "", err
+	}
+	return strings.Join([]string{working, os.Getenv("GIT_DIR"), os.Getenv("GIT_COMMON_DIR"), os.Getenv("GIT_WORK_TREE")}, "\x00"), nil
+}
+
+func identityGitDirectoriesUncached() (string, string, error) {
 	output, err := gitOutput("rev-parse", "--absolute-git-dir", "--git-common-dir")
 	if err != nil {
 		return "", "", fmt.Errorf("not inside a Git repository")
