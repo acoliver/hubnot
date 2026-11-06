@@ -44,6 +44,7 @@ func cmdServe(args []string) error {
 	if err := refuseServeAsRoot(); err != nil {
 		return err
 	}
+	restrictServeUmask()
 	if len(args) == 0 {
 		return usageError("usage: hn serve repo|key|git|hook ...")
 	}
