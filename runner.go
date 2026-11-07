@@ -37,6 +37,11 @@ type runnerOptions struct {
 	// long: that proposal is about to merge and move the base, which would
 	// make this request's result useless.
 	DeferBehindPassed time.Duration
+	// FirstActors, when set, names actors whose requests the runner
+	// considers before every other request, oldest first among them. A merge
+	// queue identity uses it, so the gate on its combined commit is not
+	// served after every proposal that asked earlier.
+	FirstActors map[string]bool
 	// SkipRequests are full run request IDs the operator told this runner
 	// not to execute, for example one known to exceed its step timeout.
 	// hn has no cancel event, so the request stays unanswered.
@@ -109,6 +114,8 @@ func parseRunnerOptions(name string, args []string, watching bool) (runnerOption
 	deferBehind := flags.Duration("defer-behind-passed", 0, "defer a request while another proposal on the same base passed within this long and has not merged (0 disables)")
 	skipStaleBase := flags.String("skip-stale-base", "", "skip requests whose proposal base is not this branch's tip on the remote")
 	onlyPolicy := flags.Bool("only-policy-changes", false, "only execute requests whose proposal changes nothing outside .hn/")
+	var firstActors repeatedStringFlag
+	flags.Var(&firstActors, "first-actor", "consider requests signed by this actor before all others; repeatable")
 	var skipRequests repeatedStringFlag
 	flags.Var(&skipRequests, "skip-request", "never execute this full run request ID; repeatable")
 	if err := flags.Parse(args); err != nil {
@@ -138,6 +145,13 @@ func parseRunnerOptions(name string, args []string, watching bool) (runnerOption
 			return runnerOptions{}, usageError(fmt.Sprintf("runner --skip-stale-base %q is not a valid branch name", *skipStaleBase))
 		}
 	}
+	first := make(map[string]bool, len(firstActors))
+	for _, actor := range firstActors {
+		if !validActorID(actor) {
+			return runnerOptions{}, usageError(fmt.Sprintf("runner --first-actor %q is not a full actor fingerprint", actor))
+		}
+		first[strings.ToLower(actor)] = true
+	}
 	skipped := make(map[string]bool, len(skipRequests))
 	for _, id := range skipRequests {
 		if err := requireFullEventID(id); err != nil {
@@ -164,6 +178,7 @@ func parseRunnerOptions(name string, args []string, watching bool) (runnerOption
 		SkipStaleBase:     *skipStaleBase,
 		DeferBehindPassed: *deferBehind,
 		SkipRequests:      skipped,
+		FirstActors:       first,
 	}
 	options.OnlyPolicyChanges = *onlyPolicy
 	if len(actors) > 1 {
@@ -206,7 +221,7 @@ func runnerOnceContext(ctx context.Context, options runnerOptions) (bool, error)
 		staleTip = runnerRemoteBranchTip(options.Remote, options.SkipStaleBase)
 	}
 	var firstError error
-	for _, index := range runnerRequestOrder(events, lineage, options.Pipeline) {
+	for _, index := range runnerRequestOrder(events, lineage, options.Pipeline, options.FirstActors) {
 		request := &events[index]
 		if request.Event.Kind != "run.request" || request.Event.Pipeline != options.Pipeline || !actorListed(request.Event.Actor, accepted) {
 			continue
@@ -359,8 +374,9 @@ func runnerPolicyOnlyRequest(events []StoredEvent, request *StoredEvent) bool {
 // first requested the pipeline, so a proposal revised after its base moved
 // keeps its place instead of going behind every newer request; then
 // everything else in store order. A request whose lineage cannot be read
-// is keyed by its own timestamp, which is the previous order.
-func runnerRequestOrder(events []StoredEvent, lineage *lineageIndex, pipeline string) []int {
+// is keyed by its own timestamp, which is the previous order. Requests
+// signed by an actor in firstActors come before all others.
+func runnerRequestOrder(events []StoredEvent, lineage *lineageIndex, pipeline string, firstActors map[string]bool) []int {
 	root := func(request *StoredEvent) string {
 		if lineage == nil {
 			return request.ID
@@ -375,6 +391,7 @@ func runnerRequestOrder(events []StoredEvent, lineage *lineageIndex, pipeline st
 		index int
 		root  string
 		at    time.Time
+		first bool
 	}
 	var requests []entry
 	var rest []int
@@ -391,12 +408,15 @@ func runnerRequestOrder(events []StoredEvent, lineage *lineageIndex, pipeline st
 		if err != nil {
 			at = time.Unix(1<<40, 0)
 		}
-		requests = append(requests, entry{index: index, root: key, at: at})
+		requests = append(requests, entry{index: index, root: key, at: at, first: firstActors[strings.ToLower(event.Event.Actor)]})
 		if earliest, ok := first[key]; !ok || at.Before(earliest) {
 			first[key] = at
 		}
 	}
 	sort.SliceStable(requests, func(i, j int) bool {
+		if requests[i].first != requests[j].first {
+			return requests[i].first
+		}
 		a, b := first[requests[i].root], first[requests[j].root]
 		if !a.Equal(b) {
 			return a.Before(b)
