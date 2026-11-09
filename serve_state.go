@@ -537,8 +537,12 @@ func checkServeTransientTree(root string, limit int) error {
 					return err
 				}
 			case mode.IsRegular():
-				if mode.Perm() != 0o600 {
-					return serveDefect(path, "file mode %04o, want 0600", mode.Perm())
+				// Owner-only: 0600, or stricter. Git writes the packs and
+				// indexes of a session's temporary repository (the audit
+				// object check) read-only, 0400 under the serve umask, and
+				// another session that starts meanwhile sees them here.
+				if mode.Perm()&^0o600 != 0 {
+					return serveDefect(path, "file mode %04o, want 0600 or stricter", mode.Perm())
 				}
 			default:
 				return serveDefect(path, "is a %s, not a regular file or directory", describeServeFileType(mode))
