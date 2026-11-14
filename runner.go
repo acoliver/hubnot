@@ -84,7 +84,14 @@ func cmdRunner(args []string) error {
 			return err
 		}
 		options.ReportNoPending = true
-		_, err = runnerOnce(options)
+		// Like watch: a stop signal cancels the running step, which kills its
+		// whole process group, instead of leaving the gate running after hn exits.
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		_, err = runnerOnceContext(ctx, options)
+		if err != nil && ctx.Err() != nil {
+			return fmt.Errorf("runner stopped by signal; no result was recorded")
+		}
 		return err
 	case "watch":
 		options, err := parseRunnerOptions("runner watch", args[1:], true)
