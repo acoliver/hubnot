@@ -86,6 +86,24 @@ func (gap *ShallowDependencyGap) Error() string {
 
 func (gap *ShallowDependencyGap) Unwrap() error { return gap.Cause }
 
+// Only a proven code/pipeline absence or mismatch can isolate a proposal.
+// Inspection, recovery-guidance and persistence errors never acquire this type.
+type proposalDependencyRefusal struct {
+	ProposalID string
+	Cause      error
+}
+
+func (refusal *proposalDependencyRefusal) Error() string { return refusal.Cause.Error() }
+func (refusal *proposalDependencyRefusal) Unwrap() error { return refusal.Cause }
+
+func knownProposalDependencyRefusal(dependency exactDependency, cause error) error {
+	if dependency.OwnerKind == replicationProposal && validEventID(dependency.OwnerID) &&
+		(dependency.Kind == shallowProposalCodeRef || dependency.Kind == shallowPipelineDefinition) {
+		return &proposalDependencyRefusal{ProposalID: dependency.OwnerID, Cause: cause}
+	}
+	return cause
+}
+
 type exactDependency struct {
 	Operation     string
 	Kind          ShallowDependencyKind
@@ -1119,7 +1137,7 @@ func requireExactDependency(dependency exactDependency) error {
 	}
 	if probe.Exists {
 		if objectType != "object" && probe.Type != objectType {
-			return fmt.Errorf("required exact %s %s has Git object type %s, want %s", dependency.Kind, dependency.MissingID, probe.Type, objectType)
+			return knownProposalDependencyRefusal(dependency, fmt.Errorf("required exact %s %s has Git object type %s, want %s", dependency.Kind, dependency.MissingID, probe.Type, objectType))
 		}
 		return nil
 	}
@@ -1133,7 +1151,7 @@ func classifyShallowDependency(dependency exactDependency, cause error) error {
 		return fmt.Errorf("inspect shallow boundary: %w", err)
 	}
 	if !shallow {
-		return cause
+		return knownProposalDependencyRefusal(dependency, cause)
 	}
 	remote, ref, recovery, err := shallowRecoveryGuidance(dependency)
 	if err != nil {
@@ -1157,7 +1175,7 @@ func classifyShallowDependency(dependency exactDependency, cause error) error {
 	if err := recordShallowDependencyGap(gap); err != nil {
 		return fmt.Errorf("record shallow dependency gap: %w", err)
 	}
-	return gap
+	return knownProposalDependencyRefusal(dependency, gap)
 }
 
 func memoryShallowDependencyKind(kind string) ShallowDependencyKind {
@@ -1778,7 +1796,7 @@ func guardProposalDependencies(operation string, proposal *StoredEvent, events [
 		}, fmt.Errorf("proposal code ref is unavailable"))
 	}
 	if head != proposal.Event.Head {
-		return fmt.Errorf("proposal code ref does not match the signed proposal")
+		return &proposalDependencyRefusal{ProposalID: proposal.ID, Cause: fmt.Errorf("proposal code ref does not match the signed proposal")}
 	}
 	_ = events // events are intentionally supplied by the caller's fresh accepted projection.
 	return nil
@@ -1964,7 +1982,7 @@ func guardPipelineDefinition(operation, commit, name, ownerID, expectedDefinitio
 		return err
 	}
 	if !exists {
-		return fmt.Errorf("pipeline %q does not exist at commit %s", name, commit)
+		return knownProposalDependencyRefusal(exactDependency{Kind: shallowPipelineDefinition, OwnerKind: replicationProposal, OwnerID: ownerID}, fmt.Errorf("pipeline %q does not exist at commit %s", name, commit))
 	}
 	missingID := pipelineOID
 	if validEventID(expectedDefinition) {

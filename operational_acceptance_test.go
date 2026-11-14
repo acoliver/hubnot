@@ -1186,6 +1186,16 @@ func buildOperationalBinary(t *testing.T) string {
 		t.Fatal(err)
 	}
 	binary := filepath.Join(t.TempDir(), "hn")
+	if supplied := os.Getenv("HN_JIT_FIXTURE_BINARY"); supplied != "" {
+		data, err := os.ReadFile(supplied)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(binary, data, 0700); err != nil {
+			t.Fatal(err)
+		}
+		return binary
+	}
 	build := exec.Command("go", "build", "-o", binary, ".")
 	build.Dir = source
 	if output, err := build.CombinedOutput(); err != nil {

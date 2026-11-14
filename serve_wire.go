@@ -13,11 +13,12 @@ import (
 // advertises serveMarkerRef pointing at a blob holding exactly
 // serveMarkerContent; docs/protocol-v0.md documents both.
 const (
-	serveMarkerRef          = "refs/hn/serve/v1"
-	serveMarkerContent      = "hn-serve/1\n" // 11 bytes
-	servePushOptionAdvance  = "hn-advance"
-	servePushOptionExpected = "hn-expected-tip"
-	servePushOptionRule     = "hn-rule"
+	serveMarkerRef               = "refs/hn/serve/v1"
+	serveMarkerContent           = "hn-serve/1\n" // 11 bytes
+	servePushOptionAdvance       = "hn-advance"
+	servePushOptionExpected      = "hn-expected-tip"
+	servePushOptionRule          = "hn-rule"
+	servePushOptionStrictJITRoot = "hn-strict-jit-root"
 )
 
 // serveMarkerObjectID returns the blob ID of serveMarkerContent in the object

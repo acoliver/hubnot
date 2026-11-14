@@ -68,6 +68,7 @@ func serveZeroOID(oid string) bool {
 // empty when absent.
 type servePushOptions struct {
 	Advance, ExpectedTip, Rule string
+	StrictJITRoot              string
 }
 
 // classifyServeRef returns the class of ref, checking the classes in the

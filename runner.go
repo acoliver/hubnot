@@ -24,10 +24,15 @@ type runnerOptions struct {
 	// AcceptedActors lists every accepted signer when --accept-actor is
 	// repeated. A runner serving several actors executes a request only when
 	// its signer may request the pipeline under the proposal's base policy.
-	AcceptedActors  []string
-	Backend         executionBackend
-	Interval        time.Duration
-	ReportNoPending bool
+	AcceptedActors []string
+	// RequireRequesterPolicy applies base-policy authorization even when
+	// only one request signer is selected, for coordinator-only workers.
+	RequireRequesterPolicy bool
+	StrictTarget           bool
+	OnlyRequest            string
+	Backend                executionBackend
+	Interval               time.Duration
+	ReportNoPending        bool
 	// SkipStaleBase, when set, names the remote branch a proposal must still
 	// be based on: a request whose proposal base is not that branch's tip on
 	// the remote is skipped, since its result can never be used to merge.
@@ -114,6 +119,9 @@ func parseRunnerOptions(name string, args []string, watching bool) (runnerOption
 	deferBehind := flags.Duration("defer-behind-passed", 0, "defer a request while another proposal on the same base passed within this long and has not merged (0 disables)")
 	skipStaleBase := flags.String("skip-stale-base", "", "skip requests whose proposal base is not this branch's tip on the remote")
 	onlyPolicy := flags.Bool("only-policy-changes", false, "only execute requests whose proposal changes nothing outside .hn/")
+	requireRequesterPolicy := flags.Bool("require-requester-policy", false, "require base-policy requester authority even with one accepted signer")
+	strictTarget := flags.Bool("strict-target", false, "fail closed if lineage or remote target is unavailable; requires one policy-fenced signer and exact request")
+	onlyRequest := flags.String("only-request", "", "execute only this full request ID")
 	var firstActors repeatedStringFlag
 	flags.Var(&firstActors, "first-actor", "consider requests signed by this actor before all others; repeatable")
 	var skipRequests repeatedStringFlag
@@ -139,6 +147,14 @@ func parseRunnerOptions(name string, args []string, watching bool) (runnerOption
 			return runnerOptions{}, usageError(fmt.Sprintf("runner --accept-actor %s is listed more than once", actor))
 		}
 		seen[key] = true
+	}
+	if *onlyRequest != "" {
+		if err := requireFullEventID(*onlyRequest); err != nil {
+			return runnerOptions{}, err
+		}
+	}
+	if *strictTarget && (len(actors) != 1 || !*requireRequesterPolicy || *skipStaleBase == "" || *onlyRequest == "") {
+		return runnerOptions{}, fmt.Errorf("strict target requires one policy-fenced signer, target branch and exact request")
 	}
 	if *skipStaleBase != "" {
 		if _, err := gitOutput("check-ref-format", "refs/heads/"+*skipStaleBase); err != nil {
@@ -181,6 +197,9 @@ func parseRunnerOptions(name string, args []string, watching bool) (runnerOption
 		FirstActors:       first,
 	}
 	options.OnlyPolicyChanges = *onlyPolicy
+	options.RequireRequesterPolicy = *requireRequesterPolicy
+	options.StrictTarget = *strictTarget
+	options.OnlyRequest = *onlyRequest
 	if len(actors) > 1 {
 		options.AcceptedActors = append([]string(nil), actors...)
 	}
@@ -220,9 +239,15 @@ func runnerOnceContext(ctx context.Context, options runnerOptions) (bool, error)
 	if options.SkipStaleBase != "" {
 		staleTip = runnerRemoteBranchTip(options.Remote, options.SkipStaleBase)
 	}
+	if options.StrictTarget && (lineageErr != nil || lineage == nil || staleTip == "") {
+		return false, fmt.Errorf("strict target: lineage or remote branch unavailable")
+	}
 	var firstError error
 	for _, index := range runnerRequestOrder(events, lineage, options.Pipeline, options.FirstActors) {
 		request := &events[index]
+		if options.OnlyRequest != "" && request.ID != options.OnlyRequest {
+			continue
+		}
 		if request.Event.Kind != "run.request" || request.Event.Pipeline != options.Pipeline || !actorListed(request.Event.Actor, accepted) {
 			continue
 		}
@@ -236,7 +261,7 @@ func runnerOnceContext(ctx context.Context, options runnerOptions) (bool, error)
 		if alreadyRan {
 			continue
 		}
-		if len(accepted) > 1 {
+		if len(accepted) > 1 || options.RequireRequesterPolicy {
 			counts, err := runRequestCounts(events, request)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "hn runner: skipped %s: %v\n", shortID(request.ID), err)
@@ -273,6 +298,19 @@ func runnerOnceContext(ctx context.Context, options runnerOptions) (bool, error)
 				fmt.Printf("Runner skipped request %s from %s: %s\n", shortID(request.ID), shortID(request.Event.Actor), reason)
 			}
 			continue
+		}
+		if options.StrictTarget {
+			proposal, err := resolveEvent(events, request.Event.Subject)
+			if err != nil {
+				return false, err
+			}
+			policy, _, _, err := loadPolicy(proposal.Event.Base)
+			if err != nil {
+				return false, err
+			}
+			if !actorListed(identity.Actor, policy.Pipelines[options.Pipeline].TrustedRunners) {
+				return false, fmt.Errorf("strict target: executing identity is not a trusted pipeline runner")
+			}
 		}
 		fmt.Printf("Runner accepted request %s from %s for pipeline %s\n", shortID(request.ID), shortID(request.Event.Actor), oneLine(request.Event.Pipeline))
 		stored, err := executeRunRequest(ctx, events, request, identity, options.Backend, false)

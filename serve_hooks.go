@@ -46,9 +46,9 @@ const (
 	serveHookSpillPrefix     = ".hn-hook-refs-"
 
 	// Only hn-advance, hn-expected-tip and hn-rule exist, each at most once.
-	servePushOptionLimit = 3
+	servePushOptionLimit = 4
 
-	servePushOptionSentence = "push options other than hn-advance, hn-expected-tip and hn-rule are not supported."
+	servePushOptionSentence = "push options other than hn-advance, hn-expected-tip, hn-rule and hn-strict-jit-root are not supported."
 )
 
 // serveHook is one hook invocation. cmdServeHook fills it from the
@@ -702,6 +702,15 @@ func parseServePushOptions(environment []string, oidLength int) (servePushOption
 				return options, fmt.Errorf("%s value %q is not a full commit ID", option, argument)
 			}
 			options.ExpectedTip = argument
+		case servePushOptionStrictJITRoot:
+			if options.StrictJITRoot != "" {
+				return options, fmt.Errorf("%s appears more than once", option)
+			}
+			digest, ok := strings.CutPrefix(argument, "sha256:")
+			if !ok || !serveLowerHex64(digest) {
+				return options, fmt.Errorf("strict JIT root must be a canonical full event ID")
+			}
+			options.StrictJITRoot = argument
 		case servePushOptionRule:
 			if options.Rule != "" {
 				return options, fmt.Errorf("%s appears more than once", option)
@@ -716,6 +725,9 @@ func parseServePushOptions(environment []string, oidLength int) (servePushOption
 	}
 	if options.Rule != "" && options.Advance == "" {
 		return options, fmt.Errorf("%s requires %s", servePushOptionRule, servePushOptionAdvance)
+	}
+	if options.StrictJITRoot != "" && (options.Advance == "" || options.ExpectedTip == "" || options.Rule == "") {
+		return options, fmt.Errorf("strict JIT root requires hn-advance, hn-expected-tip and hn-rule")
 	}
 	return options, nil
 }
