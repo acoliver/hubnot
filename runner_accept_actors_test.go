@@ -32,6 +32,11 @@ type runnerActorsProject struct {
 // does not list each open a proposal, request test on it and publish both.
 func newRunnerActorsProject(t *testing.T) runnerActorsProject {
 	t.Helper()
+	return newRunnerActorsProjectWithPipeline(t, writeOperationalPipeline)
+}
+
+func newRunnerActorsProjectWithPipeline(t *testing.T, writePipeline func(*testing.T, string)) runnerActorsProject {
+	t.Helper()
 	binary := buildOperationalBinary(t)
 	root := t.TempDir()
 	remote := filepath.Join(root, "project.git")
@@ -62,7 +67,7 @@ func newRunnerActorsProject(t *testing.T) runnerActorsProject {
 	project.runnerActor = readOperationalIdentity(t, binary, project.runner).Actor
 
 	writeRunnerActorsPolicy(t, maintainer, maintainerActor, project.runnerActor, []string{project.alpha.actor, project.beta.actor})
-	writeOperationalPipeline(t, maintainer)
+	writePipeline(t, maintainer)
 	runOperationalGit(t, maintainer, "add", ".hn")
 	runOperationalGit(t, maintainer, "commit", "-q", "-m", "policy with pipeline requesters")
 	runOperationalGit(t, maintainer, "push", "-q", "origin", "main")
