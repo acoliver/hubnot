@@ -107,7 +107,7 @@ func (d *selectedDriver) config() string {
 }
 func (d *selectedDriver) step() string {
 	d.t.Helper()
-	queue, err := filepath.Abs("../integration/merge-queue.py")
+	queue, err := filepath.Abs("integration/merge-queue.py")
 	if err != nil {
 		d.t.Fatal(err)
 	}
@@ -130,7 +130,7 @@ func (d *selectedDriver) land(who, pid, head string) string {
 	g := d.g
 	g.git(who, "branch", "waiting-topic", head)
 	g.git(who, "checkout", "-q", "main")
-	land, err := filepath.Abs("../integration/land.sh")
+	land, err := filepath.Abs("integration/land.sh")
 	if err != nil {
 		d.t.Fatal(err)
 	}
@@ -152,7 +152,7 @@ func (d *selectedDriver) author(who, pid string) string {
 }
 func (d *selectedDriver) worker() string {
 	d.t.Helper()
-	script, err := filepath.Abs("../integration/runner-loop.sh")
+	script, err := filepath.Abs("integration/runner-loop.sh")
 	if err != nil {
 		d.t.Fatal(err)
 	}

@@ -271,7 +271,7 @@ func (c *vrControl) exactBlocked(b, a map[string]any, root string) {
 	c.save("exact-blocked-binding", map[string]any{"expected": expected, "actual": blocked, "previous_selection": selection, "prepared": prepared})
 }
 func (c *vrControl) worker() (string, int) {
-	script, _ := filepath.Abs("../integration/runner-loop.sh")
+	script, _ := filepath.Abs("integration/runner-loop.sh")
 	client, _ := filepath.Abs("selected_author.py")
 	o, e, rc := c.run("worker", "U", "env", "HUBNOT_STRICT_JIT_CONFIG="+c.d.config(), "HUBNOT_STRICT_JIT_CLIENT="+client, "RD_GATE_STATE="+filepath.Join(c.g.clients["U"].Home, "owned-gate"), "RD_STRICT_JIT_ONCE=1", "RD_STRICT_JIT_BACKEND=host", "RD_STRICT_JIT_ALLOW_HOST=1", "bash", script, "1")
 	return o + e, rc
@@ -289,7 +289,7 @@ func (c *vrControl) preserve() {
 }
 
 func (c *vrControl) queueWith(config string) (string, int) {
-	queue, _ := filepath.Abs("../integration/merge-queue.py")
+	queue, _ := filepath.Abs("integration/merge-queue.py")
 	client, _ := filepath.Abs("selected_author.py")
 	o, e, rc := c.run("coordinator", "R", "python3", queue, "--clone", c.g.work["R"], "--once", "--strict-jit-config", config, "--strict-jit-client", client)
 	return o + e, rc

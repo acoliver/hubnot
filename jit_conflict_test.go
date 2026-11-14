@@ -24,7 +24,7 @@ func TestSelectedAuthorPreparationConflictReportsAttention(t *testing.T) {
 	g.git("A", "remote", "add", "hub", g.git("A", "remote", "get-url", "origin"))
 	g.git("A", "branch", "conflicting-topic", a.Head)
 	g.git("A", "checkout", "-q", "main")
-	land, err := filepath.Abs("../integration/land.sh")
+	land, err := filepath.Abs("integration/land.sh")
 	if err != nil {
 		t.Fatal(err)
 	}

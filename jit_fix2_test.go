@@ -205,7 +205,7 @@ func TestFix2QueueNonOnceErrorVisible(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "wrong-owner.json")
 	data, _ = json.Marshal(config)
 	os.WriteFile(path, data, 0600)
-	queue, _ := filepath.Abs("../integration/merge-queue.py")
+	queue, _ := filepath.Abs("integration/merge-queue.py")
 	client, _ := filepath.Abs("selected_author.py")
 	out, rc, err := g.advanceExec("R", nil, "python3", queue, "--clone", g.work["R"], "--strict-jit-config", path, "--strict-jit-client", client)
 	if err != nil || rc == 0 {
