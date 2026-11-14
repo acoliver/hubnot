@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"io"
+	"os/exec"
 	"strconv"
 	"strings"
 )
@@ -12,6 +13,74 @@ import (
 // commit whose blobs do not read back as exactly two blobs, are left to the
 // per-event path, which reports the error it always did.
 const maxPrefetchedEventBlob = 1 << 20
+
+// Quarantine prefetch is an operation-local accelerator, never an acceptance
+// cache. Bound requests as well as decoded bytes; larger objects and any batch
+// failure use the ordinary loader, preserving its validation and diagnostics.
+const quarantinePrefetchCommits = 64
+const quarantinePrefetchBytes = 4 << 20
+
+func prefetchEventBlobsAt(gitDir string, commits []string) map[string][2][]byte {
+	if gitDir == "" || len(commits) == 0 || len(commits) > quarantinePrefetchCommits {
+		return nil
+	}
+	for _, commit := range commits {
+		if !validFullGitObjectID(commit) {
+			return nil
+		}
+	}
+	cmd := exec.Command("git", "--git-dir="+gitDir, "cat-file", "--batch")
+	cmd.Stderr = &issueReadStderr{}
+	input, err := cmd.StdinPipe()
+	if err != nil {
+		return nil
+	}
+	defer input.Close()
+	output, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil
+	}
+	if err := cmd.Start(); err != nil {
+		return nil
+	}
+	finished := false
+	defer func() {
+		if !finished {
+			_ = cmd.Process.Kill()
+			_ = cmd.Wait()
+		}
+	}()
+	reader := bufio.NewReaderSize(output, 4096)
+	limits := issueReadLimits{object: maxPrefetchedEventBlob, total: quarantinePrefetchBytes}
+	used := int64(0)
+	result := make(map[string][2][]byte, len(commits))
+	for _, commit := range commits {
+		var pair [2][]byte
+		for index, name := range []string{"event.json", "signature"} {
+			if _, err := io.WriteString(input, commit+":"+name+"\n"); err != nil {
+				return nil
+			}
+			blob, err := readIssueBatchTyped(reader, "blob", -1, limits, &used)
+			if err != nil {
+				return nil
+			}
+			pair[index] = blob
+		}
+		result[commit] = pair
+	}
+	if err := input.Close(); err != nil {
+		return nil
+	}
+	if _, err := reader.ReadByte(); err != io.EOF {
+		return nil
+	}
+	err = cmd.Wait()
+	finished = true
+	if err != nil {
+		return nil
+	}
+	return result
+}
 
 // prefetchEventBlobs reads event.json and signature of every commit with
 // one git cat-file --batch instead of two git processes per event. It is

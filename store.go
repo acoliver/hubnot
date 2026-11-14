@@ -293,10 +293,16 @@ func loadActorEventsAt(gitDir, head string) ([]StoredEvent, error) {
 	}
 	commits := strings.Fields(chain)
 	events := make([]StoredEvent, 0, len(commits))
-	for _, commit := range commits {
+	var blobs map[string][2][]byte
+	for index, commit := range commits {
+		if gitDir != "" && index%quarantinePrefetchCommits == 0 {
+			blobs = prefetchEventBlobsAt(gitDir, commits[index:min(index+quarantinePrefetchCommits, len(commits))])
+		}
 		var stored *StoredEvent
 		if gitDir == "" {
 			stored, err = loadStoredEvent(commit)
+		} else if pair, ok := blobs[commit]; ok {
+			stored, err = storedEventFromBlobs(gitDir, commit, pair[0], pair[1])
 		} else {
 			stored, err = loadStoredEventAt(gitDir, commit)
 		}
