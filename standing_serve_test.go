@@ -37,6 +37,8 @@ func TestStandingServeWireParsesRuleOption(t *testing.T) {
 		options []string
 		want    servePushOptions
 	}{
+		{"all four strict options", []string{standingServeWireAdvance, standingServeWireTip, "hn-rule=ordinary", "hn-strict-jit-root=" + advance},
+			servePushOptions{Advance: advance, ExpectedTip: tip, Rule: "ordinary", StrictJITRoot: advance}},
 		{"all three options", []string{standingServeWireAdvance, standingServeWireTip, "hn-rule=ordinary"},
 			servePushOptions{Advance: advance, ExpectedTip: tip, Rule: "ordinary"}},
 		{"rule first", []string{"hn-rule=ordinary", standingServeWireTip, standingServeWireAdvance},
@@ -81,7 +83,9 @@ func TestStandingServeWireRefusesRuleOption(t *testing.T) {
 		{"bare rule", []string{standingServeWireAdvance, "hn-rule"}, `push option "hn-rule" has no value`},
 		{"rule without advance", []string{"hn-rule=ordinary"}, "hn-rule requires hn-advance"},
 		{"rule and tip without advance", []string{standingServeWireTip, "hn-rule=ordinary"}, "hn-rule requires hn-advance"},
-		{"four options", []string{standingServeWireAdvance, standingServeWireTip, "hn-rule=ordinary", "hn-rule=other"}, "4 push options; at most 3 are supported"},
+		{"four options duplicate rule", []string{standingServeWireAdvance, standingServeWireTip, "hn-rule=ordinary", "hn-rule=other"}, "hn-rule appears more than once"},
+		{"five options", []string{standingServeWireAdvance, standingServeWireTip, "hn-rule=ordinary", "hn-strict-jit-root=sha256:" + strings.Repeat("a", 64), "foo=bar"}, "5 push options; at most 4 are supported"},
+		{"four options unknown", []string{standingServeWireAdvance, standingServeWireTip, "hn-rule=ordinary", "foo=bar"}, `push option "foo" is not supported`},
 		{"rule with an unknown option", []string{standingServeWireAdvance, "hn-rule=ordinary", "foo=bar"}, `push option "foo" is not supported`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -101,14 +105,14 @@ func TestStandingServeWireRefusesRuleOption(t *testing.T) {
 
 func TestStandingServeWireSentenceNamesEveryOption(t *testing.T) {
 	// Assert
-	if servePushOptionLimit != 3 {
-		t.Fatalf("servePushOptionLimit = %d, want 3", servePushOptionLimit)
+	if servePushOptionLimit != 4 {
+		t.Fatalf("servePushOptionLimit = %d, want 4", servePushOptionLimit)
 	}
-	want := "push options other than hn-advance, hn-expected-tip and hn-rule are not supported."
+	want := "push options other than hn-advance, hn-expected-tip, hn-rule and hn-strict-jit-root are not supported."
 	if servePushOptionSentence != want {
 		t.Fatalf("servePushOptionSentence = %q, want %q", servePushOptionSentence, want)
 	}
-	for _, option := range []string{servePushOptionAdvance, servePushOptionExpected, servePushOptionRule} {
+	for _, option := range []string{servePushOptionAdvance, servePushOptionExpected, servePushOptionRule, servePushOptionStrictJITRoot} {
 		if !strings.Contains(servePushOptionSentence, option) {
 			t.Errorf("sentence does not name %s", option)
 		}

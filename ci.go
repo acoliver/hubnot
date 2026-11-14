@@ -192,8 +192,16 @@ func cmdRun(args []string) error {
 }
 
 func cmdRunRequest(args []string) error {
-	if len(args) != 2 {
-		return usageError("usage: hn run request PROPOSAL PIPELINE")
+	if len(args) < 2 {
+		return usageError("usage: hn run request PROPOSAL PIPELINE [--reuse]")
+	}
+	flags := quietFlags("run request")
+	reuse := flags.Bool("reuse", false, "reuse this identity's latest exact request, including a failed request")
+	if err := flags.Parse(args[2:]); err != nil {
+		return err
+	}
+	if flags.NArg() != 0 {
+		return usageError("usage: hn run request PROPOSAL PIPELINE [--reuse]")
 	}
 	if err := requireFullEventID(args[0]); err != nil {
 		return err
@@ -235,6 +243,24 @@ func cmdRunRequest(args []string) error {
 	if err != nil {
 		return err
 	}
+	if *reuse {
+		var existing *StoredEvent
+		for index := range events {
+			request := &events[index]
+			e := request.Event
+			if e.Kind == "run.request" && e.Actor == identity.Actor && e.Subject == proposal.ID &&
+				e.Commit == proposal.Event.Head && e.Pipeline == args[1] && e.Definition == definition &&
+				(existing == nil || e.Sequence > existing.Event.Sequence) {
+				existing = request
+			}
+		}
+		if existing != nil {
+			// Results, including failures, never authorize an implicit new attempt.
+			fmt.Printf("Reused pipeline %s as run %s\n", oneLine(args[1]), existing.ID)
+			fmt.Printf("Commit: %s  Definition: %s\n", shortOID(existing.Event.Commit), shortID(existing.Event.Definition))
+			return nil
+		}
+	}
 	event, err := nextEvent(identity, "run.request")
 	if err != nil {
 		return err
@@ -247,7 +273,11 @@ func cmdRunRequest(args []string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Printf("Requested pipeline %s as run %s\n", oneLine(event.Pipeline), shortID(stored.ID))
+	requestID := shortID(stored.ID)
+	if *reuse {
+		requestID = stored.ID
+	}
+	fmt.Printf("Requested pipeline %s as run %s\n", oneLine(event.Pipeline), requestID)
 	fmt.Printf("Commit: %s  Definition: %s\n", shortOID(event.Commit), shortID(event.Definition))
 	return nil
 }
@@ -258,10 +288,10 @@ func requireProposalCode(proposal *StoredEvent) error {
 		return err
 	}
 	if !exists {
-		return fmt.Errorf("proposal code is unavailable; sync before requesting or executing a run")
+		return &proposalDependencyRefusal{ProposalID: proposal.ID, Cause: fmt.Errorf("proposal code is unavailable; sync before requesting or executing a run")}
 	}
 	if head != proposal.Event.Head {
-		return fmt.Errorf("proposal code ref does not match the signed proposal")
+		return &proposalDependencyRefusal{ProposalID: proposal.ID, Cause: fmt.Errorf("proposal code ref does not match the signed proposal")}
 	}
 	return nil
 }

@@ -143,6 +143,17 @@ func evaluateServeProtectedUpdate(ctx *serveVerdictContext, update serveRefUpdat
 	events := make([]StoredEvent, 0, len(hosted)+len(ctx.PushFacts))
 	events = append(append(events, hosted...), ctx.PushFacts...)
 
+	// receivePack holds RepoLock through this fresh hosted-fact check and
+	// Git's actual expected-old ref update. Normal actor pushes share it.
+	if options.StrictJITRoot != "" {
+		if err := checkStrictJITLineage(events, options.Advance, options.StrictJITRoot); err != nil {
+			return serveProtectedReject(serveProtectedStepBlocked, options.Advance, nil, &serveRejection{
+				Code: serveReasonProtectedBlocked, IDs: []string{options.Advance, options.StrictJITRoot},
+				Sentence: "strict JIT advancement refused: " + serveDiagnostic(err, ctx.GitDir),
+			})
+		}
+	}
+
 	// Step 6: the candidates whose signed head is H.
 	candidates := serveProtectedCandidates(events, head, options.Advance)
 	ids := make([]string, len(candidates))

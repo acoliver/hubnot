@@ -118,7 +118,11 @@ func serveAdvanceInterrupt(step string) error {
 // is the advanced branch, so it takes no --branch.
 func serveAdvanceRerun(proposalID, remote, branchRef string, binding serveAdvanceBinding) string {
 	if binding.Rule != "" {
-		return "hn automerge " + proposalID + " --rule " + binding.Rule + " --execute --remote " + remote
+		command := "hn automerge " + proposalID + " --rule " + binding.Rule + " --execute --remote " + remote
+		if binding.StrictJITRoot != "" {
+			command += " --strict-jit-root " + binding.StrictJITRoot
+		}
+		return command
 	}
 	command := "hn merge " + proposalID + " --remote " + remote
 	if branchRef != "refs/heads/"+serveAdvanceDefaultBranch {
@@ -136,6 +140,7 @@ type serveAdvanceBinding struct {
 	ExpectedActor string
 	ExpectedTip   string
 	Rule          string
+	StrictJITRoot string
 }
 
 func cmdMergeRemote(proposalID, remote, branchRef string) error {
@@ -228,11 +233,17 @@ func mergeRemoteBound(proposalID, remote, branchRef string, binding serveAdvance
 	if binding.Rule != "" {
 		push = append(push, "--push-option="+servePushOptionRule+"="+binding.Rule)
 	}
+	if binding.StrictJITRoot != "" {
+		push = append(push, "--push-option="+servePushOptionStrictJITRoot+"="+binding.StrictJITRoot)
+	}
 	stderr, err := serveAdvanceGit(append(push, remote, "+"+head+":"+branchRef)...)
 	if err != nil {
 		if rejections, lines := extractServeRejections(stderr); len(lines) > 0 {
 			for _, line := range lines {
 				fmt.Fprintln(os.Stderr, oneLine(line))
+			}
+			if binding.StrictJITRoot != "" && serveAdvanceRuleUnsupported(rejections, binding.Rule) {
+				return serveAdvanceStepError(6, "request advancement", fmt.Errorf("%s does not support strict JIT root advancement (%s); upgrade hn on the server; rerun %s", remote, servePushOptionStrictJITRoot, serveAdvanceRerun(proposal.ID, remote, branchRef, binding)))
 			}
 			if serveAdvanceRuleUnsupported(rejections, binding.Rule) {
 				return serveAdvanceStepError(6, "request advancement", fmt.Errorf("%s does not support rule advancement (%s); upgrade hn on the server", remote, servePushOptionRule))
@@ -294,6 +305,14 @@ func serveAdvanceValidate(proposalID, branchRef string, binding serveAdvanceBind
 	events, err := collectEvents()
 	if err != nil {
 		return nil, nil, nil, nil, err
+	}
+	if binding.StrictJITRoot != "" {
+		if binding.Rule == "" || binding.ExpectedTip == "" {
+			return nil, nil, nil, nil, fmt.Errorf("incomplete strict JIT advancement binding")
+		}
+		if err := checkStrictJITLineage(events, proposalID, binding.StrictJITRoot); err != nil {
+			return nil, nil, nil, nil, err
+		}
 	}
 	proposal, err := resolveEventDependency("proposal advancement", proposalID, shallowCandidateEvent, events)
 	if err != nil {

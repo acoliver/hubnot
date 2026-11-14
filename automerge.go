@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -58,15 +59,39 @@ func cmdAutomerge(args []string) error {
 	rule := flags.String("rule", "", "explicit automerge rule name")
 	execute := flags.Bool("execute", false, "execute a locally eligible native merge")
 	remote := flags.String("remote", "", "advance the rule's target branch on this hn serve remote")
+	strictRoot := flags.String("strict-jit-root", "", "require this original lineage to remain unvetoed at hosted advancement")
 	if err := flags.Parse(args[1:]); err != nil {
 		return err
 	}
 	if flags.NArg() != 0 || *rule == "" || (*remote != "" && !*execute) {
 		return usageError(automergeUsage)
 	}
+	strictSet := false
+	flags.Visit(func(f *flag.Flag) {
+		if f.Name == "strict-jit-root" {
+			strictSet = true
+		}
+	})
+	if strictSet {
+		if err := requireFullEventID(*strictRoot); err != nil {
+			return err
+		}
+		if !*execute || *remote == "" {
+			return fmt.Errorf("strict JIT advancement requires --execute and --remote")
+		}
+	}
 	inspection, err := inspectAutomerge(args[0], *rule)
 	if err != nil {
 		return err
+	}
+	if strictSet {
+		events, err := collectEvents()
+		if err != nil {
+			return err
+		}
+		if _, _, err := strictJITRootIdentity(events, inspection.Proposal.ID, *strictRoot); err != nil {
+			return err
+		}
 	}
 	printAutomergeInspection(inspection)
 	// A remote rerun after the rule merge fact was recorded takes the
@@ -76,6 +101,15 @@ func cmdAutomerge(args []string) error {
 		if fact := automergePublicationOnlyFact(inspection, *rule, *remote); fact != nil {
 			fmt.Printf("Publication-only rerun: rule merge event %s is already recorded\n", shortID(fact.ID))
 			return serveAdvancePublishOnly(*remote, "refs/heads/"+inspection.Rule.TargetBranch, fact, inspection.Proposal)
+		}
+	}
+	if strictSet {
+		events, err := collectEvents()
+		if err != nil {
+			return err
+		}
+		if err := checkStrictJITLineage(events, inspection.Proposal.ID, *strictRoot); err != nil {
+			return err
 		}
 	}
 	if err := inspection.eligible(); err != nil {
@@ -98,7 +132,7 @@ func cmdAutomerge(args []string) error {
 	// upstream is or may be an hn serve remote is refused before any local
 	// merge commit or merge fact exists.
 	if *remote != "" {
-		return automergeRemote(inspection, *rule, *remote, identity.Actor)
+		return automergeRemoteStrict(inspection, *rule, *remote, identity.Actor, *strictRoot)
 	}
 	if upstream, err := gitText("config", "--get", "branch."+inspection.Rule.TargetBranch+".remote"); err == nil && upstream != "" && upstream != "." {
 		identified, reason := serveRemoteIdentifies(upstream)
@@ -877,6 +911,10 @@ func automergeIgnoredPathCollision(changed []string, p string) bool {
 // maintainers no rule is sent, and the server requires maintainer
 // acceptance as for hn merge --remote.
 func automergeRemote(first *automergeInspection, rule, remote, actor string) error {
+	return automergeRemoteStrict(first, rule, remote, actor, "")
+}
+
+func automergeRemoteStrict(first *automergeInspection, rule, remote, actor, strictRoot string) error {
 	if !validReplicationRemote(remote) {
 		return fmt.Errorf("invalid remote name %q", remote)
 	}
@@ -918,14 +956,14 @@ func automergeRemote(first *automergeInspection, rule, remote, actor string) err
 	}
 	if found && hosted != inspection.Current {
 		if repaired, ok := automergeRemoteRepairTip(inspection, remote, branchRef); ok {
-			return mergeRemoteBound(inspection.Proposal.ID, remote, branchRef, serveAdvanceBinding{ExpectedActor: actor, ExpectedTip: repaired, Rule: rule})
+			return mergeRemoteBound(inspection.Proposal.ID, remote, branchRef, serveAdvanceBinding{ExpectedActor: actor, ExpectedTip: repaired, Rule: rule, StrictJITRoot: strictRoot})
 		}
 	}
 	if !found || hosted != inspection.Current {
 		return fmt.Errorf("local %s is at %s but %s has %s; update the local branch to the hosted tip and rerun",
 			inspection.Rule.TargetBranch, shortOID(inspection.Current), remote, shortOID(hosted))
 	}
-	binding := serveAdvanceBinding{ExpectedActor: actor, ExpectedTip: hosted}
+	binding := serveAdvanceBinding{ExpectedActor: actor, ExpectedTip: hosted, StrictJITRoot: strictRoot}
 	if inspection.Rule.Acceptance.Standing() {
 		binding.Rule = rule
 	}
