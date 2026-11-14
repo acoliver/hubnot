@@ -191,23 +191,47 @@ func gitObjectsPresentAt(gitDir string, objectIDs []string) (map[string]bool, er
 	cmd := exec.Command("git", args...)
 	cmd.Env = append(os.Environ(), "GIT_NO_REPLACE_OBJECTS=1", "GIT_NO_LAZY_FETCH=1", "LC_ALL=C")
 	cmd.Stdin = strings.NewReader(strings.Join(objectIDs, "\n") + "\n")
-	var stdout bytes.Buffer
+	if len(objectIDs) > int(^uint(0)>>1)/128 {
+		return nil, fmt.Errorf("Git object probe output bound exceeds addressable memory")
+	}
+	stdout := limitedPolicyBuffer{limit: 128 * len(objectIDs)}
 	stderr := limitedPolicyBuffer{limit: 16 << 10}
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
-	if err := cmd.Run(); err != nil {
-		// Git 2.43 can abort on an absent promised object even with lazy
-		// fetching disabled. Enumerate physical storage instead of looking up
-		// missing names; a successful complete inventory proves absence.
-		return gitStoredObjectsPresentAt(gitDir, objectIDs)
+	processErr := cmd.Run()
+	if stdout.exceeded || stderr.exceeded {
+		return nil, fmt.Errorf("Git object probe output exceeds bound")
 	}
+	legacyMissing := false
 	for _, line := range strings.Split(strings.TrimSpace(stderr.String()), "\n") {
-		// A missing unpromised object can produce this warning with success;
-		// corruption diagnostics must still refuse the probe.
-		if line != "" && line != "warning: lazy fetching disabled; some objects may not be available" {
+		if line == "" || line == "warning: lazy fetching disabled; some objects may not be available" {
+			continue
+		}
+		// Older Git can abort before replying to an absent promised object.
+		// Only that diagnostic permits a physical-inventory fallback.
+		knownMissing := false
+		if processErr != nil && stdout.Len() == 0 {
+			for _, id := range objectIDs {
+				if line == "fatal: could not fetch "+id+" from promisor remote" {
+					knownMissing = true
+					legacyMissing = true
+					break
+				}
+			}
+		}
+		if !knownMissing {
 			return nil, fmt.Errorf("probe Git objects: %s", line)
 		}
 	}
-	lines := strings.Split(strings.TrimRight(stdout.String(), "\n"), "\n")
+	if processErr != nil {
+		if legacyMissing {
+			return gitStoredObjectsPresentAt(gitDir, objectIDs)
+		}
+		return nil, fmt.Errorf("probe Git objects: %w", processErr)
+	}
+	if !strings.HasSuffix(stdout.String(), "\n") {
+		return nil, fmt.Errorf("Git returned truncated object probes")
+	}
+	lines := strings.Split(strings.TrimSuffix(stdout.String(), "\n"), "\n")
 	if len(lines) != len(objectIDs) {
 		return nil, fmt.Errorf("Git returned %d object probes for %d objects", len(lines), len(objectIDs))
 	}
@@ -218,6 +242,13 @@ func gitObjectsPresentAt(gitDir string, objectIDs []string) (map[string]bool, er
 			return nil, fmt.Errorf("Git returned invalid object probe for %s", safeDiagnostic(objectIDs[i]))
 		}
 		present[objectIDs[i]] = fields[1] != "missing"
+	}
+	for _, id := range objectIDs {
+		if !present[id] {
+			// Newer Git returns successful missing replies for promised objects.
+			// Keep the same complete physical proof of absence on either version.
+			return gitStoredObjectsPresentAt(gitDir, objectIDs)
+		}
 	}
 	return present, nil
 }
