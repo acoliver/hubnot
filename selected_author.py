@@ -53,14 +53,19 @@ class Session:
         self.actor = self.query("identity", "show", "--json")["actor"]
         self.selection = None
         self.comments = []
+        # Worker locks handed to the runner, so they stay held while it or
+        # its gate is alive even if this process is killed.
+        self.held_locks = ()
 
     def run(self, *args, cwd=None):
         trace = os.environ.get("HN_JIT_TRACE") == "1"
         start = time.monotonic()
         if trace:
             print("jit command start: " + repr(args[:3]), file=sys.stderr, flush=True)
+        executing = len(args) > 2 and args[1:3] == ("runner", "once")
         p = subprocess.run(args, cwd=cwd, capture_output=True, text=True,
-                           timeout=None if len(args) > 2 and args[1:3] == ("runner", "once") else 90)
+                           timeout=None if executing else 90,
+                           pass_fds=self.held_locks if executing else ())
         if trace:
             print(f"jit command end: {args[:3]!r} rc={p.returncode} elapsed={time.monotonic()-start:.3f}", file=sys.stderr, flush=True)
         if p.returncode:
@@ -457,6 +462,9 @@ def main():
                 with (host / "gate.lock").open("a+") as gate:
                     fcntl.flock(gate, fcntl.LOCK_EX | fcntl.LOCK_NB)
                     fcntl.flock(gate, fcntl.LOCK_UN)
+                # flock belongs to the open file, so the runner and the gate it
+                # starts keep both locks until they have all exited.
+                session.held_locks = (lock.fileno(), execution.fileno())
                 session.worker()
         else:
             getattr(session, a.mode)()
