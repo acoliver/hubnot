@@ -377,13 +377,20 @@ func (b *limitedPolicyBuffer) Write(p []byte) (int, error) {
 	return b.buffer.Write(p)
 }
 
+// policyGitTimeout bounds one read-only policy Git command (diff-tree,
+// rev-parse, show, status, ls-files). These run in client commands only, never
+// in a server receive hook, so a long bound costs one command's wait. On a
+// loaded machine a large base..head diff-tree took longer than the earlier
+// 30 s and failed revises (board 119/2771, 133/2789).
+var policyGitTimeout = 10 * time.Minute
+
 func boundedPolicyGitOutput(gitDir string, limit int, arguments ...string) ([]byte, error) {
 	args := []string{"--no-replace-objects"}
 	if gitDir != "" {
 		args = append(args, "--git-dir="+gitDir)
 	}
 	args = append(args, arguments...)
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), policyGitTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Env = os.Environ()
